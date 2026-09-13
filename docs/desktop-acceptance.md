@@ -51,7 +51,9 @@ An authorization link printed by the daemon expires after ten minutes; the daemo
 
 Stop only the dev client — the pid from `SingletonLock`, or the `pnpm dev:desktop` process group. **Never touch `/Applications/Coflux.app` or its supervisor and worker**: killing those ends the owner's real terminals. Killing the dev Electron's main process leaves its helpers behind, and they keep the single-instance lock, so the next start exits immediately; clear them too.
 
-Leave the client running at handover. It is not a cleanup item — the reviewer is about to use it.
+**A dev daemon must be stopped, and it is easy to forget.** `COFLUX_HOME` isolates its data directory but **not** its loopback port: `pnpm dev:daemon` takes `127.0.0.1:8788`, the fixed local-gateway port the installed app's worker also needs. While a dev daemon holds it, the real app cannot open its local gateway, direct connections to this machine fail, and the sidebar paints this device with a red dot — a device that is online at the center but has no route to itself. The symptom looks like a networking or release defect and is neither. Check with `lsof -nP -iTCP:8788 -sTCP:LISTEN`: the pid should belong to a worker under `~/.coflux/desktop-runtimes/`, not to `target/debug/coflux-worker`. The app's worker claims the port within seconds of the squatter exiting and logs `local gateway listening port=8788`.
+
+Leave the dev client itself running at handover. It is not a cleanup item — the reviewer is about to use it.
 
 ## Handing over
 
