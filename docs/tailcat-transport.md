@@ -3,8 +3,8 @@
 Tailcat is the default remote transport on supported Desktop and Linux runtimes.
 The Go companion is included in release artifacts and Desktop bundles; no opt-in
 flag is required. The custom relay and WebRTC implementations have been retired.
-Local loopback remains available. Swift/iOS currently has only its local provider
-boundary and reports remote connections unavailable.
+Local loopback remains available. Swift/iOS connects through the same client
+protocol, with the Go client compiled into the app instead of spawned.
 
 Control protocol version 2 rejects obsolete clients and workers; DeviceEnvelope
 version 1, local grants, and supervisor semantics are unchanged. This source
@@ -27,6 +27,29 @@ filesystem API, subnet routing, or renderer access to its pipes. Logs never
 contain Tailcat addresses, private keys, grants, or upstream diagnostic output.
 The owner must spawn an absolute verified bundle path and close both pipes on
 logout, hard rejection, epoch replacement, or shutdown.
+
+## In-process client on iOS
+
+iOS may not spawn a helper, so `cmd/coflux-transport-ios` builds the same
+`internal/backend` boundary with `-buildmode=c-archive` and links it into the
+app. The pinned Tailcat version and the DERP region validation are therefore
+shared with every other client; only the delivery differs. This build needs
+`CGO_ENABLED=1` and an `-isysroot`/`-miphoneos-version-min` pair in both
+`CGO_CFLAGS` and `CGO_LDFLAGS`, resolving its SDK through `xcrun --sdk iphoneos`;
+it does not disturb the CGO-free helper build.
+
+The app is a connecting party only: it never serves, captures no system traffic,
+needs no NetworkExtension, and never prompts for VPN authorization, because the
+upstream library runs a userspace network stack and hands out plain TCP
+connections. There is no IPC layer — `prepare`, dial, close, drop and probe cross
+the C ABI as result codes, and each opened stream is handed back as one end of a
+unix socketpair whose bytes Go forwards verbatim. The client therefore does its
+own `payloadLength:u32 || payload` record framing, and the channel handshake,
+including the single-use proof key, stays in Swift and never enters Go.
+
+The framework is local build output: `node scripts/build-ios-transport.mjs`
+produces it, it is gitignored, and CI never builds iOS. Bumping the Tailcat pin
+moves iOS too, so verify this cross-build by hand when that happens.
 
 ## IPC version 1
 
@@ -231,6 +254,9 @@ third-party notices together. `pnpm build` does the same after package builds.
 explicit cross-target builds use the command in the delivery section.
 `pnpm dev:daemon` and `pnpm -C tests test` prepare debug helpers and stock DERP
 fixtures automatically. End users never install Go.
+`node scripts/build-ios-transport.mjs` builds the iOS c-archive into
+`apps/ios/Frameworks/CofluxTailcat.xcframework`; the Xcode app build requires it
+and it is not committed.
 
 The integration harness launches isolated stock DERP instances with temporary
 SAN certificates, ports, databases, and HOME directories. Native transport is
