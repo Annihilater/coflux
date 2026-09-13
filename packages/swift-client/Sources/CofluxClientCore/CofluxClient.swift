@@ -156,6 +156,7 @@ public final class CofluxClient {
         transport: any Transport,
         tokenStore: any TokenStore,
         localDeviceProvider: (any LocalDeviceTransportProvider)? = nil,
+        remoteDeviceProvider: (any RemoteDeviceTransportProvider)? = nil,
         logger: any ClientLogger = NoopClientLogger(),
         clock: any ClientClock = SystemClientClock(),
         jitter: any RetryJitterSource = SystemRetryJitterSource()
@@ -207,7 +208,7 @@ public final class CofluxClient {
                 self?.deviceTransports[daemonID] = relayHost == nil && rttMs == nil && mode == nil
                     ? nil : DeviceTransportInfo(relayHost: relayHost, rttMs: rttMs, mode: mode, detail: detail)
             }
-        ), localProvider: localDeviceProvider)
+        ), localProvider: localDeviceProvider, remoteProvider: remoteDeviceProvider)
         if let tokenReadError {
             reportLocalError("无法读取本机会话：\(Self.describeLocalError(tokenReadError))")
         }
@@ -310,6 +311,8 @@ public final class CofluxClient {
         status = .disconnected
         controlAuthenticated = false
         deviceRouter.setControlOnline(false)
+        // 通道关掉还不够：后台不保留任何原生 Tailcat 客户端，回前台整套重建。
+        deviceRouter.suspendRemoteTransport()
     }
 
     /// 回前台：无条件废弃旧连接重建，不探测旧 socket 活性（系统超时可达分钟级）。
