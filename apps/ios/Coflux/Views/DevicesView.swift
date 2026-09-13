@@ -97,10 +97,11 @@ struct DevicesView: View {
     private func thirdLine(_ daemon: Coflux_V1_DaemonInfo, transport: CofluxClient.DeviceTransportInfo?) -> some View {
         HStack(spacing: 8) {
             if daemon.online {
-                // Remote devices require the desktop client until iOS has a native provider.
+                // 路径是实测出来的：direct/relay 来自 Tailcat 的 disco 探测，
+                // 没有测量结果时如实说「未连接」，不冒充任何一种链路。
                 HStack(spacing: 4) {
-                    Image(systemName: "cloud.fill").font(.system(size: 9))
-                    Text(transport?.mode == "direct" ? "本机连接" : "远程连接暂不可用")
+                    Image(systemName: pathSymbol(transport?.mode)).font(.system(size: 9))
+                    Text(pathLabel(transport?.mode))
                 }
                 .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.mutedForeground)
@@ -120,6 +121,27 @@ struct DevicesView: View {
             }
         }
         .padding(.top, 2)
+    }
+
+    /// mode 的真相源是 DeviceRouter：direct/relay 为实测路径，unknown 表示通道已建成
+    /// 但还没测出路径，probing 是正在建连，offline/nil 是当前没有通道。
+    private func pathLabel(_ mode: String?) -> String {
+        switch mode {
+        case "direct": "直连"
+        case "relay": "DERP 中转"
+        case "unknown": "已连接"
+        case "probing": "连接中"
+        default: "未连接"
+        }
+    }
+
+    private func pathSymbol(_ mode: String?) -> String {
+        switch mode {
+        case "direct": "bolt.horizontal.fill"
+        case "relay": "arrow.triangle.swap"
+        case "probing": "ellipsis"
+        default: "cloud.fill"
+        }
     }
 
     private func platformSymbol(_ platform: String) -> String {
