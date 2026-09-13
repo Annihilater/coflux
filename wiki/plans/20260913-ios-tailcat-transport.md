@@ -187,9 +187,9 @@ port 43927, `MaxDevices = 16`). Nothing in this milestone reads or holds a proof
 key. Errors cross the boundary as codes or sanitized strings; addresses, keys
 and grants never appear in them.
 
-Validation: `go -C transport/tailcat test ./internal/...` -> exit 0; the iOS
-cross-build and c-archive emission commands below -> exit 0 with `.a` and `.h`
-produced.
+Validation: `CGO_ENABLED=0 go -C transport/tailcat test ./internal/...` -> exit
+0; the iOS cross-build and c-archive emission commands below -> exit 0 with
+`.a` and `.h` produced.
 
 ### Milestone 2: The Swift client can open a remote channel
 
@@ -271,6 +271,15 @@ Validation: running the script from a clean checkout -> exit 0 and an
   `CGO_ENABLED=0` (`AGENTS.md:29`); the c-archive requires `CGO_ENABLED=1` plus
   an `-isysroot`/`-miphoneos-version-min` pair in both `CGO_CFLAGS` and
   `CGO_LDFLAGS`. Do not disturb the existing helper build.
+- **Host cgo builds are broken on this machine; iOS cross-builds are not.**
+  Verified at baseline: `go test ./internal/...` with cgo enabled fails to link
+  because the Command Line Tools macOS SDK advertises an `arm64e.x1-macos`
+  architecture the active clang's tapi rejects as "unknown architecture"
+  (`internal/ipc` is pure Go and passes; `backend` and `helper` do not). With
+  `CGO_ENABLED=0` all three pass, which is also the project's documented build
+  mode for the helper (`AGENTS.md:29`). The iOS cross-build is unaffected — it
+  resolves its SDK through `xcrun --sdk iphoneos` from Xcode, not from the
+  Command Line Tools. Do not read a host-side cgo link failure as a code defect.
 - **The local Go is older than the module requires.** go 1.26.6 against
   `go 1.27.1` in `transport/tailcat/go.mod:3`; builds work only because
   `GOTOOLCHAIN` fetches the newer toolchain. A sandbox without network access
@@ -308,8 +317,8 @@ Out of scope:
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Go unit tests | `go -C transport/tailcat test ./internal/...` | exit 0 |
-| Go vet (host) | `go -C transport/tailcat vet ./...` | exit 0 |
+| Go unit tests | `CGO_ENABLED=0 go -C transport/tailcat test ./internal/...` | exit 0 |
+| Go vet (host) | `CGO_ENABLED=0 go -C transport/tailcat vet ./...` | exit 0 |
 | iOS cross-compile | `SDK=$(xcrun --sdk iphoneos --show-sdk-path); CLANG=$(xcrun --sdk iphoneos --find clang); GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$CLANG" CGO_CFLAGS="-isysroot $SDK -miphoneos-version-min=17.0 -arch arm64" CGO_LDFLAGS="-isysroot $SDK -miphoneos-version-min=17.0 -arch arm64" go -C transport/tailcat build ./...` | exit 0 |
 | c-archive emission | same environment with `-buildmode=c-archive -o <out>.a` on the new cmd package | exit 0, `.a` and `.h` produced |
 | Swift build | `swift build --package-path packages/swift-client` | exit 0 |
