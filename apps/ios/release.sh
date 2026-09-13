@@ -10,6 +10,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILD_NUMBER=$(git rev-list --count HEAD)
+
+# 原生传输框架不入库，归档前必须现构建，否则 xcodebuild 会在链接期才报缺文件。
+echo "==> build native transport framework"
+node ../../scripts/build-ios-transport.mjs
+
 WORK_DIR=$(mktemp -d)
 ARCHIVE_PATH="$WORK_DIR/Coflux.xcarchive"
 LOG="$WORK_DIR/xcodebuild.log"
