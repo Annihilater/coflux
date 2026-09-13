@@ -19,6 +19,7 @@
 - Execution: subagent opus (user decision at the departure check); verification and code review by the orchestrator
 - Stop after: implementation (autopilot chosen at the departure check)
 - Workspace: isolated — `.claude/worktrees/20260913-ios-tailcat-transport`, branch `dev/20260913-ios-tailcat-transport`, cut from main `0e31df00` with a clean tree
+- Current state: DONE on `dev/20260913-ios-tailcat-transport` (implementation `c6cee3a6`..`b03c003b`, no revision rounds). Verified by the orchestrator: `CGO_ENABLED=0 go test ./internal/...` and `go vet ./...` exit 0; `swift build` exit 0; `swift test` exit 0 with 93 tests (65 at baseline, 28 new); `node scripts/build-ios-transport.mjs` exit 0 producing a 45 MB `ios-arm64` static-library xcframework that `git status` does not see. The handshake was confirmed three ways independently — `crates/worker/src/tailcat_auth.rs:129-135`, the Swift implementation, and a separate HMAC computation — all agreeing on transcript and proof. The grant scopes the client demands match what `apps/server/src/tailcat-rendezvous.ts:9-10,69` actually issues for each lane. `apps/server`, `crates/`, `proto/` and `apps/desktop` have zero diff. Not done: merge to main, release, and the physical-device acceptance row below, which needs a deployed server and a real device.
 - Planned at: `0e31df00`, 2026-09-13
 
 ## Requirement
@@ -365,6 +366,23 @@ Out of scope:
 - The Tailcat version pin lives in `transport/tailcat/go.mod`. Bumping it now
   moves iOS too, and the iOS build is not covered by CI — verify the cross-build
   by hand when that pin changes.
+- **The proof key is zeroed only in its working copy.** `TailcatDeviceTransportProvider`
+  resets the bytes it holds, but Swift's `Data` is copy-on-write: while the
+  decoded grant still references the same buffer, the reset allocates a fresh
+  copy and clears that, leaving the original bytes to be freed without being
+  overwritten. It is never persisted and never logged, and the key is
+  single-use with a 30-second window that the worker consumes atomically, so
+  the residue is short-lived — but do not read the `defer` as a guarantee that
+  no copy survives.
+- **`coflux_tailcat_health` structurally reports 0 on a client.** `backend.Health`
+  is gated on the region installed by `Serve`, which a connect-only backend
+  never calls. The symbol exists for parity with the helper's operation and is
+  deliberately not wired into Swift; wiring it would render a false "DERP
+  unreachable".
+- **The iOS framework build emits no notices file.** Release archives and
+  Desktop bundles carry third-party notices for the Go dependency graph; the
+  app now links that same graph with no equivalent surface. Worth closing
+  before any wider distribution.
 - The app's binary size and cold-start cost were never measured against this
   library. If either becomes a complaint, measure before redesigning: the
   userspace stack is the reason no VPN prompt exists, and that tradeoff was
