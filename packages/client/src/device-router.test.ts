@@ -1536,20 +1536,35 @@ test("中心授权 hard revoke 时 active native channel 立即失效，不等�
 });
 
 
-test("native sidebar measurement stays idle until actual demand", async () => {
+// 与前面几条同为 plan 20260914 的新契约，但走的是 nativeRemote 那条装配（其余用例用默认
+// harness），所以单独留着：侧栏测量在 native 路径上同样持有一条真连接，进出设备只是复用它。
+test("native sidebar measurement holds one remote lane that interactive demand reuses", async () => {
   const adapter = new DeferredPairAdapter();
   const h = harness(adapter, new FakeClock(), true);
   h.router.setControlOnline(true);
   const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush(); h.clock.advance(60_000); await flush();
-  assert.equal(adapter.opens.length, 0);
+  await flush();
+  // 未选中的设备也要有读数，所以必须真拨一条 remote——但不碰 loopback、不配对。
+  assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
+  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
+  assert.equal(adapter.pairCalls, 0);
+  const active = latestOpen(adapter, "remote"); adapter.resolve(active); await flush();
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
+  // 进入这台设备：复用测量已经建好的那条 lane，不再多开一条（没有 grant，loopback 也开不出来）。
   const releaseDemand = h.router.retainDevice("daemon-1");
   await flush(); h.clock.advance(250); await flush();
-  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
   assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
-  const active = latestOpen(adapter, "remote"); adapter.resolve(active); await flush();
-  releaseDemand(); await flush(); assert.equal(active.closed, true);
+  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
+
+  // 离开这台设备：测量需求还在，lane 必须活着，否则回到侧栏读数就没了。
+  releaseDemand(); await flush();
+  assert.equal(active.closed, false, "失去交互需求后测量仍要持有这条 lane");
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
+  releaseMeasure(); await flush();
+  assert.equal(active.closed, true, "最后一份需求释放后才收连接");
   const count = adapter.opens.length; h.clock.advance(60_000); await flush();
-  assert.equal(adapter.opens.length, count, "idle measurement must not reconnect native devices");
-  releaseMeasure(); h.router.destroy();
+  assert.equal(adapter.opens.length, count, "没有任何需求的设备不得重连");
+  h.router.destroy();
 });
