@@ -579,6 +579,17 @@ fn write_pty_input(writer: &mut dyn Write, data: &[u8]) -> Result<(), PtyWriteFa
     Ok(())
 }
 
+/// PTY master 上的 `EIO` 只有一个含义：slave 端已经没有任何打开的 fd——shell 没了。关闭终端
+/// 本来就要 kill child，此刻还在路上的字节（xterm.js 自动回答的 DA/focus 报告之类，不是用户
+/// 击键）因此必然写失败。这是 session 生命周期的正常收尾，不是要弹给用户的错误。
+///
+/// 只认 `written == 0`：partial write 已经把前缀交给子进程，byte-stream 完整性不能再证明，
+/// 不因为处在收尾窗口就放宽。Rust 没有稳定的 `ErrorKind` 对应 `EIO`（落在 unstable 的
+/// `Uncategorized`），所以只能比较 raw errno。
+fn is_teardown_write_failure(failure: &PtyWriteFailure) -> bool {
+    failure.written == 0 && failure.error.raw_os_error() == Some(libc::EIO)
+}
+
 type SessionHandle = Arc<Mutex<Session>>;
 
 pub struct Sessions {
@@ -1018,6 +1029,22 @@ impl Sessions {
                             }
                         }
                     }
+                    // 关闭终端的收尾窗口：child 被 kill 后 slave fd 全没了，仍在路上的字节
+                    // 必然拿到 EIO。只写一行日志，不向 client 发 device error。
+                    Err(failure) if is_teardown_write_failure(&failure) => {
+                        logln!(
+                            "[supervisor] PTY input 落在 session 收尾窗口（slave 端已关闭）session={session_id} seq={} bytes={length}: {}",
+                            input.input_seq,
+                            failure.error
+                        );
+                        // EIO 只证明 slave fd 没了，不证明进程已退出；照旧 kill，否则可能留下
+                        // 一个活着却永远收不到输入的终端。
+                        let _ = session.lock().unwrap().child.kill();
+                        // 不调用 fail_input：它会存下 input_failure，使该 session 之后的每一条
+                        // input 都带回同一个错误码；也不回滚 reservation（cancel 只弹队尾，且会
+                        // 把下一条 input 变成 input_seq_gap）。reservation 随 session 一起析构。
+                        break;
+                    }
                     Err(failure) => {
                         let code = if failure.written == 0 {
                             "pty_write_failed"
@@ -1065,6 +1092,34 @@ impl Sessions {
                 }
             }
         });
+    }
+
+    /// 测试专用：把一个活 session 的 input 队列换成新的一条，让 PTY write 失败与"writer 已
+    /// 停止"两条收尾路径可以从外部观察。`writer` 为 `Some` 时按与生产完全相同的方式起一个
+    /// writer 线程（只是 writer 被注入）；为 `None` 时直接丢掉 receiver，等价于 writer 线程
+    /// 已经退出。旧 sender 随旧 InputQueue 析构，原 writer 线程读到通道关闭后自然结束。
+    #[cfg(test)]
+    fn rewire_input_writer_for_test(
+        self: &Arc<Self>,
+        session_id: &str,
+        writer: Option<Box<dyn Write + Send>>,
+    ) {
+        let session = self.get(session_id).expect("session 应仍在 map 中");
+        let (queue, receiver) = InputQueue::new();
+        let pending_records = queue.pending_records.clone();
+        let pending_bytes = queue.pending_bytes.clone();
+        session.lock().unwrap().input = queue;
+        match writer {
+            Some(writer) => self.spawn_input_writer(
+                session_id.to_string(),
+                Arc::downgrade(&session),
+                writer,
+                receiver,
+                pending_records,
+                pending_bytes,
+            ),
+            None => drop(receiver),
+        }
     }
 
     fn spawn_reader(
@@ -1627,12 +1682,17 @@ impl Sessions {
 
     fn device_input(&self, channel_id: &str, request: DevicePtyInput) {
         let Some(session) = self.get(&request.session_id) else {
-            return self.send_device_error(
-                channel_id,
-                Some(request.request_id),
-                "session_not_found",
-                "session 不存在或已退出",
+            // reader 的退出处理已经把 session 摘出 map：这条 input 撞上的是关闭终端的收尾窗口
+            // （多半是终端自己发出的自动回复），不是用户该看到的错误。client 没有人在等 input
+            // 应答，retained input 由 sessionExited 释放。只有 device_input 这一处静默，
+            // attach/stop/snapshot/resize 的 session_not_found 仍回答调用方的真实提问。
+            logln!(
+                "[supervisor] PTY input 落在 session 收尾窗口（session 已退出）session={} seq={} bytes={}",
+                request.session_id,
+                request.input_seq,
+                request.data.len()
             );
+            return;
         };
         if request.data.len() > PTY_INPUT_QUEUE_BYTES {
             return self.send_device_error(
@@ -1644,6 +1704,7 @@ impl Sessions {
         }
         let request_id = request.request_id;
         let session_id = request.session_id;
+        let input_bytes = request.data.len();
         let mut locked = session.lock().unwrap();
         let result = match locked.state.admit_input(
             channel_id,
@@ -1667,7 +1728,20 @@ impl Sessions {
                 };
                 match locked.input.try_send(queued) {
                     Ok(()) => Ok(None),
-                    Err(queue_error) => {
+                    // writer 线程只在 session 终止路径上退出，队列断开按构造就等于"这个 session
+                    // 正在消失"。与 writer 侧收尾分支一样只记日志：reservation 原样留着，既不
+                    // fail_input（会封死该 session 之后的每条 input），也不 cancel（只弹队尾，
+                    // 而且会把下一条 input 变成 input_seq_gap，触发 client 重投整段 retained
+                    // input）。留着的 reservation 是惰性的：后续 input 照常 admit 后再次静默，
+                    // 同 seq 重投走 Pending，整个 SessionState 随 session 一起析构。
+                    Err(InputQueueError::Disconnected) => {
+                        logln!(
+                            "[supervisor] PTY input 落在 session 收尾窗口（writer 已停止）session={session_id} seq={} bytes={input_bytes}",
+                            request.input_seq
+                        );
+                        Ok(None)
+                    }
+                    Err(InputQueueError::Full) => {
                         if !locked
                             .state
                             .cancel_input_reservation(&client_instance_id, request.input_seq)
@@ -1677,19 +1751,12 @@ impl Sessions {
                                 request.input_seq
                             );
                         }
-                        let error = match queue_error {
-                            InputQueueError::Full => ControlError {
-                                code: "pty_input_backpressure",
-                                message: format!(
-                                    "PTY input queue 已满（最多 {PTY_INPUT_QUEUE_RECORDS} 条/{PTY_INPUT_QUEUE_BYTES} 字节），请重试"
-                                ),
-                            },
-                            InputQueueError::Disconnected => ControlError {
-                                code: "pty_input_unavailable",
-                                message: "PTY input writer 已停止".into(),
-                            },
-                        };
-                        Err(error)
+                        Err(ControlError {
+                            code: "pty_input_backpressure",
+                            message: format!(
+                                "PTY input queue 已满（最多 {PTY_INPUT_QUEUE_RECORDS} 条/{PTY_INPUT_QUEUE_BYTES} 字节），请重试"
+                            ),
+                        })
                     }
                 }
             }
@@ -1955,6 +2022,7 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
@@ -2025,6 +2093,160 @@ mod tests {
         let declared = u32::from_be_bytes(record[..4].try_into().unwrap()) as usize;
         assert_eq!(declared, record.len() - 4);
         serde_json::from_slice(&record[4..]).expect("lifecycle control 应是合法 JSON")
+    }
+
+    /// 每次 write 都以固定 errno 失败，且一个字节都没写出去（`written == 0`）。
+    struct AlwaysFailingWriter(i32);
+
+    impl Write for AlwaysFailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(self.0))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn device_payload_of(record: &[u8]) -> Option<device_envelope::Payload> {
+        let body = record.get(4..)?;
+        let DataFrame::Device { data, .. } = coflux_protocol::decode_frame(body)? else {
+            return None;
+        };
+        decode_device_envelope(&data)?.payload
+    }
+
+    fn error_codes(payloads: &[device_envelope::Payload]) -> Vec<&str> {
+        payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                device_envelope::Payload::Error(error) => Some(error.code.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn receive_device_payload(receiver: &Receiver<Vec<u8>>) -> device_envelope::Payload {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("应在超时前收到 device frame");
+            let record = receiver
+                .recv_timeout(remaining)
+                .expect("应收到 device frame");
+            if let Some(payload) = device_payload_of(&record) {
+                return payload;
+            }
+        }
+    }
+
+    fn drain_device_payloads(
+        receiver: &Receiver<Vec<u8>>,
+        window: Duration,
+    ) -> Vec<device_envelope::Payload> {
+        let deadline = Instant::now() + window;
+        let mut payloads = Vec::new();
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(record) = receiver.recv_timeout(remaining) else {
+                break;
+            };
+            if let Some(payload) = device_payload_of(&record) {
+                payloads.push(payload);
+            }
+        }
+        payloads
+    }
+
+    /// 一直读到该 session 的 SessionExit control，再多收一小段尾巴；沿途收集所有 device
+    /// payload。写失败分支里的 device error 发生在 kill 之后、reader 确认退出之前，所以这段
+    /// 窗口必然覆盖它——"没有 error"因此是真结论，不是抢跑。
+    fn drain_through_session_exit(
+        receiver: &Receiver<Vec<u8>>,
+        session_id: &str,
+    ) -> Vec<device_envelope::Payload> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut payloads = Vec::new();
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("session 应在超时前完成收尾");
+            let record = receiver
+                .recv_timeout(remaining)
+                .expect("应收到 session 收尾记录");
+            if let Some(payload) = device_payload_of(&record) {
+                payloads.push(payload);
+                continue;
+            }
+            if let Ok(SupervisorToWorker::SessionExit {
+                session_id: exited, ..
+            }) = serde_json::from_slice::<SupervisorToWorker>(&record[4..])
+            {
+                if exited == session_id {
+                    break;
+                }
+            }
+        }
+        payloads.extend(drain_device_payloads(receiver, Duration::from_millis(200)));
+        payloads
+    }
+
+    /// 起一个真 PTY session（`/bin/cat` 不产出任何自发输出），并 attach 出 holder epoch。
+    fn live_session_for_test(
+        session_id: &str,
+    ) -> (Arc<Sessions>, Receiver<Vec<u8>>, SessionHandle, u64) {
+        let outbound = Outbound::with_limits(64, usize::MAX);
+        let (sender, receiver) = sync_channel(64);
+        outbound.connect_sender(1, sender);
+        let sessions = Sessions::new(outbound, "/bin/cat".into(), "/tmp".into(), 0);
+        sessions
+            .create_session(
+                session_id.into(),
+                format!("task-{session_id}"),
+                "/tmp".into(),
+                String::new(),
+                80,
+                24,
+                SessionContext::default(),
+            )
+            .expect("session 应创建成功");
+        let handle = sessions.get(session_id).expect("session 应在 map 中");
+        sessions.device_attach(
+            "channel-a",
+            DeviceSessionAttach {
+                request_id: format!("attach-{session_id}"),
+                session_id: session_id.into(),
+                client_instance_id: "client-a".into(),
+                transport_generation: 1,
+                cols: 80,
+                rows: 24,
+                resume_from_seq: None,
+            },
+        );
+        let holder_epoch = loop {
+            if let device_envelope::Payload::SessionAttached(attached) =
+                receive_device_payload(&receiver)
+            {
+                break attached.holder_epoch;
+            }
+        };
+        (sessions, receiver, handle, holder_epoch)
+    }
+
+    fn input_request(
+        request_id: &str,
+        session_id: &str,
+        holder_epoch: u64,
+        input_seq: u64,
+        data: &[u8],
+    ) -> DevicePtyInput {
+        DevicePtyInput {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            holder_epoch,
+            input_seq,
+            data: data.to_vec(),
+        }
     }
 
     struct PartialThenFailWriter {
@@ -2278,6 +2500,131 @@ mod tests {
         assert_eq!(
             writer.bytes, b"th",
             "fatal reservation 不得从 byte 0 重投已经写过的前缀"
+        );
+    }
+
+    #[test]
+    fn teardown_eio_write_is_silent_and_leaves_session_input_admissible() {
+        let (sessions, receiver, handle, epoch) = live_session_for_test("teardown-eio");
+        // 关闭终端＝child 被 kill、slave fd 全部关闭；此后任何 master write 都是 EIO。
+        // 在路上的这几个字节是 xterm.js 自己的自动回复（focus-out `\x1b[O`），不是用户击键。
+        sessions.rewire_input_writer_for_test(
+            "teardown-eio",
+            Some(Box::new(AlwaysFailingWriter(libc::EIO))),
+        );
+        sessions.device_input(
+            "channel-a",
+            input_request("input-1", "teardown-eio", epoch, 1, b"\x1b[O"),
+        );
+
+        let payloads = drain_through_session_exit(&receiver, "teardown-eio");
+        assert!(
+            error_codes(&payloads).is_empty(),
+            "收尾窗口的 EIO 写失败不得给 client 发任何 device error：{:?}",
+            error_codes(&payloads)
+        );
+        assert!(
+            payloads
+                .iter()
+                .any(|payload| matches!(payload, device_envelope::Payload::SessionExited(_))),
+            "session 仍必须照常退出并通知 client"
+        );
+        // 没有存下 input_failure：同一 session 的后续 input 仍照常 admit。reservation 留在
+        // deque 里，所以下一条期望的 seq 仍是 2，不会退化成 input_seq_gap。
+        let admitted = handle
+            .lock()
+            .unwrap()
+            .state
+            .admit_input("channel-a", "input-2", epoch, 2, b"x".to_vec())
+            .expect("收尾的 benign 写失败不得封死这个 session 的 input");
+        assert!(matches!(admitted, InputAdmission::Enqueue { .. }));
+    }
+
+    #[test]
+    fn non_eio_write_failure_still_reports_and_seals_session_input() {
+        let (sessions, receiver, handle, epoch) = live_session_for_test("write-fatal");
+        // 坏描述符不是收尾，是真故障：必须照旧上报，并封死这个 session 的 input。
+        sessions.rewire_input_writer_for_test(
+            "write-fatal",
+            Some(Box::new(AlwaysFailingWriter(libc::EBADF))),
+        );
+        sessions.device_input(
+            "channel-a",
+            input_request("input-1", "write-fatal", epoch, 1, b"ls\r"),
+        );
+
+        let payloads = drain_through_session_exit(&receiver, "write-fatal");
+        assert_eq!(
+            error_codes(&payloads),
+            vec!["pty_write_failed"],
+            "非 EIO 的写失败必须仍然报给 client"
+        );
+        let refused = handle
+            .lock()
+            .unwrap()
+            .state
+            .admit_input("channel-a", "input-2", epoch, 2, b"x".to_vec())
+            .expect_err("真故障仍必须封死这个 session 的 input");
+        assert_eq!(refused.code, "pty_write_failed");
+    }
+
+    #[test]
+    fn input_after_writer_stopped_is_silent_and_keeps_admitting() {
+        let (sessions, receiver, handle, epoch) = live_session_for_test("writer-stopped");
+        // writer 线程只在 session 终止路径上退出：队列断开按构造就是"这个 session 正在消失"。
+        sessions.rewire_input_writer_for_test("writer-stopped", None);
+
+        for (request_id, seq, data) in [
+            ("input-1", 1, b"\x1b[O".as_slice()),
+            // 后续 input 仍照常 admit（没有 input_failure、也没有因回滚 reservation 造成的
+            // input_seq_gap），并同样静默。
+            ("input-2", 2, b"\x1b[O".as_slice()),
+            // 同一 seq 的重投走 Pending，一样不回任何东西。
+            ("input-1-retry", 1, b"\x1b[O".as_slice()),
+        ] {
+            sessions.device_input(
+                "channel-a",
+                input_request(request_id, "writer-stopped", epoch, seq, data),
+            );
+            let payloads = drain_device_payloads(&receiver, Duration::from_millis(200));
+            assert!(
+                error_codes(&payloads).is_empty(),
+                "writer 已停止时的 input 不得产生 device error：{:?}",
+                error_codes(&payloads)
+            );
+            assert!(
+                !payloads
+                    .iter()
+                    .any(|payload| matches!(payload, device_envelope::Payload::PtyInputAck(_))),
+                "没有写进 PTY 的 input 也不得伪造 ACK"
+            );
+        }
+        assert!(
+            sessions.get("writer-stopped").is_some(),
+            "静默丢弃 input 不得连带终止 session"
+        );
+        let _ = handle.lock().unwrap().child.kill();
+    }
+
+    #[test]
+    fn input_for_already_exited_session_is_silent() {
+        let (sessions, receiver, handle, epoch) = live_session_for_test("already-exited");
+        let _ = handle.lock().unwrap().child.kill();
+        drain_through_session_exit(&receiver, "already-exited");
+        assert!(
+            sessions.get("already-exited").is_none(),
+            "reader 的退出处理应已把 session 摘出 map"
+        );
+
+        sessions.device_input(
+            "channel-a",
+            input_request("input-1", "already-exited", epoch, 1, b"\x1b[O"),
+        );
+        let payloads = drain_device_payloads(&receiver, Duration::from_millis(200));
+        assert!(
+            error_codes(&payloads).is_empty(),
+            "session 退出后落下的 input 不得产生 device error：{:?}",
+            error_codes(&payloads)
         );
     }
 
