@@ -27,7 +27,7 @@ struct DirWorkspaceTests {
             workspace(id: "w-c", daemonID: "d1", projectID: "", createdAt: 100),
         ]
         #expect(canonicalDirWorkspace(daemonID: "d1", in: list)?.id == "w-a")
-        #expect(canonicalDirWorkspace(daemonID: "d1", in: list.reversed())?.id == "w-a")
+        #expect(canonicalDirWorkspace(daemonID: "d1", in: Array(list.reversed()))?.id == "w-a")
     }
 
     @Test func canonicalIgnoresProjectWorkspacesAndOtherDevices() {
