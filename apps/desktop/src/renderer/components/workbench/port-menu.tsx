@@ -30,6 +30,7 @@ export function PortMenu({ client, workspaceId }: { client: CofluxClient; worksp
     menuWidth={220}
     hasChevron={false}
     placement="below"
+    alignment="end"
     button={{
       ref: anchorRef,
       label: `端口转发，${count} 个端口`,

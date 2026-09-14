@@ -61,6 +61,7 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
       menuWidth={320}
       hasChevron={false}
       placement="below"
+      alignment="end"
       button={{
         ref: anchorRef,
         label: `通知中心，${inbox.unreadCount} 条未读`,
