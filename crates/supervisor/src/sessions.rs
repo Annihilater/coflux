@@ -1094,32 +1094,72 @@ impl Sessions {
         });
     }
 
-    /// 测试专用：把一个活 session 的 input 队列换成新的一条，让 PTY write 失败与"writer 已
-    /// 停止"两条收尾路径可以从外部观察。`writer` 为 `Some` 时按与生产完全相同的方式起一个
-    /// writer 线程（只是 writer 被注入）；为 `None` 时直接丢掉 receiver，等价于 writer 线程
-    /// 已经退出。旧 sender 随旧 InputQueue 析构，原 writer 线程读到通道关闭后自然结束。
+    /// 测试专用：起一个真 PTY + 真子进程 + 真 reader 的 session，但 PTY 写端由调用方注入，
+    /// **从不调用 `master.take_writer()`**。这是刻意的：portable_pty 的 `UnixMasterWriter`
+    /// 在 Drop 时会主动往 PTY 里写 `\n` + EOT，谁持有它、谁的线程一结束就等于替子进程按了
+    /// Ctrl-D，子进程随之退出、reader 把 session 摘出 map——收尾路径的观察会被这个副作用
+    /// 污染（"session 是被我们测的分支 kill 掉的"就不再成立）。整条路径上没有 master writer，
+    /// 子进程便只在显式 `kill()` 时死去。
+    ///
+    /// `writer` 为 `Some` 时按与生产完全一致的方式起 writer 线程（只是 writer 被注入）；为
+    /// `None` 时直接丢掉 input 队列的 receiver，等价于 writer 线程已经停止。
     #[cfg(test)]
-    fn rewire_input_writer_for_test(
+    fn create_session_for_test(
         self: &Arc<Self>,
         session_id: &str,
         writer: Option<Box<dyn Write + Send>>,
-    ) {
-        let session = self.get(session_id).expect("session 应仍在 map 中");
-        let (queue, receiver) = InputQueue::new();
-        let pending_records = queue.pending_records.clone();
-        let pending_bytes = queue.pending_bytes.clone();
-        session.lock().unwrap().input = queue;
+    ) -> SessionHandle {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty 应成功");
+        let mut command = CommandBuilder::new(&self.shell);
+        command.cwd(&self.home);
+        // portable_pty 会先 env_clear 再套用这里设的变量；HOME 显式给出，免得回落到 passwd 库。
+        command.env("HOME", &self.home);
+        command.env("TERM", "xterm-256color");
+        let child = pair.slave.spawn_command(command).expect("spawn 应成功");
+        drop(pair.slave);
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .expect("clone_reader 应成功");
+        let (input, input_receiver) = InputQueue::new();
+        let pending_records = input.pending_records.clone();
+        let pending_bytes = input.pending_bytes.clone();
+        let pid = child.process_id().map_or(-1, |pid| pid as i32);
+        let session = Arc::new(Mutex::new(Session {
+            master: pair.master,
+            input,
+            child,
+            task_id: format!("task-{session_id}"),
+            cwd: self.home.clone(),
+            pid,
+            started_at: now_ms(),
+            state: SessionState::new(24, 80, self.history_line_limit),
+        }));
+        self.map
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), Arc::clone(&session));
+        self.bump_snapshot_epoch();
         match writer {
             Some(writer) => self.spawn_input_writer(
                 session_id.to_string(),
                 Arc::downgrade(&session),
                 writer,
-                receiver,
+                input_receiver,
                 pending_records,
                 pending_bytes,
             ),
-            None => drop(receiver),
+            None => drop(input_receiver),
         }
+        self.spawn_reader(session_id.to_string(), Arc::clone(&session), reader);
+        session
     }
 
     fn spawn_reader(
@@ -2191,26 +2231,17 @@ mod tests {
         payloads
     }
 
-    /// 起一个真 PTY session（`/bin/cat` 不产出任何自发输出），并 attach 出 holder epoch。
+    /// 起一个真 PTY session（`/bin/cat` 不主动产出任何输出，且只在被 kill 时退出——见
+    /// `create_session_for_test` 关于 master writer 的说明），并 attach 出 holder epoch。
     fn live_session_for_test(
         session_id: &str,
+        writer: Option<Box<dyn Write + Send>>,
     ) -> (Arc<Sessions>, Receiver<Vec<u8>>, SessionHandle, u64) {
         let outbound = Outbound::with_limits(64, usize::MAX);
         let (sender, receiver) = sync_channel(64);
         outbound.connect_sender(1, sender);
         let sessions = Sessions::new(outbound, "/bin/cat".into(), "/tmp".into(), 0);
-        sessions
-            .create_session(
-                session_id.into(),
-                format!("task-{session_id}"),
-                "/tmp".into(),
-                String::new(),
-                80,
-                24,
-                SessionContext::default(),
-            )
-            .expect("session 应创建成功");
-        let handle = sessions.get(session_id).expect("session 应在 map 中");
+        let handle = sessions.create_session_for_test(session_id, writer);
         sessions.device_attach(
             "channel-a",
             DeviceSessionAttach {
@@ -2505,18 +2536,17 @@ mod tests {
 
     #[test]
     fn teardown_eio_write_is_silent_and_leaves_session_input_admissible() {
-        let (sessions, receiver, handle, epoch) = live_session_for_test("teardown-eio");
         // 关闭终端＝child 被 kill、slave fd 全部关闭；此后任何 master write 都是 EIO。
         // 在路上的这几个字节是 xterm.js 自己的自动回复（focus-out `\x1b[O`），不是用户击键。
-        sessions.rewire_input_writer_for_test(
-            "teardown-eio",
-            Some(Box::new(AlwaysFailingWriter(libc::EIO))),
-        );
+        let (sessions, receiver, handle, epoch) =
+            live_session_for_test("teardown-eio", Some(Box::new(AlwaysFailingWriter(libc::EIO))));
         sessions.device_input(
             "channel-a",
             input_request("input-1", "teardown-eio", epoch, 1, b"\x1b[O"),
         );
 
+        // 这条 session 只可能被收尾分支自己的 kill() 杀掉（harness 全程没有 master writer，
+        // 不会替子进程按 Ctrl-D），所以"等到 SessionExit"本身就证明收尾分支跑过了。
         let payloads = drain_through_session_exit(&receiver, "teardown-eio");
         assert!(
             error_codes(&payloads).is_empty(),
@@ -2542,9 +2572,8 @@ mod tests {
 
     #[test]
     fn non_eio_write_failure_still_reports_and_seals_session_input() {
-        let (sessions, receiver, handle, epoch) = live_session_for_test("write-fatal");
         // 坏描述符不是收尾，是真故障：必须照旧上报，并封死这个 session 的 input。
-        sessions.rewire_input_writer_for_test(
+        let (sessions, receiver, handle, epoch) = live_session_for_test(
             "write-fatal",
             Some(Box::new(AlwaysFailingWriter(libc::EBADF))),
         );
@@ -2570,9 +2599,9 @@ mod tests {
 
     #[test]
     fn input_after_writer_stopped_is_silent_and_keeps_admitting() {
-        let (sessions, receiver, handle, epoch) = live_session_for_test("writer-stopped");
         // writer 线程只在 session 终止路径上退出：队列断开按构造就是"这个 session 正在消失"。
-        sessions.rewire_input_writer_for_test("writer-stopped", None);
+        // 这里直接没有 writer 线程（input 队列的 receiver 已丢弃），子进程仍活着。
+        let (sessions, receiver, handle, epoch) = live_session_for_test("writer-stopped", None);
 
         for (request_id, seq, data) in [
             ("input-1", 1, b"\x1b[O".as_slice()),
@@ -2608,7 +2637,7 @@ mod tests {
 
     #[test]
     fn input_for_already_exited_session_is_silent() {
-        let (sessions, receiver, handle, epoch) = live_session_for_test("already-exited");
+        let (sessions, receiver, handle, epoch) = live_session_for_test("already-exited", None);
         let _ = handle.lock().unwrap().child.kill();
         drain_through_session_exit(&receiver, "already-exited");
         assert!(
