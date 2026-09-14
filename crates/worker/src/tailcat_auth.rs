@@ -8,6 +8,13 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_GRANTS: usize = 256;
 const MAX_TTL_MS: u64 = 30_000;
+/// Clock tolerance on top of the TTL ceiling. Central stamps `expires_at` at exactly
+/// `MAX_TTL_MS`, so a daemon whose clock trails the center by more than the delivery
+/// latency sees `expires_at - now` exceed the ceiling and rejects every grant — a few
+/// milliseconds of drift is enough. That failure is silent and does not rotate the
+/// serving epoch, so the device refuses all remote connections until its clock moves.
+/// The ceiling exists to reject implausibly long validity, not to police clock drift.
+const CLOCK_SKEW_TOLERANCE_MS: u64 = 5_000;
 const DOMAIN: &[u8] = b"coflux-tailcat-channel-v1\0";
 
 pub struct Grants {
@@ -42,7 +49,7 @@ impl Grants {
             || grant.transport_generation == 0
             || grant.proof_key.len() != 32
             || grant.expires_at <= now
-            || grant.expires_at - now > MAX_TTL_MS
+            || grant.expires_at - now > MAX_TTL_MS + CLOCK_SKEW_TOLERANCE_MS
             || grant.scopes.is_empty()
             || grant.scopes.len() > 4
             || grant.scopes.iter().any(|s| !(1..=4).contains(s))
@@ -216,6 +223,20 @@ mod tests {
         g.transport_generation = 2;
         s.install(g, 1000).unwrap();
         assert!(s.install(grant(), 1000).is_err());
+    }
+    #[test]
+    fn tolerates_clock_drift_but_still_caps_validity() {
+        // Central stamps exactly MAX_TTL_MS ahead, so a daemon clock trailing the
+        // center pushes `expires_at - now` just past the ceiling. Rejecting that made
+        // the device refuse every remote connection until its clock moved.
+        let mut drifted = grant();
+        drifted.expires_at = 1000 + MAX_TTL_MS + 16;
+        assert!(store().install(drifted, 1000).is_ok());
+
+        // An implausibly long validity is still refused.
+        let mut excessive = grant();
+        excessive.expires_at = 1000 + MAX_TTL_MS + CLOCK_SKEW_TOLERANCE_MS + 1;
+        assert!(store().install(excessive, 1000).is_err());
     }
     #[test]
     fn checks_expiry_at_consumption_and_revocation() {
