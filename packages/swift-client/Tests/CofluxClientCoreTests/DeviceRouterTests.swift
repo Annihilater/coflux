@@ -63,6 +63,7 @@ final class DeviceHarness {
     private(set) var router: DeviceRouter!
 
     init(localProvider: (any LocalDeviceTransportProvider)? = nil,
+         remoteProvider: (any RemoteDeviceTransportProvider)? = nil,
          heartbeatInterval: Duration = .seconds(15), heartbeatTimeout: Duration = .seconds(5),
          controlGraceDuration: Duration = .seconds(15)) {
         router = DeviceRouter(
@@ -79,7 +80,9 @@ final class DeviceHarness {
                 onInputBlocked: { [weak self] sessionID, isBlocked in self?.blocked.append((sessionID, isBlocked)) },
                 onDeviceTransport: { [weak self] daemonID, relayHost, rttMs, mode, detail in self?.transportEvents.append((daemonID, relayHost, rttMs)); self?.transportModes.append(mode); self?.transportDetails.append(detail) }
             ),
-            localProvider: localProvider ?? controlledLocal,
+            // 注入远端 provider 时不再兜底本机 provider：远端路径必须独立可测。
+            localProvider: remoteProvider != nil ? localProvider : (localProvider ?? controlledLocal),
+            remoteProvider: remoteProvider,
             heartbeatInterval: heartbeatInterval, heartbeatTimeout: heartbeatTimeout, controlGraceDuration: controlGraceDuration,
             now: { [weak self] in self?.nowMS ?? 0 }
         )

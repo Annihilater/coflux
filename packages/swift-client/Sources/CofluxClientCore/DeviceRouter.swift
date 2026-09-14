@@ -55,6 +55,8 @@ final class DeviceRouter {
     // Shared Device protocol timing and bounded recovery.
     private static let controlRequestTimeout: Duration = .seconds(10)
     private static let deviceRequestTimeout: Duration = .seconds(20)
+    /// 中心 grant 往返要经 daemon 安装回执，中心自身窗口 30s（tailcat-rendezvous.ts）。
+    private static let tailcatGrantTimeout: Duration = .seconds(30)
     /// fsWrite 单独放宽（plan 071 决策）：蜂窝网络传数十 MB 文件在 20s 内大概率超时，
     /// 其余请求（TS 侧同为 20s，device-router.ts:38）不受影响。
     private static let fsWriteRequestTimeout: Duration = .seconds(60)
@@ -185,6 +187,9 @@ final class DeviceRouter {
         var detail = ""
         var rttMs: Double?
         var pingTask: Task<Void, Never>?
+        /// 远端通道的 Tailcat 路径复测：与 RTT 心跳同周期但互不替代——RTT 是应用层往返，
+        /// mode 是 disco 测到的路径（direct/DERP）。
+        var pathTask: Task<Void, Never>?
         var pendingPing: (id: String, generation: UInt64, startedAt: Double)?
         var heartbeatTimeoutTask: Task<Void, Never>?
         var heartbeatMisses = 0
@@ -199,6 +204,9 @@ final class DeviceRouter {
     }
 
     private let localProvider: (any LocalDeviceTransportProvider)?
+    private let remoteProvider: (any RemoteDeviceTransportProvider)?
+    /// 有任一 provider 才谈得上 Device 数据面；两者都没有的客户端一律直接报不可用。
+    private var hasTransportProvider: Bool { localProvider != nil || remoteProvider != nil }
     private var accountID: String?
     private var transportWaiters: [String: TransportControlWaiter] = [:]
     private let transport: any Transport
@@ -224,6 +232,7 @@ final class DeviceRouter {
         transport: any Transport,
         callbacks: DeviceRouterCallbacks,
         localProvider: (any LocalDeviceTransportProvider)? = nil,
+        remoteProvider: (any RemoteDeviceTransportProvider)? = nil,
         heartbeatInterval: Duration = .seconds(15),
         heartbeatTimeout: Duration = .seconds(5),
         controlGraceDuration: Duration = .seconds(15),
@@ -232,6 +241,7 @@ final class DeviceRouter {
         self.transport = transport
         self.callbacks = callbacks
         self.localProvider = localProvider
+        self.remoteProvider = remoteProvider
         self.now = now
         self.heartbeatInterval = heartbeatInterval
         self.heartbeatTimeout = heartbeatTimeout
@@ -247,6 +257,10 @@ final class DeviceRouter {
             completeTransportControl(result.requestID, payload: payload); return true
         case .localLeaseResult(let result):
             completeTransportControl(result.requestID, payload: payload); return true
+        case .deviceTailcatResult(let result):
+            completeTransportControl(result.channelID, payload: payload); return true
+        case .deviceTailcatClosed(let closed):
+            revokeRemoteChannel(closed.channelID); return true
         case .preparedDeviceOperation(let operation):
             executePrepared(operation)
             return true
@@ -258,6 +272,22 @@ final class DeviceRouter {
     private func clearControlGrace() {
         controlGraceTask?.cancel(); controlGraceTask = nil
         graceChannels.removeAll()
+    }
+
+    /// 中心撤销一条不透明通道（tailcat-rendezvous.ts removeChannel）。正在等 grant 的建连
+    /// 与已建成的通道都必须立刻收敛；通道 ID 每次尝试唯一，迟到的撤销不会误伤替代通道。
+    private func revokeRemoteChannel(_ channelID: String) {
+        if let waiter = transportWaiters.removeValue(forKey: channelID) {
+            waiter.timeout.cancel()
+            waiter.continuation.resume(throwing: DeviceRouteError("远程连接已被中心撤销", code: "channel_revoked"))
+        }
+        graceChannels.removeValue(forKey: channelID)
+        for route in routes.values {
+            for lane in [route.sessionLane, route.elevatedLane] {
+                guard let active = lane.active, !active.local, active.channelID == channelID else { continue }
+                loseChannel(route, active, reason: "远程连接已被中心撤销")
+            }
+        }
     }
 
     private func invalidateOnlineControl() {
@@ -335,6 +365,7 @@ final class DeviceRouter {
         controlGeneration += 1
         clearControlGrace()
         if let accountID { do { try localProvider?.clearGrants(accountID: accountID) } catch { callbacks.onError(error.localizedDescription) } }
+        remoteProvider?.closeAll()
         accountID = nil
         rejectTransportControl()
         for route in routes.values { closeRoute(route, reason: "Device router 已重置") }
@@ -346,10 +377,23 @@ final class DeviceRouter {
     /// 中心明确移除设备时撤销其全部本地路由需求，迟到的重连任务不能重新建立通道。
     func removeDaemon(_ daemonID: String) {
         if let route = routes.removeValue(forKey: daemonID) { closeRoute(route, reason: "设备已移除") }
+        remoteProvider?.dropDevice(daemonID: daemonID)
         if let accountID {
             do { try localProvider?.removeGrant(daemonID: daemonID, accountID: accountID) }
             catch { callbacks.onError(error.localizedDescription) }
         }
+    }
+
+    /// 进后台（plan 044 生命周期）：控制面已断，除了关通道还要把 Go 侧的 Tailcat 客户端
+    /// 一并放掉——后台不保留任何 DERP 会话；回前台由控制面重连统一重新拉起。
+    func suspendRemoteTransport() {
+        guard remoteProvider != nil else { return }
+        clearControlGrace()
+        for route in routes.values {
+            closeLane(route, route.sessionLane, reason: "应用已进入后台")
+            closeLane(route, route.elevatedLane, reason: "应用已进入后台")
+        }
+        remoteProvider?.closeAll()
     }
 
     // MARK: - Session 对外操作（store.ts / device-router.ts 对外面）
@@ -491,7 +535,7 @@ final class DeviceRouter {
             callbacks.onError("server 下发了无效 prepared device operation")
             return
         }
-        guard localProvider != nil else {
+        guard hasTransportProvider else {
             callbacks.onError("当前客户端暂不支持远程设备连接，请使用桌面客户端")
             return
         }
@@ -612,6 +656,46 @@ final class DeviceRouter {
         }
     }
 
+    private func stopPathProbe(_ route: Route) {
+        route.pathTask?.cancel(); route.pathTask = nil
+    }
+
+    /// Tailcat 的路径会在建连后数秒内从 DERP 升级为直连，一次性探测会把 relay 永久钉死；
+    /// 与桌面同频（tailcat-transport.ts 的 15s probe）周期复测，通道换代即停。
+    private func startPathProbe(_ route: Route, _ channel: Channel) {
+        guard remoteProvider != nil, !channel.local, route.pathTask == nil else { return }
+        route.pathTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.destroyed, self.routes[route.daemonID] === route,
+                      route.sessionLane.active === channel, !channel.closed,
+                      let provider = self.remoteProvider else { return }
+                let path = await provider.probePath(daemonID: route.daemonID)
+                guard !Task.isCancelled, self.routes[route.daemonID] === route,
+                      route.sessionLane.active === channel else { return }
+                if let path { self.publishPath(route, path) }
+                do { try await Task.sleep(for: self.heartbeatInterval) } catch { return }
+            }
+        }
+    }
+
+    private func publishPath(_ route: Route, _ path: DeviceTransportPath) {
+        switch path.mode {
+        case "direct":
+            route.mode = "direct"
+            route.detail = "Device 数据经 Tailcat 直连，不经中转"
+        case "relay":
+            route.mode = "relay"
+            route.detail = "Device 数据经 DERP 中转"
+        default:
+            route.mode = "unknown"
+            route.detail = "Device 数据经 Tailcat 远程连接（路径待测）"
+        }
+        // DevicePing 的应用层往返更能代表体验，优先用它；还没测到就先拿 disco 的读数顶上，
+        // 不把它写回 route.rttMs——心跳的清零/补测逻辑只认自己的测量。
+        callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs ?? path.latencyMs,
+                                    route.mode, route.detail)
+    }
+
     /// 不登记 pendingRequests：探活不能自己构成 lane demand，妨碍空闲释放。
     private func pingOnce(_ route: Route) {
         guard !route.heartbeatUnsupported, route.pendingPing == nil,
@@ -683,7 +767,9 @@ final class DeviceRouter {
         if let attempt = lane.attempt { return try await attempt.value }
         guard controlOnline || (lane.kind == .session && localProvider != nil && accountID != nil) else { throw DeviceRouteError("中心 rendezvous 不可用") }
 
-        if lane.kind == .session { publishDiagnostic(route, mode: "probing", detail: "正在连接本机设备") }
+        if lane.kind == .session {
+            publishDiagnostic(route, mode: "probing", detail: localProvider != nil ? "正在连接本机设备" : "正在建立远程连接")
+        }
         lane.token += 1
         let token = lane.token
         // 激活在 attempt 内部完成（TS acceptCandidate 先 activate 再 resolve 同语义）：
@@ -738,16 +824,21 @@ final class DeviceRouter {
     private func requestTransportControl(_ payload: Coflux_V1_ClientToServer.OneOf_Payload) async throws -> Coflux_V1_ServerToClient.OneOf_Payload {
         guard controlOnline else { throw DeviceRouteError("中心离线，无法申请设备传输授权") }
         let id: String
+        let deadline: Duration
         switch payload {
-        case .localPairRequest(let value): id = value.requestID
-        case .localLeaseRequest(let value): id = value.requestID
+        case .localPairRequest(let value): id = value.requestID; deadline = Self.controlRequestTimeout
+        case .localLeaseRequest(let value): id = value.requestID; deadline = Self.controlRequestTimeout
+        case .deviceTailcatConnect(let value):
+            // 中心要先把 grant 下发给 daemon 并等它的安装回执才有结果，比纯中心应答慢一档；
+            // 中心自身的授权窗口是 30 秒（tailcat-rendezvous.ts），客户端不能先于它放弃。
+            id = value.channelID; deadline = Self.tailcatGrantTimeout
         default: throw DeviceRouteError("不支持的设备传输授权请求")
         }
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 let timeout = Task { [weak self] in
-                    do { try await Task.sleep(for: Self.controlRequestTimeout) } catch { return }
+                    do { try await Task.sleep(for: deadline) } catch { return }
                     guard let waiter = self?.transportWaiters.removeValue(forKey: id) else { return }
                     waiter.continuation.resume(throwing: DeviceRouteError("设备传输授权请求超时"))
                 }
@@ -763,10 +854,33 @@ final class DeviceRouter {
     }
 
     private func openPreferredChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
-        guard localProvider != nil else {
-            throw DeviceRouteError("当前客户端暂不支持远程设备连接，请使用桌面客户端", code: "remote_unavailable")
+        if localProvider != nil { return try await openDirectChannel(route, lane) }
+        if remoteProvider != nil { return try await openRemoteChannel(route, lane) }
+        throw DeviceRouteError("当前客户端暂不支持远程设备连接，请使用桌面客户端", code: "remote_unavailable")
+    }
+
+    /// Tailcat 远端通道：prepare → 中心 grant → 拨号 → 通道握手，全部在 provider 内完成；
+    /// 路由只拿回一条已认证的通道，并且**绝不**把它标成本机直连——中心离线时它只有
+    /// session lane 的 15 秒宽限，elevated 一律关闭（usable 的 !local 分支）。
+    private func openRemoteChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
+        guard let remoteProvider, let accountID else { throw DeviceRouteError("远程连接未启用") }
+        guard controlOnline else { throw DeviceRouteError("中心离线，无法建立远程连接") }
+        let generation = nextGeneration(route.daemonID)
+        let opened = try await remoteProvider.open(
+            daemonID: route.daemonID, accountID: accountID, clientInstanceID: clientInstanceID,
+            generation: generation, elevated: lane.kind == .elevated,
+            authorize: { [weak self] payload in
+                guard let self else { throw CancellationError() }
+                return try await self.requestTransportControl(payload)
+            },
+            notify: { [weak self] payload in self?.callbacks.sendControl(payload) })
+        let channel = Channel(channelID: opened.channelID, generation: generation, lane: lane.kind,
+                              connection: opened.connection, relayHost: nil, local: false,
+                              scopes: Set(opened.scopes), leaseExpiresAt: nil)
+        guard !Task.isCancelled, usable(channel) else {
+            closeChannel(channel); throw DeviceRouteError("远程连接授权不足或已过期")
         }
-        return try await openDirectChannel(route, lane)
+        return channel
     }
 
     private func openDirectChannel(_ route: Route, _ lane: Lane) async throws -> Channel {
@@ -794,7 +908,8 @@ final class DeviceRouter {
                 }
             } catch {
                 guard let self, !Task.isCancelled else { return }
-                let transportName = "本机直连"
+                // 远端通道绝不能继承本机直连的措辞：诊断与断开原因都必须说出真实链路。
+                let transportName = channel.local ? "本机直连" : "Tailcat 远程连接"
                 self.loseChannel(route, channel, reason: "\(transportName) 连接已关闭")
             }
         }
@@ -829,12 +944,20 @@ final class DeviceRouter {
             sendCatalogRequest(route)
             maintainCatalogTimer(route)
             route.relayHost = channel.relayHost
-            route.mode = "direct"
-            route.detail = "同机 Device 数据直连本地 daemon"
+            if channel.local {
+                route.mode = "direct"
+                route.detail = "同机 Device 数据直连本地 daemon"
+            } else {
+                // 路径要等 disco 探测才知道；先如实说「还没测出来」，不冒充直连。
+                route.mode = "unknown"
+                route.detail = "Device 数据经 Tailcat 远程连接（路径待测）"
+            }
             stopHeartbeat(route)
+            stopPathProbe(route)
             route.rttMs = nil
             startPingLoop(route)
             callbacks.onDeviceTransport(route.daemonID, route.relayHost, route.rttMs, route.mode, route.detail)
+            startPathProbe(route, channel)
         } else {
             for requestID in route.pendingRequests.keys where route.pendingRequests[requestID]?.lane == .elevated {
                 route.pendingRequests[requestID]?.sentGeneration = nil
@@ -851,6 +974,15 @@ final class DeviceRouter {
         guard !channel.closed else { return }
         channel.closed = true
         channel.receiveTask?.cancel()
+        if !channel.local {
+            // provider 据此释放该设备最后一条通道的原生客户端；中心据此立刻撤销 grant，
+            // 不等它 30 秒窗口自然过期（tailcat-transport.ts closeLane 同构）。
+            remoteProvider?.closeChannel(channelID: channel.channelID)
+            graceChannels.removeValue(forKey: channel.channelID)
+            var close = Coflux_V1_DeviceTailcatClose()
+            close.channelID = channel.channelID
+            callbacks.sendControl(.deviceTailcatClose(close))
+        }
         let connection = channel.connection
         Task { await connection.close() }
     }
@@ -865,6 +997,7 @@ final class DeviceRouter {
         lane.active = nil
         if lane.kind == .session {
             stopHeartbeat(route)
+            stopPathProbe(route)
             publishDiagnostic(route, mode: "offline", detail: reason)
             for requestID in route.pendingRequests.keys where route.pendingRequests[requestID]?.lane == .session {
                 route.pendingRequests[requestID]?.sentGeneration = nil
@@ -886,7 +1019,7 @@ final class DeviceRouter {
     }
 
     private func closeLane(_ route: Route, _ lane: Lane, reason: String) {
-        if lane.kind == .session { stopHeartbeat(route) }
+        if lane.kind == .session { stopHeartbeat(route); stopPathProbe(route) }
         lane.token += 1
         lane.recoveryTask?.cancel()
         lane.recoveryTask = nil
@@ -918,7 +1051,7 @@ final class DeviceRouter {
     /// 有界退避恢复（350ms 起步 5s 封顶 + 抖动，device-router.ts:1173-1191）。
     /// 中心离线时不空转——setControlOnline(true) 会统一重踢。
     private func scheduleRecovery(_ route: Route, _ lane: Lane) {
-        guard localProvider != nil else { return }
+        guard hasTransportProvider else { return }
         let needed = lane.kind == .session ? sessionLaneDemand(route) : elevatedLaneDemand(route)
         guard !destroyed, routes[route.daemonID] === route, (controlOnline || (lane.kind == .session && localProvider != nil && accountID != nil)), lane.recoveryTask == nil, needed else { return }
         let base = min(Self.recoverMaxMS, Self.recoverBaseMS * pow(2, Double(min(lane.recoveryAttempts, 4))))
@@ -976,6 +1109,7 @@ final class DeviceRouter {
     private func closeRoute(_ route: Route, reason: String) {
         route.pingTask?.cancel()
         route.pingTask = nil
+        stopPathProbe(route)
         route.catalogTask?.cancel()
         route.catalogTask = nil
         closeLane(route, route.sessionLane, reason: reason)
@@ -1251,7 +1385,7 @@ final class DeviceRouter {
         payload: Coflux_V1_DeviceEnvelope.OneOf_Payload,
         timeout: Duration = DeviceRouter.deviceRequestTimeout
     ) async throws -> Coflux_V1_DeviceEnvelope.OneOf_Payload {
-        guard localProvider != nil else {
+        guard hasTransportProvider else {
             throw DeviceRouteError("当前客户端暂不支持远程设备连接，请使用桌面客户端", code: "remote_unavailable")
         }
         guard lane != .elevated || controlOnline else { throw DeviceRouteError("中心离线时不允许高权限 Device RPC", code: "lease_offline") }

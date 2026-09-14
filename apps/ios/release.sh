@@ -10,6 +10,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILD_NUMBER=$(git rev-list --count HEAD)
+
+# 原生传输框架不入库，归档前必须现构建，否则 xcodebuild 会在链接期才报缺文件。
+echo "==> build native transport framework"
+node ../../scripts/build-ios-transport.mjs
+
 WORK_DIR=$(mktemp -d)
 ARCHIVE_PATH="$WORK_DIR/Coflux.xcarchive"
 LOG="$WORK_DIR/xcodebuild.log"
@@ -37,3 +42,6 @@ if ! xcodebuild -exportArchive \
 fi
 
 echo "==> done: build $BUILD_NUMBER 已上传，ASC 处理完（约 10-30 分钟）即出现在 TestFlight"
+# dSYM 不随包上传（见 ExportOptions.plist 的 uploadSymbols 说明）：归档目录保留在这里，
+# 需要符号化崩溃日志时从它手动上传。
+echo "    dSYM: $ARCHIVE_PATH/dSYMs（归档保留在 $WORK_DIR）"

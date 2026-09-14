@@ -104,7 +104,7 @@ A `v*` tag triggers `.github/workflows/release.yml`:
 
 > **P2 / TODO: npm old-run idempotency versus fail-closed behavior.** `npm-publish-guard.mjs` strictly validates registry `dist-tags.latest` and its corresponding version entries before checking whether the requested version already exists. If latest is missing/corrupt, an old run fails even when its exact version exists, rather than skipping idempotently. This is intentional fail-closed behavior: the guard lacks reliable context proving it is only an old-release replay. Moving the exact-existing check ahead of latest validation could silently accept a new CLI release when registry state is invalid. Diagnose/repair npm latest manually first; relax this only after adding verifiable rerun context and corresponding negative tests.
 
-`ci.yml` gates pushes/PRs to main: type checks and desktop build, Rust tests/build with `-D warnings`, the full real-process black-box suite, and Swift/iOS build checks.
+`ci.yml` gates pushes/PRs to main: type checks and desktop build, Rust tests/build with `-D warnings`, and the full real-process black-box suite. It runs on `ubuntu-latest` and builds neither Swift nor iOS; the iOS app, its native transport framework, and the Swift package's tests are verified by hand on a Mac.
 
 ### Recovering a failed npm publication
 

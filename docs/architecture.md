@@ -156,9 +156,10 @@ and [deployment](deployment.md) for private DERP admission and migration.
 
 Control protocol version 2 is the compatibility floor for clients and workers;
 newer compatible versions are accepted. DeviceEnvelope remains version 1. Swift
-and iOS currently expose local provider support and explicitly report remote
-connections unavailable. Frozen browser clients cannot use the removed remote
-protocol and require the current Desktop client.
+and iOS reach remote devices over the same native transport, with the Go client
+linked into the app as a c-archive rather than spawned as a helper. Frozen
+browser clients cannot use the removed remote protocol and require the current
+Desktop client.
 
 ### 5.3 Ordering, deduplication, and backpressure
 
@@ -323,7 +324,7 @@ Playwright simulation cannot replace these results: all six scenarios ran agains
 ```text
 apps/server          Central control / native rendezvous / checkpoints / Postgres
 apps/desktop         Sole frontend/default target: Electron main + React/xterm renderer (src/renderer), direct enabled
-apps/ios             SwiftUI + SwiftTerm; remote transport unavailable pending a native provider
+apps/ios             SwiftUI + SwiftTerm; in-process native transport, connect-only
 packages/core        Shared TS infrastructure such as logging
 packages/client      Control store + DeviceRouter
 packages/protocol    TS protobuf bindings

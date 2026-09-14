@@ -16,6 +16,17 @@
 	<!-- TestFlight/App Store 出口合规：仅用 HTTPS/WSS 标准加密（豁免类），免每次构建回答加密问题 -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- 本地网络：Tailcat 在同网段时会探测局域网直连端点，那是最快的一条路径。
+	     iOS 没有显式申请该授权的 API，系统只在首次真正访问本地网络时询问，所以
+	     LocalNetworkPermission 会在登录成功后主动触发一次 Bonjour 浏览，把询问提前到
+	     进入 app 时，而不是卡在用户点开设备、通道正在拨号的当口。NSBonjourServices 是
+	     浏览该类型的前置声明；拒绝授权只丢失同网段直连，通道会退回 DERP 中转。 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于在同一局域网内直接连接你的设备，获得更低的延迟。不允许也能使用，但连接会经中转服务器绕行。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_coflux._tcp</string>
+	</array>
 	<!-- 终端长按对讲（plan 064）：占位条长按发起语音输入，转写结果落草稿供确认后发送 -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于长按占位条时录音，将语音转写为终端输入草稿</string>

@@ -284,12 +284,24 @@ impl TailcatRuntime {
         };
         let channel = grant.channel_id.clone();
         let key = grant.node_public_key.clone();
-        let installed = serving
-            .grants
-            .lock()
-            .unwrap()
-            .as_mut()
-            .is_some_and(|grants| grants.install(grant, now()).is_ok());
+        // A rejected grant leaves the client stuck on "route offline" with no other
+        // signal anywhere in the path, so the reason has to reach the log.
+        let installed = {
+            let mut guard = serving.grants.lock().unwrap();
+            match guard.as_mut() {
+                None => {
+                    coflux_protocol::logln!("[worker] channel grant rejected: serving not ready");
+                    false
+                }
+                Some(grants) => match grants.install(grant, now()) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        coflux_protocol::logln!("[worker] channel grant rejected: {reason}");
+                        false
+                    }
+                },
+            }
+        };
         if !installed {
             if serving
                 .grants
