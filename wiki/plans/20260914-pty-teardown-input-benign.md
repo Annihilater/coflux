@@ -280,6 +280,17 @@ Out of scope:
 
 ## Maintenance notes
 
+- Running `cargo test -p coflux-supervisor` on a machine that has Coflux
+  installed needs `COFLUX_HOME=` in front of it: three `shell_integration` tests
+  start a real shell, whose `claude` wrapper then resolves the *live* device
+  integration instead of the test's temporary directory. They fail identically
+  on an untouched baseline and pass with the variable cleared; CI is unaffected.
+- The test harness deliberately never calls `master.take_writer()`:
+  `portable-pty`'s `UnixMasterWriter::drop` writes `\n` + `VEOF` into the PTY
+  (`portable-pty-0.8.1/src/unix.rs:351`), so whoever holds one presses Ctrl-D
+  for the child the moment their thread ends. A harness that took one would let
+  the child exit for a reason other than the branch under test, quietly turning
+  "no device error was emitted" into a vacuous pass.
 - The classification rests on a platform invariant: on macOS and Linux, `EIO` on
   a PTY master write means the slave side has no opener. If a future host
   platform reports something else for the same condition, this is the place to
@@ -291,7 +302,19 @@ Out of scope:
   (`packages/client/src/device-router.ts:2089`,
   `packages/swift-client/Sources/CofluxClientCore/DeviceRouter.swift:1299`), and
   `closeTask` waits on `device_stop`'s operation ack instead
-  (`packages/client/src/store.ts:1026`). Not chased to the end: what happens if
+  (`packages/client/src/store.ts:1026`). **Corrected during execution**: there is
+  a third consumer this note did not enumerate — the worker's agent-I/O write
+  path awaits a `PtyInputAck` and treats a device `Error` as its answer
+  (`crates/worker/src/device.rs:1786`), falling back to `AGENT_IO_TIMEOUT`
+  (5 s, `crates/worker/src/device.rs:56`). An agent write that lands in the
+  teardown window therefore now waits out those 5 s and reports 「写入回执超时，
+  写入结果未知」instead of failing fast with a code. Accepted deliberately: the
+  outcome is a failure either way, the delay is bounded, the race is narrow
+  (the agent attaches first, and attach's `session_not_found` is still loud),
+  and making the supervisor answer differently per calling channel would rebuild
+  the error path this plan removed. Revisit here if agent I/O against closing
+  terminals ever becomes common.
+- Not chased to the end: what happens if
   the `sessionExited` push itself is lost — whether the catalog's exit list
   flips `desired` off. Today that case produces a repeating toast every retry
   tick; afterwards it produces silent re-sends until the catalog or a re-attach
