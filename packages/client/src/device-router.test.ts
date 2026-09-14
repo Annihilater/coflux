@@ -1219,24 +1219,149 @@ test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误
   h.router.destroy();
 });
 
-test("sidebar measurement does not open local or native channels", async () => {
+/* ===== 侧栏常开测量（plan 20260914）=====
+ * 侧栏要对每台**在线但未选中**的设备显示延迟与路径，就必须真有一条连接——没有无连接的
+ * 测量通道。所以 measureOnly 重新成为一等 session lane 需求：它拨 remote、跑心跳，但仍然
+ * 不碰 loopback、不配对、不轮询会话清单（那三样只为完整需求服务）。 */
+
+test("sidebar measurement opens a remote lane and reads latency without touching loopback", async () => {
   const h = harness(); h.router.setControlOnline(true);
   const release = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush(); h.clock.advance(60_000); await flush();
-  assert.equal(h.adapter.opens.length, 0); assert.equal(h.adapter.pairCalls, 0);
+  await flush();
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "只测量不得发起 loopback");
+  assert.equal(h.adapter.pairCalls, 0, "只测量不得配对");
+  const remote = latestOpen(h.adapter, "remote");
+  h.adapter.resolve(remote); await flush();
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
+  const sent = payloads(remote);
+  const ping = sent.find((payload) => payload?.case === "ping");
+  if (ping?.case !== "ping") throw new Error("测量靠心跳取得延迟读数，建连后应发出 ping");
+  assert.equal(sent.filter((payload) => payload?.case === "sessionCatalogRequest").length, 0, "只测量不轮询会话清单");
+  h.clock.advance(12);
+  h.adapter.emit(remote, { case: "pong", value: { requestId: ping.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 12, "未选中的设备也要有延迟读数");
+
+  h.clock.advance(60_000); await flush();
+  assert.equal(h.adapter.opens.filter((call) => call.kind === "direct").length, 0, "整段测量期都不得碰 loopback");
+  assert.equal(h.adapter.pairCalls, 0);
   release(); h.router.destroy();
 });
 
-test("full demand opens local transport and releasing it leaves measurement idle", async () => {
+test("interactive demand promotes a measured route to direct and releasing it keeps the lane", async () => {
   const h = harness(); h.router.setControlOnline(true);
   const measurement = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush(); assert.equal(h.adapter.opens.length, 0);
+  await flush();
+  const remote = latestOpen(h.adapter, "remote"); h.adapter.resolve(remote); await flush();
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
   const full = h.router.retainDevice("daemon-1"); await flush();
+  h.clock.advance(1); await flush();
   const local = latestOpen(h.adapter, "direct"); h.adapter.resolve(local); await flush();
   assert.equal(h.states.at(-1)?.mode, "direct");
-  full(); await flush(); assert.equal(local.closed, true);
-  const count = h.adapter.opens.length; h.clock.advance(60_000); await flush();
-  assert.equal(h.adapter.opens.length, count); measurement(); h.router.destroy();
+
+  // 交互需求走了、测量还在：把一条正在工作的 loopback 拆掉改拨隧道是荒谬的，lane 必须留着。
+  full(); await flush();
+  assert.equal(local.closed, false, "失去交互需求不该拆掉已经建好的 direct lane");
+  assert.equal(h.states.at(-1)?.mode, "direct");
+  measurement(); await flush();
+  assert.equal(local.closed, true, "最后一份需求释放后才收连接");
+  h.router.destroy();
+});
+
+test("entering a device that measurement already connected starts the session catalog poll", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true);
+  const measurement = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush();
+  const remote = latestOpen(adapter, "remote"); adapter.resolve(remote); await flush();
+  assert.equal(payloads(remote).filter((payload) => payload?.case === "sessionCatalogRequest").length, 0);
+
+  // lane 已经在了，ensureSessionLane 会短路——catalog 轮询必须在那条短路上补起来，
+  // 否则进入一台测量已连上的设备就永远拿不到会话清单。
+  const full = h.router.retainDevice("daemon-1"); await flush();
+  assert.ok(
+    payloads(remote).some((payload) => payload?.case === "sessionCatalogRequest"),
+    "进入设备后必须立刻补发 session catalog 请求",
+  );
+  full(); measurement(); h.router.destroy();
+});
+
+test("an unmeasurable device fails quietly and retries on the slow measurement ladder", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true);
+  const measurement = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush();
+  assert.equal(h.states.at(-1)?.mode, "probing", "第一次建连允许出现探测态");
+  adapter.fail(latestOpen(adapter, "remote")); await flush();
+  assert.equal(h.errors.length, 0, "测量失败不得弹给用户");
+  assert.equal(h.states.at(-1)?.mode, "idle", "测量失败退回「未测得」，而不是离线红点");
+
+  const probingBefore = h.states.filter((state) => state.mode === "probing").length;
+  let cursor = adapter.opens.length;
+  for (let round = 0; round < 12; round += 1) {
+    h.clock.advance(10_000); await flush();
+    while (cursor < adapter.opens.length) {
+      adapter.fail(adapter.opens[cursor]!);
+      cursor += 1;
+    }
+    await flush();
+  }
+  const retries = cursor - 1;
+  assert.ok(retries > 0 && retries <= 4, `两分钟内的测量重试应落在慢梯子上，实际 ${retries} 次`);
+  assert.equal(
+    h.states.filter((state) => state.mode === "probing").length,
+    probingBefore,
+    "重试不得再画一次探测态——否则侧栏会永远在蓝点与红点之间闪",
+  );
+  assert.ok(h.states.every((state) => state.mode !== "offline"), "无人在看的测量 route 不得发布离线态");
+  assert.equal(h.errors.length, 0);
+  measurement(); h.router.destroy();
+});
+
+test("a device error frame on a measured route never reaches the user", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true);
+  const measurement = h.router.retainDevice("daemon-1", { measureOnly: true });
+  await flush();
+  const remote = latestOpen(adapter, "remote"); adapter.resolve(remote); await flush();
+  adapter.emit(remote, { case: "error", value: { code: "supervisor_busy", message: "supervisor 正忙" } });
+  await flush();
+  assert.equal(h.errors.length, 0, "侧栏每台在线设备都连着，一台不高兴不该变成反复弹出的 toast");
+  measurement(); h.router.destroy();
+});
+
+test("measurement stays inside the connection budget and yields to interactive demand", async () => {
+  const adapter = new DeferredPairAdapter(); const h = harness(adapter);
+  h.router.setControlOnline(true);
+  const releases: Array<() => void> = [];
+  for (let index = 0; index < 20; index += 1) {
+    releases.push(h.router.retainDevice(`measure-${index}`, { measureOnly: true }));
+  }
+  await flush();
+  const measuredDaemons = new Set(adapter.opens.map((call) => call.options.daemonId));
+  assert.equal(measuredDaemons.size, 14, "测量最多占 budget - 2 个设备名额");
+
+  // 把剩下的两个名额交给交互需求，整整占满 16 台。
+  releases.push(h.router.retainDevice("interactive-a"));
+  releases.push(h.router.retainDevice("interactive-b"));
+  await flush();
+  assert.equal(new Set(adapter.opens.map((call) => call.options.daemonId)).size, 16);
+  assert.equal(adapter.opens.filter((call) => call.aborted).length, 0);
+
+  // 第 17 台带交互需求进来：没有名额了，必须由只测量的 route 让位，而不是撞上限。
+  releases.push(h.router.retainDevice("interactive-c"));
+  await flush();
+  const evicted = adapter.opens.filter((call) => call.aborted).map((call) => call.options.daemonId);
+  assert.equal(evicted.length, 1, "只腾出必要的那一个名额");
+  assert.ok(evicted[0]?.startsWith("measure-"), `被抢占的必须是没有完整需求的 route，实际 ${evicted[0]}`);
+  assert.ok(
+    adapter.opens.some((call) => call.options.daemonId === "interactive-c" && !call.aborted),
+    "交互需求必须拿到通道",
+  );
+  for (const release of releases) release();
+  h.router.destroy();
 });
 
 test("native path changes update observation without replacing the logical lane", async () => {
@@ -1411,20 +1536,35 @@ test("中心授权 hard revoke 时 active native channel 立即失效，不等�
 });
 
 
-test("native sidebar measurement stays idle until actual demand", async () => {
+// 与前面几条同为 plan 20260914 的新契约，但走的是 nativeRemote 那条装配（其余用例用默认
+// harness），所以单独留着：侧栏测量在 native 路径上同样持有一条真连接，进出设备只是复用它。
+test("native sidebar measurement holds one remote lane that interactive demand reuses", async () => {
   const adapter = new DeferredPairAdapter();
   const h = harness(adapter, new FakeClock(), true);
   h.router.setControlOnline(true);
   const releaseMeasure = h.router.retainDevice("daemon-1", { measureOnly: true });
-  await flush(); h.clock.advance(60_000); await flush();
-  assert.equal(adapter.opens.length, 0);
+  await flush();
+  // 未选中的设备也要有读数，所以必须真拨一条 remote——但不碰 loopback、不配对。
+  assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
+  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
+  assert.equal(adapter.pairCalls, 0);
+  const active = latestOpen(adapter, "remote"); adapter.resolve(active); await flush();
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
+  // 进入这台设备：复用测量已经建好的那条 lane，不再多开一条（没有 grant，loopback 也开不出来）。
   const releaseDemand = h.router.retainDevice("daemon-1");
   await flush(); h.clock.advance(250); await flush();
-  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
   assert.equal(adapter.opens.filter(call => call.kind === "remote").length, 1);
-  const active = latestOpen(adapter, "remote"); adapter.resolve(active); await flush();
-  releaseDemand(); await flush(); assert.equal(active.closed, true);
+  assert.equal(adapter.opens.filter(call => call.kind === "direct").length, 0);
+
+  // 离开这台设备：测量需求还在，lane 必须活着，否则回到侧栏读数就没了。
+  releaseDemand(); await flush();
+  assert.equal(active.closed, false, "失去交互需求后测量仍要持有这条 lane");
+  assert.equal(h.states.at(-1)?.mode, "remote");
+
+  releaseMeasure(); await flush();
+  assert.equal(active.closed, true, "最后一份需求释放后才收连接");
   const count = adapter.opens.length; h.clock.advance(60_000); await flush();
-  assert.equal(adapter.opens.length, count, "idle measurement must not reconnect native devices");
-  releaseMeasure(); h.router.destroy();
+  assert.equal(adapter.opens.length, count, "没有任何需求的设备不得重连");
+  h.router.destroy();
 });
