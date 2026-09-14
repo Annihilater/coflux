@@ -59,8 +59,9 @@ env | grep '^COFLUX_'
   | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId used by local commands and `read_terminal`) |
   | `COFLUX_SESSION_ID` | id of this PTY session |
 
-  The `<coflux-session>` block prints each of these coordinates a second time as a **handle** — a
-  short, typed, pasteable form of the same id (see "Entity handles"). The id lines stay; the
+  Under those id lines the `<coflux-session>` block prints a `<Kind> handle:` line for the device,
+  project, workspace and terminal — the same ids in a short, typed, pasteable form (see "Entity
+  handles"). A PTY session has no handle, a coordinate that is empty contributes no line, and the
   `COFLUX_*` variables themselves are always full UUIDs.
 
 - **Variables empty or absent**: there is no local terminal context. Use `coflux whoami` to check
@@ -142,9 +143,9 @@ So, after entering or leaving a worktree, owning **and** effective are both the 
 its id to account CLI commands and everything local already acts on it. The plugin drops the new id next to the
 tool result, and `coflux workspace` always tells you. Two things stay behind on purpose:
 
-- `COFLUX_WORKSPACE_ID` (and the id in the `<coflux-session>` block from earlier in this session)
-  still names where the terminal was *opened*; it is frozen when the PTY starts and cannot be
-  rewritten. Never reuse it after a move.
+- `COFLUX_WORKSPACE_ID` (and the workspace id and handle in the `<coflux-session>` block from
+  earlier in this session) still names where the terminal was *opened*; it is frozen when the PTY
+  starts and cannot be rewritten. Never reuse either form after a move.
 - The shell inside this terminal keeps its own directory. That is only about the shell; it does not
   affect where your work is attributed.
 
@@ -156,15 +157,16 @@ a daemon that is down or too old — the session just carries on with the owners
 
 ```sh
 coflux workspace
-{"workspaceId":"ws-b","path":"/Users/me/.coflux/worktrees/ws-b","owningWorkspaceId":"ws-a","moved":true}
+{"workspaceId":"3f2a1b7c-9d44-4e1a-8f02-1b6c2d5e7a90","ref":"coflux:workspace:3f2a1b7c","path":"/Users/me/.coflux/worktrees/ws-b","owningWorkspaceId":"7c1d90ab-5e33-4c88-9a71-0d4f8b2e6c15","owningRef":"coflux:workspace:7c1d90ab","moved":true}
 ```
 
 One line of JSON: `workspaceId` (+ `path`) is the **effective** workspace, `owningWorkspaceId` is the
-workspace this terminal belongs to right now, and `moved` says whether they differ. With the plugin
-installed you also get a `<coflux-session-moved>` block at the start of every prompt while the two
-differ — but that block only arrives with the **next** user prompt. **About to call an account command right
-after a `cd`? Run `coflux workspace` first** and use the `workspaceId` it prints; do not reuse
-`COFLUX_WORKSPACE_ID`.
+workspace this terminal belongs to right now, `ref` and `owningRef` are those two workspaces'
+handles (a daemon too old to send them leaves both keys out), and `moved` says whether they differ.
+With the plugin installed you also get a `<coflux-session-moved>` block at the start of every prompt
+while the two differ — but that block only arrives with the **next** user prompt. **About to call an
+account command right after a `cd`? Run `coflux workspace` first** and use the `workspaceId` it
+prints; do not reuse `COFLUX_WORKSPACE_ID`.
 
 ## Entity handles: ids you can paste
 
@@ -191,8 +193,11 @@ coflux:terminal:9e21c4d0` and `coflux terminal read <that terminal's full UUID>`
 
 **Anywhere an entity is returned, its handle comes back too**, in a `ref` field beside the
 entity's unchanged id field. The ids in JSON — `taskId`, `workspaceId`, `deviceId` — are still full
-UUIDs, and `ref` is the handle next to them. The local `coflux terminal list` text rows lead with
-the handle, so the next command can be typed straight from what you just read.
+UUIDs, and `ref` is the handle next to them; where one payload carries two ids of the same kind it
+gets two keys, as `coflux workspace` does with `ref` and `owningRef`. Local terminal results carry
+both as well, and their `taskId` is always the **resolved** UUID — never the handle you passed in,
+so it is safe to feed onward. The local `coflux terminal list` text rows lead with the handle, so
+the next command can be typed straight from what you just read.
 
 So when the user pastes you a `coflux:` string, you already know what kind of thing it names and
 can use it as-is — no listing, no guessing. Handles are made to be pasted rather than displayed:
@@ -461,7 +466,10 @@ there: the terminal is open all the same, use `read` and `send` with it; "busy" 
 still running in that terminal, `wait` for it or `read` first; "unknown action terminal.run" = this
 machine's daemon is older than the CLI, tell the user to run `cofluxd update && cofluxd restart`
 (the terminal was opened as a plain shell, nothing was run); "daemon is not connected to the
-center" only appears on `new`/`list`/`ports`/`notify`, retry once it reconnects.
+center" only appears on `new`/`list`/`ports`/`notify`, retry once it reconnects. A terminal handle
+that names the wrong kind, or whose prefix matches more than one terminal in this workspace, has
+its own sentence each — see "When a handle does not resolve"; an unknown handle shares the
+"not in this workspace or does not exist" sentence above, on purpose.
 
 ## Account CLI: across workspaces and devices
 
