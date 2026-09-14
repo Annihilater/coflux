@@ -13,5 +13,12 @@
 	<string>8Y2J55823C</string>
 	<key>manageAppVersionAndBuildNumber</key>
 	<false/>
+	<!-- 必须关：Xcode 的 CreateIPAStep 用 `/usr/bin/rsync -8aPhhE` 复制 Symbols，而 macOS
+	     已把 /usr/bin/rsync 换成 openrsync，它不认 Apple 的 -E/--extended-attributes，
+	     export 会在重签名之后、打包之前以 "Copy failed" 失败（2026-09-14 实测，Xcode 26.6）。
+	     /usr/bin 受 SIP 保护，换不回旧 rsync。代价：ASC 拿不到 dSYM，崩溃日志不会自动符号化；
+	     需要时从归档的 dSYMs/ 目录手动上传（release.sh 结束时会打印路径）。 -->
+	<key>uploadSymbols</key>
+	<false/>
 </dict>
 </plist>
