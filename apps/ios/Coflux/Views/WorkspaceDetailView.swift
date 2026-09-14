@@ -86,6 +86,21 @@ struct WorkspaceDetailView: View {
         members.first { $0.id == activeTaskID }
     }
 
+    /// 主标题=分支，与 web 对齐；目录工作区（无 repo 终端）没有分支、name 是裸 `~`，
+    /// 改用设备名（name 为空退到 host，与设备面板同规则）。「目录工作区由设备命名」
+    /// 是工作区种类的属性而不是调用方偏好，故在此解析，不开 title 参数——
+    /// 开了参数，下一个调用方就能把任务台标题写成任何东西。
+    private var navigationTitleText: String {
+        guard isDirWorkspace(workspace) else {
+            return workspace.branch.isEmpty ? workspace.name : workspace.branch
+        }
+        guard let daemon = client.daemons.first(where: { $0.daemonID == workspace.daemonID }) else {
+            return workspace.name
+        }
+        let label = daemon.name.isEmpty ? daemon.host : daemon.name
+        return label.isEmpty ? workspace.name : label
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if members.isEmpty {
@@ -254,7 +269,7 @@ struct WorkspaceDetailView: View {
         .onChange(of: inputCollapsed) { _, collapsed in
             UserDefaults.standard.set(collapsed, forKey: Self.padCollapsedKey(workspace.id))
         }
-        .navigationTitle(workspace.branch.isEmpty ? workspace.name : workspace.branch) // 主标题=分支，与 web 对齐
+        .navigationTitle(navigationTitleText)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if activeTask != nil {
