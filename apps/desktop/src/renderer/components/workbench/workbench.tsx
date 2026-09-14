@@ -370,17 +370,39 @@ export function Workbench({ client }: { client: CofluxClient }) {
     return client.retainDevice(selectedDaemonId);
   }, [client, selectedDaemonId]);
 
-  // 连接从进入页面就开始，而不是等进某个项目：侧栏要对每台在线设备显示延迟，就得有连接。
-  // measureOnly = 一条 relay lane + 心跳，不碰 loopback（direct 只对与浏览器同机的那台设备
-  // 有意义，为一个读数去敲它，对其余设备是每 5s 一次注定失败的重试）。顺带把连接焐热，
-  // 之后真进某台设备时不用再从 rendezvous 开始等。
+  // 连接从进入页面就开始，而不是等进某个项目：侧栏要对每台在线设备显示延迟与路径，就得
+  // 有连接。measureOnly = 一条 remote lane + 心跳，不碰 loopback、不配对、不轮询会话清单
+  // （direct 只对与本机同机的那台设备有意义，为一个读数去敲它，对其余设备是注定失败的重试）。
+  // 顺带把连接焐热，之后真进某台设备时不用再从头建连。
   // 依赖收敛成排序后的 id 串：daemons 每次广播都是新数组，直接依赖它会反复 retain/release。
   const onlineDaemonIds = daemons.filter((daemon) => daemon.online).map((daemon) => daemon.daemonId).sort().join(",");
+  // 按设备增量维护，而不是整组重建：整组重建意味着任意一台设备睡下或新入网，都会把其余
+  // 每一台的隧道拆掉重拨——侧栏会集体闪回 probing，重拨还会挤中心的 rendezvous 限流。
+  const measurementHolds = useRef<{ client: CofluxClient | null; releases: Map<string, () => void> }>({ client: null, releases: new Map() });
   useEffect(() => {
-    if (!onlineDaemonIds) return;
-    const releases = onlineDaemonIds.split(",").map((id) => client.retainDevice(id, { measureOnly: true }));
-    return () => releases.forEach((release) => release());
+    const held = measurementHolds.current;
+    if (held.client !== client) {
+      for (const release of held.releases.values()) release();
+      held.releases.clear();
+      held.client = client;
+    }
+    const wanted = new Set(onlineDaemonIds ? onlineDaemonIds.split(",") : []);
+    for (const [daemonId, release] of [...held.releases]) {
+      if (wanted.has(daemonId)) continue;
+      release();
+      held.releases.delete(daemonId);
+    }
+    for (const daemonId of wanted) {
+      if (held.releases.has(daemonId)) continue;
+      held.releases.set(daemonId, client.retainDevice(daemonId, { measureOnly: true }));
+    }
   }, [client, onlineDaemonIds]);
+  useEffect(() => () => {
+    const held = measurementHolds.current;
+    for (const release of held.releases.values()) release();
+    held.releases.clear();
+    held.client = null;
+  }, []);
 
   function selectWorkspace(workspaceId: string) {
     const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };

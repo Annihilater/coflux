@@ -269,6 +269,11 @@ reserved wire fields are not active implementations.
   owns a backend. Reuse per demanded remote device and measure idle/single-device/
   multi-device footprint; do not eagerly create stacks for every sidebar entry.
   [tailcat.go:1743](https://github.com/tailscale/tailcat/blob/91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a/tailcat.go#L1743).
+  **Superseded 2026-09-14 by `wiki/plans/20260914-sidebar-device-measurement.md`:**
+  every *online* device is measured continuously, so each one does hold a standing
+  tunnel. The user accepted that cost explicitly; the client keeps its own budget
+  (measurement ≤ 14 of the 16-device helper cap) and pre-empts measurement-only
+  routes when interactive demand needs a slot.
 - **Updates currently describe one worker artifact.** Signed size/hash and atomic
   installation do not automatically extend to a sibling helper. The observation
   period must detect helper failure even if the worker itself stays alive.
@@ -366,6 +371,10 @@ databases, ports, and temporary files on both success and failure.
   attach/ping latency with 0, 1, and 10 demanded devices; idle sidebar entries do
   not create tunnels. Resource counts return to their starting range after
   cleanup; investigate sustained memory growth rather than calling it GC noise.
+  (Superseded 2026-09-14 by `wiki/plans/20260914-sidebar-device-measurement.md`:
+  "idle sidebar entries do not create tunnels" no longer holds — an online device
+  is measured whether or not it is selected, so it does create a tunnel. The rest
+  of this item stands.)
 - [ ] Compare at least 30 paired attempts on the same machines/networks against
   the old path. Record cold attach success, p50/p95 latency, direct success, and
   relay recovery. Deterministic cases must all pass; p95 cold attach and steady-
