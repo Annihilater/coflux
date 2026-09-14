@@ -45,6 +45,17 @@ const DIRECT_CONNECT_TIMEOUT_MS = 2_500;
 
 const RECOVER_BASE_MS = 350;
 const RECOVER_MAX_MS = 5_000;
+/** 只测量的 route 用另一把梯子：交互那把 350ms→5s 的节奏是给盯着终端的人用的，侧栏一行
+ * 读数不值得每几秒去敲一台连不上的设备。基数 15s、封顶 5 分钟，且失败后不再重画。 */
+const MEASURE_RECOVER_BASE_MS = 15_000;
+const MEASURE_RECOVER_MAX_MS = 5 * 60_000;
+/** 同时连接的设备上限。桌面主进程与 Go helper 各拦一道，且两道都不带可判别的错误码
+ * （见 apps/desktop/src/main/tailcat-transport.ts 与 transport/tailcat 的 backend），
+ * client 无从从错误里认出「撞上限了」——只能自己先不去撞。 */
+const CONNECTED_DEVICE_BUDGET = 16;
+/** 测量最多占 budget - 2：交互需求不是一台一台来的（当前设备 + 每个仍 desired 的隐藏终端），
+ * 固定预留几个名额不是浪费就是不够，所以这里只压低测量的天花板，真撞上了再按需抢占。 */
+const MEASUREMENT_CONNECTION_BUDGET = CONNECTED_DEVICE_BUDGET - 2;
 const DIRECT_HEDGE_MS = 200;
 const INPUT_RETRY_MS = 500;
 const CATALOG_INTERVAL_MS = 3_000;
@@ -311,7 +322,13 @@ interface DeviceRoute {
   retainCount: number;
   transientDemand: number;
 
+  /** 「只测量」持有数（侧栏对每台在线设备各一个）：够格把一条 remote lane 拉起来跑心跳，
+   * 但**不**够格触发本机配对与 direct 提升——对不在本机的设备那两样是对 loopback 的
+   * 永久无效重试。见 routeHasFullDemand。 */
   measureCount: number;
+  /** 只测量的 route 是否已经画过一次 probing。只测量的失败必须是安静的：第一次连接允许
+   * 蓝点脉冲，之后无论重试多少轮都不再重画，否则一台够不着的设备会在侧栏里永远闪。 */
+  measureProbePublished?: boolean;
 }
 
 interface ControlWaiter<T> {
@@ -773,10 +790,29 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function ensureSessionLane(route: DeviceRoute): Promise<DeviceChannel> {
     if (destroyed) return Promise.reject(new DeviceRouteError("Device router 已停止"));
     if (channelCovers(route.sessionLane.active, DeviceScope.SESSION_READ)) {
+      // lane 可能是测量期就建好的：此刻若已是完整需求，catalog 轮询必须在这里补上——
+      // activateSessionLane 不会为一条已经在用的 channel 再跑一遍，于是「进一台测量已连上的
+      // 设备」会一直拿不到会话清单，孤儿会话列表跟着陈旧。
+      if (routeHasFullDemand(route) && route.catalogTimer === undefined) {
+        sendCatalogRequest(route);
+        maintainCatalogTimer(route);
+      }
       return Promise.resolve(route.sessionLane.active);
     }
-    if (!routeHasFullDemand(route)) return Promise.reject(new DeviceRouteError("选择设备后建立远程连接"));
+    const fullDemand = routeHasFullDemand(route);
+    if (!fullDemand && route.measureCount === 0) {
+      return Promise.reject(new DeviceRouteError("选择设备后建立远程连接"));
+    }
     if (route.sessionLane.attempt) return route.sessionLane.attempt.ready;
+    if (!holdsRemoteSlot(route)) {
+      if (fullDemand) reclaimRemoteSlot(route);
+      else if (remoteSlotsInUse(route) >= MEASUREMENT_CONNECTION_BUDGET) {
+        // 超出测量额度的设备确定性地停在「未测得」：不报错、不闪，也不占掉交互要用的名额。
+        route.measureProbePublished = true;
+        publish(route, "idle", "并发设备连接已达测量额度，本设备暂不测量");
+        return Promise.reject(new DeviceRouteError("并发设备连接已达测量额度", "measure_budget"));
+      }
+    }
 
     const lane = route.sessionLane;
     const token = ++lane.token;
@@ -802,7 +838,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       remoteStarted: false,
     };
     lane.attempt = attempt;
-    publish(route, "probing", "正在连接设备");
+    if (fullDemand || !route.measureProbePublished) {
+      if (!fullDemand) route.measureProbePublished = true;
+      publish(route, "probing", "正在连接设备");
+    }
 
     const valid = () => (
       !destroyed &&
@@ -823,7 +862,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       if (!attempt.settled) {
         attempt.settled = true;
         const reason = route.localFailure || "中心与本地 gateway 均不可用";
-        publish(route, "offline", reason);
+        publishUnreachable(route, reason);
         attempt.reject(new DeviceRouteError(reason));
       }
       if (lane.active?.kind === "remote") scheduleDirectRetry(route);
@@ -906,7 +945,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       })();
     };
 
-    if (!options.enableLocalTransport || !routeHasFullDemand(route)) {
+    // 只测量的 route 在这里分流：不读 grant、不试 loopback、不配对，只拨一条 remote。
+    if (!options.enableLocalTransport || !fullDemand) {
       attempt.cachePending = false;
       startRemote();
       finish();
@@ -997,6 +1037,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       }
       if (!valid()) throw abortError();
       try {
+        // 让 holdsRemoteSlot 也能看见 elevated 这一侧的在途拨号：helper 按 daemonId 计名额，
+        // 同一台设备的 session 与 elevated 共用一个，但「有没有在拨」必须如实反映。
+        attempt.remoteStarted = true;
         const remote = await openChannel(route, "elevated", "remote", scope, controller.signal);
         if (!valid()) {
           remote.close();
@@ -1110,7 +1153,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         session.attachGeneration = undefined;
         session.attachedGeneration = undefined;
       }
-      publish(route, "offline", reason);
+      publishUnreachable(route, reason);
     } else {
       for (const pending of route.pendingRequests.values()) {
         if (pending.scope === DeviceScope.RPC || pending.scope === DeviceScope.LIFECYCLE) pending.sentGeneration = undefined;
@@ -1122,8 +1165,14 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   function scheduleRecovery(route: DeviceRoute, lane: DeviceLane): void {
     const needed = lane.kind === "session" ? sessionLaneDemand(route) : elevatedLaneDemand(route);
-    if (destroyed || lane.recoveryTimer !== undefined || !needed || (!routeHasFullDemand(route))) return;
-    const base = Math.min(RECOVER_MAX_MS, RECOVER_BASE_MS * 2 ** Math.min(lane.recoveryAttempts, 4));
+    if (destroyed || lane.recoveryTimer !== undefined || !needed) return;
+    const fullDemand = routeHasFullDemand(route);
+    // 只测量的 route：中心断着的时候一次也不试——remote lane 必须由中心授权，黑着灯重拨
+    // 只是白烧电；控制面回来时 setControlOnline 会把所有仍有需求的 route 重新驱动一遍。
+    if (!fullDemand && (lane.kind !== "session" || !controlOnline)) return;
+    const base = fullDemand
+      ? Math.min(RECOVER_MAX_MS, RECOVER_BASE_MS * 2 ** Math.min(lane.recoveryAttempts, 4))
+      : Math.min(MEASURE_RECOVER_MAX_MS, MEASURE_RECOVER_BASE_MS * 2 ** Math.min(lane.recoveryAttempts, 4));
     const delayMs = Math.round(base * (1 + clock.random() * 0.2));
     lane.recoveryAttempts += 1;
     lane.recoveryTimer = clock.setTimeout(() => {
@@ -1140,9 +1189,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }, delayMs);
   }
 
-  // Sidebar measurement alone never opens or retains a network connection.
+  /** 侧栏的「只测量」也算一份 session lane 需求：要显示延迟与路径就必须有一条真连接，
+   * 它只是不够格触发 loopback/配对/catalog 那几样（见 routeHasFullDemand）。 */
   function sessionLaneDemand(route: DeviceRoute): boolean {
-    if (route.retainCount > 0 || route.transientDemand > 0) return true;
+    if (route.retainCount > 0 || route.transientDemand > 0 || route.measureCount > 0) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
     return [...route.pendingRequests.values()].some(
       (pending) => pending.scope === DeviceScope.SESSION_READ || pending.scope === DeviceScope.SESSION_CONTROL,
@@ -1162,11 +1212,67 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
 
+  /** 「完整」需求：除只测量之外的任何持有。本机配对、direct 提升、会话 catalog 轮询都只为
+   * 它服务——只测量的 route（侧栏对每台在线设备）只要一条 remote lane 和心跳，别的一概不做。 */
   function routeHasFullDemand(route: DeviceRoute): boolean {
     if (route.retainCount > 0 || route.transientDemand > 0) return true;
     if ([...route.sessions.values()].some((session) => session.desired)) return true;
     if (route.pendingRequests.size > 0) return true;
     return elevatedLaneDemand(route);
+  }
+
+  /** 这条 route 是否已经占着 helper 的一个设备名额。remote 通道按 daemonId 计数并引用计数，
+   * 所以同一台设备上的测量与交互共享同一个名额；在途的 attempt 也得算，否则一批并发的
+   * 侧栏测量会在谁都还没连上时集体判定「还有余额」。 */
+  function holdsRemoteSlot(route: DeviceRoute): boolean {
+    if (route.sessionLane.active?.kind === "remote" || route.elevatedLane.active?.kind === "remote") return true;
+    return route.sessionLane.attempt?.remoteStarted === true || route.elevatedLane.attempt?.remoteStarted === true;
+  }
+
+  function remoteSlotsInUse(exclude?: DeviceRoute): number {
+    let used = 0;
+    for (const route of routes.values()) {
+      if (route !== exclude && holdsRemoteSlot(route)) used += 1;
+    }
+    return used;
+  }
+
+  /** 交互需求撞上并发上限时，让只测量的 route 腾位——预留固定名额行不通（交互从来不是
+   * 一台一台来的），所以改成抢占。只有 routeHasFullDemand 为假的 route 可以被摘掉。 */
+  function reclaimRemoteSlot(route: DeviceRoute): void {
+    for (const other of routes.values()) {
+      if (remoteSlotsInUse(route) < CONNECTED_DEVICE_BUDGET) return;
+      if (other === route || !holdsRemoteSlot(other) || routeHasFullDemand(other)) continue;
+      other.measureProbePublished = true;
+      if (other.catalogTimer !== undefined) clock.clearInterval(other.catalogTimer);
+      other.catalogTimer = undefined;
+      closeLane(other, other.sessionLane, "为交互连接让出设备连接额度");
+      maintainHeartbeatTimer(other);
+      publish(other, "idle", "已为交互连接让出设备连接额度");
+      // 被让位的设备照样按测量的慢梯子回头试：名额一旦空出来它自己会回来，空不出来就
+      // 一直安静地停在「未测得」。
+      scheduleRecovery(other, other.sessionLane);
+    }
+  }
+
+  /** 连不上时对外发布什么：有人在看（完整需求）就照旧报 offline——红点加「Device route
+   * 离线」是给盯着它的人看的；只测量的 route 没人在看，必须安静地退回「未测得」，否则侧栏
+   * 每台够不着的设备都会在蓝色脉冲与红点之间来回闪。 */
+  function publishUnreachable(route: DeviceRoute, reason: string): void {
+    if (routeHasFullDemand(route)) {
+      publish(route, "offline", reason);
+      return;
+    }
+    route.measureProbePublished = true;
+    publish(route, "idle", `未能测量设备：${reason}`);
+  }
+
+  /** 无从归因的设备错误帧的出口（能归到某个 attach/input/请求/操作上的仍照旧直报——那些
+   * 按构造就属于有人在等的交互）。只测量的 route 无人在看：侧栏对每台在线设备都连着，
+   * 一台不高兴就会变成反复弹出的 toast，正是最该被安静降级的那种。 */
+  function reportDeviceError(route: DeviceRoute, message: string): void {
+    if (!routeHasFullDemand(route)) return;
+    options.onError(message);
   }
 
   function pruneExpiredOperations(route: DeviceRoute): void {
@@ -1455,7 +1561,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         return true;
       }
     }
-    options.onError(message);
+    reportDeviceError(route, message);
     return true;
   }
 
@@ -1874,15 +1980,21 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
 
+  /** measureOnly：一条 remote lane 加心跳，供侧栏对每台在线设备显示延迟与路径。它照样把连接
+   * 建起来，所以之后真进这台设备时是热的——只是不碰 loopback，见 routeHasFullDemand。 */
   function retainDevice(daemonId: string, retainOptions?: { measureOnly?: boolean }): () => void {
     const route = routeFor(daemonId);
     const measureOnly = retainOptions?.measureOnly === true;
     if (measureOnly) route.measureCount += 1;
     else {
       route.retainCount += 1;
+      // 从「只测量」升级成完整需求时，lane 可能已是测量期建好的 remote——它当时刻意跳过了
+      // direct。这里补一次立即提升，否则本机设备会一直用着 remote，永远升不回 direct。
       if (route.sessionLane.active?.kind === "remote") scheduleDirectRetry(route, true);
     }
-    if (routeHasFullDemand(route)) void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
+    if (routeHasFullDemand(route) || route.measureCount > 0) {
+      void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
+    }
     let released = false;
     return () => {
       if (released) return;
