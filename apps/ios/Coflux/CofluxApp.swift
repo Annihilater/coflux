@@ -36,7 +36,10 @@ struct CofluxApp: App {
                 buildID: "dev"
             ),
             transport: NetworkFrameworkTransport(),
-            tokenStore: CofluxAppComposition.makeTokenStore()
+            tokenStore: CofluxAppComposition.makeTokenStore(),
+            // iOS 只做连接方：进程内跑 Tailcat 用户态网络栈，既不服务也不抓系统流量，
+            // 因此不需要 NetworkExtension，也永远不会弹 VPN 授权。
+            remoteDeviceProvider: TailcatDeviceTransportProvider(bridge: CofluxTailcatBridge())
         ))
     }
 

@@ -29,5 +29,11 @@ struct RootView: View {
         }
         // 主文字默认色级联：未显式着色的 Text 用 web --foreground（plan 051）
         .foregroundStyle(Theme.foreground)
+        // 认证一通过就把「本地网络」授权问掉：等 Tailcat 拨号时系统才问，框会插在连接中途。
+        // 登录页不问——那时还不知道有没有设备要连，太突兀。
+        .task(id: client.authState == .authed) {
+            guard client.authState == .authed else { return }
+            LocalNetworkPermission.prime()
+        }
     }
 }
