@@ -159,6 +159,19 @@ The app checks after 15 seconds at startup, every four hours, and immediately up
 
 Local smoke testing: `pnpm -C apps/desktop run pack` produces unsigned `apps/desktop/dist/mac-arm64/Coflux.app` with fuses set and ad-hoc signing. Notifications/badges are reliable only in signed artifacts; Electron 42+ uses UNUserNotification on macOS. Failures in unsigned packages are not regressions.
 
+## iOS TestFlight releases
+
+The iOS app is released on its own, outside the `v*` tag: `apps/ios/release.sh` archives, uploads to App Store Connect, and then runs `apps/ios/testflight-distribute.mjs` to finish distribution. The build number is the commit count, so it rises on its own and the project file is never touched.
+
+Distribution needs two per-machine credentials, neither in Git:
+
+- `~/.appstoreconnect/private_keys/AuthKey_<kid>.p8` — the App Store Connect API key (App Manager). Archiving and uploading do **not** use it; they sign through the Xcode account session, because this key has no cloud-signing permission.
+- `~/.appstoreconnect/issuer_id` — the issuer UUID from App Store Connect > Users and Access > Integrations > App Store Connect API, above the key table. `ASC_ISSUER_ID` / `ASC_KEY_ID` override both.
+
+`testflight-distribute.mjs` waits for processing to reach `VALID`, writes What to Test, links external beta groups, and submits for beta review. Every step is idempotent, so a failed distribution is rerun on its own with `node apps/ios/testflight-distribute.mjs --build <number>` without repeating the upload. `--dry-run` reports what would change; `--whats-new` / `--whats-new-file` replace the default notes, which are the commit subjects touching `apps/ios`, `packages/swift-client` and `scripts/build-ios-transport.mjs` since the previous build's upload; `--groups` narrows the target groups and `--no-review` skips the submission.
+
+Two App Store Connect rules the script already encodes: internal groups receive every build automatically and reject an explicit assignment, and a build's `betaGroups` relationship rejects `GET_RELATED`, so link state is read from the builds collection. Export compliance needs no answer because `Coflux-Info.plist` sets `ITSAppUsesNonExemptEncryption` to `false`.
+
 ## How upgrades are applied
 
 Paired updates require a supervisor advertising `transport_pair_v1`. Devices
