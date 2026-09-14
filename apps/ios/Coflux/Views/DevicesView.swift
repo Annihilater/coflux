@@ -3,7 +3,9 @@ import CofluxProtocol
 import SwiftUI
 
 /// 设备面板（plan 077）：机群的健康（在线+RTT）、路径（relay 节点）、版本与身份一页扫完。
-/// 行三层，无详情页——机群个位数规模，点进二级页面反而把「扫一眼」变成「逐台点开」。
+/// 行三层的健康布局不变，但整行可点（plan 20260914）：进这台设备的设备级会话页。
+/// 原「无详情页」的取舍挡的是把健康信息搬进二级页面，不该顺带挡住 iOS 唯一一条
+/// 通往设备级终端（目录工作区）的入口。
 /// RTT/节点只在本页在场时测量（retainDeviceMeasure，onAppear 起 onDisappear 停，不常驻耗电）。
 struct DevicesView: View {
     let client: CofluxClient
@@ -28,10 +30,16 @@ struct DevicesView: View {
     var body: some View {
         List {
             ForEach(sortedDaemons, id: \.daemonID) { daemon in
-                deviceRow(daemon)
-                    .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20))
-                    .listRowBackground(Theme.background)
-                    .listRowSeparatorTint(Theme.border)
+                // 整行可点（行尾 chevron 由 NavigationLink 提供）；页面以 daemonID 寻址，
+                // 不把 DaemonInfo 捕获成值——设备会下线、改名、被移除。
+                NavigationLink {
+                    DeviceSessionsView(client: client, daemonID: daemon.daemonID)
+                } label: {
+                    deviceRow(daemon)
+                }
+                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20))
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
             }
         }
         .listStyle(.plain)
@@ -93,9 +101,9 @@ struct DevicesView: View {
         .opacity(daemon.online ? 1 : 0.72)
     }
 
-    @ViewBuilder
     private func thirdLine(_ daemon: Coflux_V1_DaemonInfo, transport: CofluxClient.DeviceTransportInfo?) -> some View {
-        HStack(spacing: 8) {
+        let running = runningSessionCount(daemon.daemonID)
+        return HStack(spacing: 8) {
             if daemon.online {
                 // 路径是实测出来的：direct/relay 来自 Tailcat 的 disco 探测，
                 // 没有测量结果时如实说「未连接」，不冒充任何一种链路。
@@ -119,8 +127,30 @@ struct DevicesView: View {
                     .foregroundStyle(daemon.online ? Theme.mutedForeground : Theme.subtleForeground)
                     .lineLimit(1)
             }
+            Spacer(minLength: 8)
+            // 运行中的设备级会话数：与项目列表的工作区行同一套词汇（绿点 + 数字，
+            // WorkspaceListView:147-156）。落在第三行行尾而不是首行，是为了不和
+            // 首行那颗「延迟色」的点挨在一起——两颗绿点连读会被当成同一件事。
+            if running > 0 {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Theme.success)
+                        .frame(width: 6, height: 6)
+                    Text("\(running)")
+                        .font(Theme.Fonts.meta.monospacedDigit().weight(.semibold))
+                }
+                .foregroundStyle(Theme.success)
+            }
         }
         .padding(.top, 2)
+    }
+
+    /// 只数这台设备 canonical 目录工作区里的 RUNNING 任务：点进去看到的就是这些，
+    /// 数字必须和页面一致。按 daemonID 统计会把项目工作区的终端也算进来——
+    /// 行上写 5、点开只有 1 个 tab，比不给数字更糟。
+    private func runningSessionCount(_ daemonID: String) -> Int {
+        guard let workspace = canonicalDirWorkspace(daemonID: daemonID, in: client.workspaces) else { return 0 }
+        return client.tasks.filter { $0.workspaceID == workspace.id && $0.status == .running }.count
     }
 
     /// mode 的真相源是 DeviceRouter：direct/relay 为实测路径，unknown 表示通道已建成
