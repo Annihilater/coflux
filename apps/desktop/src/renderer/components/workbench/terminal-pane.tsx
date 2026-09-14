@@ -191,6 +191,15 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     const terminal = new Terminal({
       allowProposedApi: false,
+      // 全屏 TUI（claude / grok 等开了 alternate screen + DECSET 1000/1002/1003）握着鼠标上报时，
+      // xterm 默认把 mousedown/drag 全转给应用，本地选区根本不成立 —— 于是没东西可 ⌘C。
+      // 每个终端都留的那道口子就是修饰键强制本地选区：macOS 上是 ⌥（iTerm2 / Terminal.app 同款），
+      // xterm 有这条路但默认关着。打开它，⌥+拖拽在任何抓鼠标的程序里都能划出选区。
+      macOptionClickForcesSelection: true,
+      // 上一条的直接后果：xterm 默认 ⌥+单击会往应用灌一串方向键把光标挪过去（VS Code 留着它，
+      // 因为那里的用户在 shell 提示符前）。我们的用户在 agent TUI 里，同一个手势变成一串噪声输入，
+      // 而 ⌥ 现在又是选区手势——必须关掉。
+      altClickMovesCursor: false,
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
