@@ -207,7 +207,7 @@ function tailLines(text, n) {
 }
 
 /**
- * 一行终端的第一列：句柄。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
+ * 一行终端的第一列：标识。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
  * 规则从 `taskId` 现算一个——生成规则是纯拼接，两边算出来的东西一样。
  * 与 Rust 版 `row_handle`（crates/cli/src/commands.rs）逐字对齐。
  */
@@ -535,9 +535,9 @@ const HELP = `coflux —— 账号与终端操作
                           该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
                           （不执行 git worktree remove）
 
-实体句柄：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
-coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收句柄（大小写不敏感），返回实体的地方都带一个
-ref 字段给出它的句柄。前缀在范围内撞车时会让你改用完整 ID；句柄类型与命令要的不一致会直接报错，
+实体标识：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
+coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收标识（大小写不敏感），返回实体的地方都带一个
+ref 字段给出它的标识。前缀在范围内撞车时会让你改用完整 ID；标识类型与命令要的不一致会直接报错，
 不会去动旁边那个实体。
 
 agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），

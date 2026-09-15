@@ -110,7 +110,7 @@ pub fn matches(target: &str, id: Option<&str>, expected: HandleKind) -> bool {
 pub fn check_filter(flag: &str, expected: HandleKind, target: &str) -> Result<(), String> {
     match parse(target) {
         Some(parsed) if parsed.kind != expected => Err(format!(
-            "--{flag} 需要{}句柄或{} ID，给的是{}句柄 {target}",
+            "--{flag} 需要{}标识或{} ID，给的是{}标识 {target}",
             expected.label(),
             expected.label(),
             parsed.kind.label()
@@ -133,7 +133,7 @@ mod tests {
             of(HandleKind::Device, "b6767697-60b2-4700-a304-1404bf03c675"),
             "coflux:device:b6767697"
         );
-        assert_eq!(of(HandleKind::Project, ""), "", "缺坐标时不能造出半截句柄");
+        assert_eq!(of(HandleKind::Project, ""), "", "缺坐标时不能造出半截标识");
     }
 
     #[test]
@@ -142,8 +142,8 @@ mod tests {
         assert_eq!(parsed.kind, HandleKind::Workspace);
         assert_eq!(parsed.prefix, "3f2a1b7c");
         assert!(parse("3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff").is_none());
-        assert!(parse("coflux:session:3f2a1b7c").is_none(), "会话没有句柄");
-        assert!(parse("coflux:workspace:3f2").is_none(), "少于 4 位不算句柄");
+        assert!(parse("coflux:session:3f2a1b7c").is_none(), "会话没有标识");
+        assert!(parse("coflux:workspace:3f2").is_none(), "少于 4 位不算标识");
         assert!(parse("coflux:workspace:xyz12345").is_none(), "必须是十六进制");
         assert!(parse("coflux:workspace:3f2a1b7c:more").is_none());
     }
@@ -171,11 +171,11 @@ mod tests {
             .expect_err("类型不符必须报错，不能打印空列表");
         assert_eq!(
             error,
-            "--device 需要设备句柄或设备 ID，给的是工作区句柄 coflux:workspace:3f2a1b7c"
+            "--device 需要设备标识或设备 ID，给的是工作区标识 coflux:workspace:3f2a1b7c"
         );
         let error = check_filter("workspace", HandleKind::Workspace, "coflux:terminal:9e21c4d0")
             .expect_err("类型不符必须报错");
-        assert!(error.contains("工作区句柄"), "{error}");
-        assert!(error.contains("终端句柄"), "{error}");
+        assert!(error.contains("工作区标识"), "{error}");
+        assert!(error.contains("终端标识"), "{error}");
     }
 }

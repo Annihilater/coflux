@@ -161,7 +161,7 @@ fn command_suffix(value: &Value) -> String {
     suffix
 }
 
-/// 一行终端的第一列：句柄。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
+/// 一行终端的第一列：标识。daemon 已经在载荷里给了 `ref`；它没给（CLI 比 daemon 新）就按同一条
 /// 规则从 `taskId` 现算一个——生成规则是纯拼接，两边算出来的东西一样。
 fn row_handle(terminal: &Value) -> String {
     let given = field_str(terminal, "ref");
@@ -836,8 +836,8 @@ mod tests {
         );
         assert_eq!(normalize_command(Some("   ")), "");
         assert_eq!(normalize_command(Some("pnpm test")), "pnpm test");
-        // `terminal list` 的行首在两版里都是句柄（node 侧见 coflux.mjs 的 cmdTerminal `list` 分支
-        // 与 account-client.mjs 的 entityHandle）：第一列是句柄，后面的列一字未动。
+        // `terminal list` 的行首在两版里都是标识（node 侧见 coflux.mjs 的 cmdTerminal `list` 分支
+        // 与 account-client.mjs 的 entityHandle）：第一列是标识，后面的列一字未动。
         let row = json!({ "terminals": [{ "taskId": "9e21c4d0-1111-2222-3333-444455556666", "ref": "coflux:terminal:9e21c4d0", "status": "running", "title": "构建" }] });
         assert_eq!(render_terminal_list(&row), "coflux:terminal:9e21c4d0  running  构建");
     }
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn terminal_list_leads_with_the_handle_even_against_a_daemon_that_sends_none() {
-        // 行首是句柄而不是裸 UUID：这是 agent 读得最多的一行，句柄既更短又自带类型，
+        // 行首是标识而不是裸 UUID：这是 agent 读得最多的一行，标识既更短又自带类型，
         // 且因为等价规则可以直接抄进下一条命令。
         let old_daemon = json!({ "terminals": [
             { "taskId": "9E21C4D0-1111-2222-3333-444455556666", "status": "running", "title": "构建" },
@@ -938,7 +938,7 @@ mod tests {
             render_workspace_current(&current),
             r#"{"workspaceId":"w1","ref":"coflux:workspace:3f2a1b7c","path":"/a","owningWorkspaceId":"w0","owningRef":"coflux:workspace:aaaabbbb","moved":true}"#
         );
-        // 旧 daemon 不给句柄：两个键一起省略，原有字段一字未动
+        // 旧 daemon 不给标识：两个键一起省略，原有字段一字未动
         assert_eq!(
             render_workspace_current(&json!({ "ok": true, "workspaceId": "w1", "path": "/a", "owningWorkspaceId": "w0", "moved": false })),
             r#"{"workspaceId":"w1","path":"/a","owningWorkspaceId":"w0","moved":false}"#

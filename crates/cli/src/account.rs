@@ -334,8 +334,8 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             "ports" => "ports",
             _ => unreachable!(),
         };
-        // 这两个筛选是**客户端字符串比较**，不经中心解析：句柄不在这里认，就会一个都匹配不上、
-        // 打印一个空列表还不报错。类型给错（拿工作区句柄填 --device）同样先说清楚再说。
+        // 这两个筛选是**客户端字符串比较**，不经中心解析：标识不在这里认，就会一个都匹配不上、
+        // 打印一个空列表还不报错。类型给错（拿工作区标识填 --device）同样先说清楚再说。
         if let Some(target) = args.string("device") {
             handle::check_filter("device", handle::HandleKind::Device, target)?;
         }

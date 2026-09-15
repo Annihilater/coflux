@@ -56,7 +56,7 @@ test("a handle resolves to the one account entity whose id starts with it", asyn
 test("a handle of the wrong kind is refused from the token alone, naming both kinds", async () => {
   const stub = lookupOf(["3f2a1b7c-0000-4000-8000-000000000000"]);
   const error = refusal(await resolveEntityHandle("device", "coflux:workspace:3f2a1b7c", stub.lookup));
-  assert.match(error, /工作区 handle/);
+  assert.match(error, /工作区标识/);
   assert.match(error, /设备/);
   assert.equal(stub.calls.length, 0, "never probes another kind's table");
 });

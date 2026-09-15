@@ -175,7 +175,7 @@ export function Sidebar(props: SidebarProps) {
                       { label: "重命名", onClick: () => props.onRenameProject(project) },
                       // Handle copy (plan 20260914-entity-handles): the right-click menu is the
                       // only place it surfaces — handles are never persistent UI text.
-                      { label: "复制句柄", onClick: () => copyEntityHandle("project", project.id) },
+                      { label: "复制标识", onClick: () => copyEntityHandle("project", project.id) },
                       { type: "divider" },
                       { label: "移除项目", onClick: () => props.onRemoveProject(project) },
                     ]}
@@ -307,7 +307,7 @@ export function Sidebar(props: SidebarProps) {
                           size="sm"
                           items={[
                             { label: "重命名", onClick: () => props.onRenameWorkspace(workspace) },
-                            { label: "复制句柄", onClick: () => copyEntityHandle("workspace", workspace.id) },
+                            { label: "复制标识", onClick: () => copyEntityHandle("workspace", workspace.id) },
                             ...(!workspace.isMain
                               ? [{ type: "divider" } as const, { label: "删除工作区", onClick: () => props.onRemoveWorkspace(workspace) }]
                               : []),
@@ -509,7 +509,7 @@ export function Sidebar(props: SidebarProps) {
                   size="sm"
                   items={[
                     { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
-                    { label: "复制句柄", onClick: () => copyEntityHandle("device", daemon.daemonId) },
+                    { label: "复制标识", onClick: () => copyEntityHandle("device", daemon.daemonId) },
                     { type: "divider" },
                     { label: "移除设备", onClick: () => props.onRemoveDevice(daemon) },
                   ]}

@@ -405,13 +405,13 @@ test("entity handle：种类不符的 handle 当场被拒，错误同时点出�
   const workspaceHandle = handleOf("workspace", "0123456789abcdef");
 
   const onDevice = await accountCommand({ op: "device.exec", deviceId: workspaceHandle, command: "true" });
-  assert.equal(onDevice.ok, false, "工作区 handle 不能当设备用");
-  assert.match(onDevice.error, /工作区 handle/, "错误点出 handle 自己的种类");
+  assert.equal(onDevice.ok, false, "工作区标识不能当设备用");
+  assert.match(onDevice.error, /工作区标识/, "错误点出标识自己的种类");
   assert.match(onDevice.error, /设备/, "错误点出这里要的种类");
 
   const onTerminal = await accountCommand({ op: "terminal.stop", terminalId: workspaceHandle });
-  assert.equal(onTerminal.ok, false, "工作区 handle 不能当终端用");
-  assert.match(onTerminal.error, /工作区 handle/);
+  assert.equal(onTerminal.ok, false, "工作区标识不能当终端用");
+  assert.match(onTerminal.error, /工作区标识/);
   assert.match(onTerminal.error, /终端/);
 });
 

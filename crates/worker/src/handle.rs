@@ -105,7 +105,7 @@ mod tests {
             of(HandleKind::Workspace, "3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff"),
             "coflux:workspace:3f2a1b7c"
         );
-        assert_eq!(of(HandleKind::Device, ""), "", "缺坐标时不能造出半截句柄");
+        assert_eq!(of(HandleKind::Device, ""), "", "缺坐标时不能造出半截标识");
     }
 
     #[test]
@@ -119,9 +119,9 @@ mod tests {
     #[test]
     fn a_bare_uuid_and_a_malformed_handle_are_not_handles() {
         assert!(parse("9e21c4d0-1111-2222-3333-444455556666").is_none());
-        assert!(parse("coflux:session:9e21c4d0").is_none(), "会话没有句柄");
+        assert!(parse("coflux:session:9e21c4d0").is_none(), "会话没有标识");
         assert!(parse("cfx:terminal:9e21c4d0").is_none());
-        assert!(parse("coflux:terminal:9e2").is_none(), "少于 4 位不算句柄");
+        assert!(parse("coflux:terminal:9e2").is_none(), "少于 4 位不算标识");
         assert!(parse("coflux:terminal:zzzzzzzz").is_none(), "必须是十六进制");
         assert!(parse("coflux:terminal:9e21c4d0:extra").is_none());
         assert!(parse("coflux:terminal").is_none());
@@ -139,7 +139,7 @@ mod tests {
             HandleKind::Terminal,
         ] {
             let text = of(kind, "b6767697-60b2-4700-a304-1404bf03c675");
-            let parsed = parse(&text).expect("生成的句柄必须能解析回去");
+            let parsed = parse(&text).expect("生成的标识必须能解析回去");
             assert_eq!(parsed.kind, kind);
             assert_eq!(parsed.prefix, "b6767697");
         }

@@ -55,7 +55,7 @@ impl SessionRecord {
 const MAX_EXITED_RECORDS: usize = 512;
 const EXITED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// 句柄前缀在一个工作区内的匹配结果。「零」与「不在本工作区」对调用方是同一件事，故不区分。
+/// 标识前缀在一个工作区内的匹配结果。「零」与「不在本工作区」对调用方是同一件事，故不区分。
 pub(crate) enum PrefixMatch<'a> {
     None,
     Unique(&'a str, &'a SessionRecord),
@@ -233,7 +233,7 @@ impl SessionLedger {
         Some((session_id.as_str(), record))
     }
 
-    /// 按终端句柄的 id 前缀找 task——**候选集只有 `workspace_id` 这一个工作区的终端**。
+    /// 按终端标识的 id 前缀找 task——**候选集只有 `workspace_id` 这一个工作区的终端**。
     ///
     /// 范围不是整个账本，这一点是本方法存在的全部理由：本地命令刻意把「不在本工作区」与
     /// 「不存在」收敛成同一句错（见 `agent_ctl::resolve_local_target`），若跨工作区做前缀匹配，
@@ -241,7 +241,7 @@ impl SessionLedger {
     /// 歧义也因此只在本工作区内判定。
     ///
     /// 与 [`SessionLedger::task`] 分开：那是精确 `HashMap` 命中，它上面挂着一组精确匹配的用例，
-    /// 不为句柄改它的语义。
+    /// 不为标识改它的语义。
     pub fn task_by_prefix<'a>(&'a self, prefix: &str, workspace_id: &str) -> PrefixMatch<'a> {
         if prefix.is_empty() || workspace_id.is_empty() {
             return PrefixMatch::None;
@@ -411,7 +411,7 @@ mod tests {
         ledger.remember_create("s1", "9e21c4d0-1111-2222-3333-444455556666", "ws-a");
         ledger.remember_create("s2", "3f2a1b7c-aaaa-bbbb-cccc-ddddeeeeffff", "ws-a");
         assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("s1"));
-        // 大小写不敏感：句柄已归一成小写，task id 也按小写比
+        // 大小写不敏感：标识已归一成小写，task id 也按小写比
         assert_eq!(matched(ledger.task_by_prefix("3f2a", "ws-a")), Some("s2"));
         // 前缀谁也不命中 = 不存在
         assert_eq!(matched(ledger.task_by_prefix("deadbeef", "ws-a")), None);
@@ -439,7 +439,7 @@ mod tests {
         ledger.remember_create("s1", "9e21c4d0-1111-2222-3333-444455556666", "ws-a");
         ledger.remember_create("s2", "9e21c4d0-9999-8888-7777-666655554444", "ws-a");
         assert_eq!(matched(ledger.task_by_prefix("9e21c4d0", "ws-a")), Some("<ambiguous>"));
-        // 撞车时的出路是完整 ID——它不是句柄，走的是 `task` 那条精确命中
+        // 撞车时的出路是完整 ID——它不是标识，走的是 `task` 那条精确命中
         assert_eq!(
             ledger.task("9e21c4d0-1111-2222-3333-444455556666").unwrap().0,
             "s1"

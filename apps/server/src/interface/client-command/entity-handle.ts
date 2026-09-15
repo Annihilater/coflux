@@ -57,10 +57,10 @@ export async function resolveEntityHandle(expected: EntityKind, input: string, l
   // Kind mismatch is answered from the token alone: a `terminal.stop` handed a workspace handle must
   // fail loudly rather than act on something adjacent, and must not learn whether that workspace exists.
   if (handle.kind !== expected) {
-    return { ok: false, error: `${input} 是${KIND_LABEL[handle.kind]} handle，这里要的是${KIND_LABEL[expected]}（coflux:${expected}:…）` };
+    return { ok: false, error: `${input} 是${KIND_LABEL[handle.kind]}标识，这里要的是${KIND_LABEL[expected]}标识（coflux:${expected}:…）` };
   }
   const matches = await lookup(expected, handle.prefix, 2);
-  if (matches.length === 0) return { ok: false, error: `handle ${input} 在当前账号下没有对应的${KIND_LABEL[expected]}` };
-  if (matches.length > 1) return { ok: false, error: `handle ${input} 同时匹配到多个${KIND_LABEL[expected]}，请改用完整 UUID` };
+  if (matches.length === 0) return { ok: false, error: `标识 ${input} 在当前账号下没有对应的${KIND_LABEL[expected]}` };
+  if (matches.length > 1) return { ok: false, error: `标识 ${input} 同时匹配到多个${KIND_LABEL[expected]}，请改用完整 UUID` };
   return { ok: true, value: matches[0] };
 }

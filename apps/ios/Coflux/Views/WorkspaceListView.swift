@@ -21,7 +21,7 @@ struct WorkspaceListView: View {
                             } label: {
                                 workspaceRow(workspace)
                             }
-                            // 长按复制工作区句柄（plan 20260914）
+                            // 长按复制工作区标识（plan 20260914）
                             .copyHandleContextMenu(.workspace, id: workspace.id)
                             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                             .listRowBackground(Theme.background)

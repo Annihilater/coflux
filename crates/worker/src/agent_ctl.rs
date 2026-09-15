@@ -747,13 +747,13 @@ fn resolve_scope(
     }
 }
 
-/// 本地命令的目标解析（plan 094 + 102；句柄见 plan 20260914-entity-handles）：调用方与目标都必须
+/// 本地命令的目标解析（plan 094 + 102；标识见 plan 20260914-entity-handles）：调用方与目标都必须
 /// 有已知归属，且目标的归属等于调用方的**有效工作区**（cwd 落在哪个工作区，就对哪个工作区的终端
 /// 说话）。归属永远不猜——早于 daemon 升级的会话归属未知，一律可读拒绝；能按申报的 cwd 改向的
 /// 只是**目标**。「不在本工作区」与「不存在」同一句错误——不向别的工作区泄漏存在性。
 ///
-/// `target` 既收完整 task id，也收终端句柄 `coflux:terminal:<前 8 位>`。句柄是**边界概念**：
-/// 在这里换成真 id，往下一层再也见不到它。三种拒绝各说各的话——类型不符（拿工作区句柄来关终端）、
+/// `target` 既收完整 task id，也收终端标识 `coflux:terminal:<前 8 位>`。标识是**边界概念**：
+/// 在这里换成真 id，往下一层再也见不到它。三种拒绝各说各的话——类型不符（拿工作区标识来关终端）、
 /// 本工作区内前缀有歧义、以及与「不存在」共用的那一句。匹配范围只有本工作区，歧义也只在本工作区内
 /// 判定（见 [`crate::session_ledger::SessionLedger::task_by_prefix`]）。
 fn resolve_local_target(
@@ -804,23 +804,23 @@ fn resolve_local_target(
     Ok((target_session.to_string(), target.clone()))
 }
 
-/// 拿别的实体的句柄来指终端：同时说清「给的是什么」与「要的是什么」，绝不去另一张表里试着
-/// 把它对上某个相邻实体——`terminal close` 收到一个工作区句柄必须响亮地失败。
+/// 拿别的实体的标识来指终端：同时说清「给的是什么」与「要的是什么」，绝不去另一张表里试着
+/// 把它对上某个相邻实体——`terminal close` 收到一个工作区标识必须响亮地失败。
 fn wrong_kind_message(given: HandleKind, target: &str) -> String {
     format!(
-        "这是{}句柄 {target}，本命令要的是终端句柄 coflux:terminal:<前 8 位> 或终端 ID（用 coflux terminal list 查）",
+        "这是{}标识 {target}，本命令要的是终端标识 coflux:terminal:<前 8 位> 或终端 ID（用 coflux terminal list 查）",
         given.label()
     )
 }
 
-/// 前缀在**本工作区内**撞了：短句柄的可读性代价就是这一句，让用户改用完整 id。
+/// 前缀在**本工作区内**撞了：短标识的可读性代价就是这一句，让用户改用完整 id。
 fn ambiguous_message(target: &str) -> String {
-    format!("句柄 {target} 在本工作区匹配到多个终端，请改用完整终端 ID（用 coflux terminal list 查）")
+    format!("标识 {target} 在本工作区匹配到多个终端，请改用完整终端 ID（用 coflux terminal list 查）")
 }
 
-/// 一条本地终端结果的身份字段：`taskId` 永远是解析出来的**完整 UUID**，`ref` 是它的句柄。
-/// 都不是调用方递进来的原文——不然一个句柄进来就会原样出现在 `taskId` 里，`ref` 还会由句柄再
-/// 生成一次句柄，而「结果带 ref」这类粗检查照样过。
+/// 一条本地终端结果的身份字段：`taskId` 永远是解析出来的**完整 UUID**，`ref` 是它的标识。
+/// 都不是调用方递进来的原文——不然一个标识进来就会原样出现在 `taskId` 里，`ref` 还会由标识再
+/// 生成一次标识，而「结果带 ref」这类粗检查照样过。
 fn terminal_identity(task_id: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("taskId".into(), serde_json::Value::from(task_id));
@@ -1200,18 +1200,18 @@ mod tests {
         assert_eq!(
             identity.get("taskId").and_then(serde_json::Value::as_str),
             Some("9e21c4d0-1111-2222-3333-444455556666"),
-            "taskId 必须是解析后的完整 UUID，不是调用方递进来的句柄"
+            "taskId 必须是解析后的完整 UUID，不是调用方递进来的标识"
         );
         assert_eq!(
             identity.get("ref").and_then(serde_json::Value::as_str),
             Some("coflux:terminal:9e21c4d0")
         );
-        // ref 由 UUID 生成；拿句柄再生成一次句柄只会得到一个残废的 ref
+        // ref 由 UUID 生成；拿标识再生成一次标识只会得到一个残废的 ref
         let wrong = terminal_identity("coflux:terminal:9e21c4d0");
         assert_ne!(
             wrong.get("ref").and_then(serde_json::Value::as_str),
             Some("coflux:terminal:9e21c4d0"),
-            "句柄进 taskId 会被这条断言抓住"
+            "标识进 taskId 会被这条断言抓住"
         );
     }
 
@@ -1235,11 +1235,11 @@ mod tests {
     #[test]
     fn a_handle_of_the_wrong_kind_and_an_ambiguous_one_say_different_things() {
         let wrong = wrong_kind_message(HandleKind::Workspace, "coflux:workspace:3f2a1b7c");
-        assert!(wrong.contains("工作区句柄"), "{wrong}");
-        assert!(wrong.contains("终端句柄"), "{wrong}");
+        assert!(wrong.contains("工作区标识"), "{wrong}");
+        assert!(wrong.contains("终端标识"), "{wrong}");
         assert!(wrong.contains("coflux:workspace:3f2a1b7c"), "{wrong}");
         let device = wrong_kind_message(HandleKind::Device, "coflux:device:b6767697");
-        assert!(device.contains("设备句柄"), "{device}");
+        assert!(device.contains("设备标识"), "{device}");
         let ambiguous = ambiguous_message("coflux:terminal:9e21c4d0");
         assert!(ambiguous.contains("多个终端"), "{ambiguous}");
         assert!(ambiguous.contains("完整终端 ID"), "{ambiguous}");

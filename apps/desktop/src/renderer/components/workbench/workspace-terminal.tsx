@@ -442,7 +442,7 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
                   size="sm"
                   // Handle copy (plan 20260914-entity-handles): a terminal's handle is the task
                   // id's first 8 hex characters; it appears here and nowhere else on screen.
-                  items={[{ label: "复制句柄", onClick: () => copyEntityHandle("terminal", task.id) }]}
+                  items={[{ label: "复制标识", onClick: () => copyEntityHandle("terminal", task.id) }]}
                 >
                   <div
                     className={cn(
