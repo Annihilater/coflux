@@ -31,6 +31,7 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
     case "logout":
       await hub.revokeClientSession(accountId, tokenHash);
       return reply({ ok: true, value: null });
+    case "project.import": return reply(await hub.importProjectForAccount(accountId, command));
     case "workspace.new": return reply(await hub.createWorkspaceForAccount(accountId, command));
     case "workspace.rename": return reply(await hub.renameWorkspaceForAccount(accountId, command.workspaceId, command.name));
     case "workspace.remove": return reply(await hub.removeWorkspaceForAccount(accountId, command.workspaceId));
