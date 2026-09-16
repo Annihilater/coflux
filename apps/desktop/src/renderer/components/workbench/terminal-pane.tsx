@@ -7,13 +7,18 @@ import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@coflux/client";
 
+import {
+  canSendTerminalInput,
+  canSendTerminalResize,
+  type TerminalControlState,
+} from "@/components/workbench/terminal-control-state";
+import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
 
-/** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
- * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，
- * 输入门控与 attaching/stopped 一致（下方 owned 判等），不需要单独处理。 */
-export type TerminalControlState = "stopped" | "idle" | "attaching" | "owned" | "detached";
+/** 控制权状态与输入门控的真相源在 terminal-control-state.ts（纯值语义，可无 DOM 单测）；
+ * 这里原样再导出，调用方（terminal-attach.ts 等）的 import 路径不变。 */
+export type { TerminalControlState };
 
 export type TerminalController = {
   dimensions: () => { cols: number; rows: number };
@@ -228,6 +233,19 @@ export function TerminalPane(props: TerminalPaneProps) {
         // chunk 加载失败（离线/网络异常），保持默认 DOM 渲染器。
       });
 
+    // 防抖窗口里待落地的那次 fit；applyFit 与卸载都要清掉它。
+    let pendingFit: number | undefined;
+    const applyFit = () => {
+      if (pendingFit !== undefined) {
+        window.clearTimeout(pendingFit);
+        pendingFit = undefined;
+      }
+      try {
+        fitAddon.fit();
+      } catch {
+        // 容器切换显示的瞬间可能尚无可测尺寸，下一次观察回调会再次 fit。
+      }
+    };
     const fit = () => {
       if (!liveRef.current.active || !host.isConnected) return;
       // 工作区保活模式下被 display:none 隐藏时尺寸为 0：FitAddon 会把终端钳到 2×1
@@ -235,11 +253,28 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 0 尺寸一律不 fit，切回显示后 WorkspaceTerminal 的 rAF fit 会用真实尺寸补上。
       const rect = host.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      // 拖窗口时 ResizeObserver 每帧都回调；六个 fit 入口全从这里过，判定统一放这儿（见 terminal-fit.ts）。
+      let proposed: TerminalFitProposal;
       try {
-        fitAddon.fit();
+        proposed = fitAddon.proposeDimensions();
       } catch {
-        // 容器切换显示的瞬间可能尚无可测尺寸，下一次观察回调会再次 fit。
+        return;
       }
+      const decision = decideTerminalFit({ cols: terminal.cols, rows: terminal.rows, bufferLines: terminal.buffer.active.length }, proposed);
+      if (decision === "skip") return;
+      if (decision === "immediate") {
+        applyFit();
+        return;
+      }
+      if (pendingFit !== undefined) window.clearTimeout(pendingFit);
+      pendingFit = window.setTimeout(() => {
+        pendingFit = undefined;
+        // 防抖落地时面板可能已经被隐藏（尺寸归零）：那条「不可见不 fit」的性质要一直成立。
+        if (!liveRef.current.active || !host.isConnected) return;
+        const size = host.getBoundingClientRect();
+        if (size.width === 0 || size.height === 0) return;
+        applyFit();
+      }, TERMINAL_FIT_LIMITS.debounceMs);
     };
     const controller: TerminalController = {
       dimensions: () => ({ cols: terminal.cols, rows: terminal.rows }),
@@ -264,14 +299,14 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     props.onReady(props.taskId, controller);
 
-    // 输入/resize 只在 active && owned 时发送（安全语义，见 TerminalControlState）。
+    // 输入/resize 的门控见 terminal-control-state.ts（输入含 attaching，尺寸只在 owned）。
     terminal.onData((data) => {
       const { active, controlState, sessionId, sendInput } = liveRef.current;
-      if (active && controlState === "owned" && sessionId) sendInput(sessionId, data);
+      if (active && canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
     });
     terminal.onResize(({ cols, rows }) => {
       const { active, controlState, sessionId, sendResize } = liveRef.current;
-      if (active && controlState === "owned" && sessionId) sendResize(sessionId, cols, rows);
+      if (active && canSendTerminalResize(controlState) && sessionId) sendResize(sessionId, cols, rows);
     });
 
     // 剪贴板贴图（plan 014）：capture 阶段挂在 host（xterm textarea 的祖先）上，
@@ -402,6 +437,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => {
       disposed = true;
       observer.disconnect();
+      if (pendingFit !== undefined) window.clearTimeout(pendingFit);
       dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
       host.removeEventListener("dragenter", handleDragEnter);
