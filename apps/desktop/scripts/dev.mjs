@@ -21,9 +21,10 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, hostname } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -208,6 +209,57 @@ function ensureProfileFree(instance) {
   }
 }
 
+/** Shell-safe rendering of a path inside a copy-pasteable command. */
+function quoteForShell(value) {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function electronPackageDir() {
+  const linked = join(PACKAGE_ROOT, "node_modules", "electron");
+  if (existsSync(linked)) return linked;
+  try {
+    return dirname(createRequire(import.meta.url).resolve("electron/package.json"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Electron's binary is a download, not a package file: it is never hard-linked out of the pnpm
+ * store, so every worktree needs its own copy and a fresh one has the package without `dist/` or
+ * `path.txt`. Electron's own `index.js` would fetch it lazily, but electron-vite reads `path.txt`
+ * itself and throws a bare `Error: Electron uninstall` — *after* the dev server is already up and
+ * the summary has printed. Checking here turns the first start in a new worktree into a diagnostic.
+ *
+ * Nothing is downloaded automatically, and another worktree's `dist` is never borrowed
+ * (`ELECTRON_OVERRIDE_DIST_PATH`): the Electron versions can differ, and that mismatch is silent.
+ */
+function ensureElectronInstalled() {
+  const dir = electronPackageDir();
+  if (!dir) fail("the electron package is not installed; run `pnpm install` at the repository root first.");
+  let executable = "";
+  try {
+    executable = join(dir, "dist", readFileSync(join(dir, "path.txt"), "utf8").trim());
+  } catch {
+    executable = "";
+  }
+  if (executable && existsSync(executable)) return;
+  fail(
+    [
+      "Electron's binary is missing in this worktree.",
+      "",
+      "It is a download rather than a package file, so it is not shared through the pnpm store and",
+      "each worktree installs its own copy once (hundreds of MB, from a shared cache when another",
+      "worktree already fetched this version). Install it for this worktree:",
+      "",
+      `  node ${quoteForShell(join(dir, "install.js"))}`,
+      "",
+      "Do not point this worktree at another one's dist directory: the versions can differ and the",
+      "mismatch fails silently.",
+    ].join("\n"),
+  );
+}
+
 /** Only reached when the profile lock is free, so the listener is something else entirely. */
 function ensurePortFree(port) {
   const result = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
@@ -330,6 +382,8 @@ function start(instance) {
 const instance = resolveInstance();
 printSummary(instance);
 if (process.env.COFLUX_DESKTOP_DEV_DRY_RUN) process.exit(0);
+// Before anything is created or claimed: a missing Electron binary means nothing can start.
+ensureElectronInstalled();
 ensureProfileFree(instance);
 ensurePortFree(instance.port);
 prepareProfile(instance);

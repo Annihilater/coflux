@@ -25,15 +25,17 @@ work and for states production cannot produce on demand (enrollment, pending aut
 rejected as outdated). See [docs/desktop-acceptance.md](../../../docs/desktop-acceptance.md) for the
 acceptance handover itself.
 
-The launcher (`apps/desktop/scripts/dev.mjs`) prints a summary before it starts anything:
+The launcher (`apps/desktop/scripts/dev.mjs`) prints a summary before it starts anything. Every
+value is derived from the worktree you ran it in, so the shape is fixed but the values are not —
+these are placeholders, not a real instance:
 
 ```
 Coflux desktop preview
-  instance  desktop-preview-parallel
-  worktree  /Users/wsq/Workspace/coflux/.claude/worktrees/20260916-desktop-preview-parallel
-  branch    dev/20260916-desktop-preview-parallel
-  profile   /Users/wsq/Library/Application Support/Coflux-dev-20260916-desktop-preview-para-3f9c21
-  renderer  http://localhost:5317
+  instance  <label>
+  worktree  <worktree root>
+  branch    <branch, or (detached)>
+  profile   ~/Library/Application Support/Coflux-dev-<slug>
+  renderer  http://localhost:<port in 5280-5379>
   server    wss://api.coflux.dev/client
 ```
 
@@ -121,6 +123,17 @@ lock" and would take a live instance's lock away.
   real terminals. Stop only the preview you started.
 
 ## Housekeeping
+
+**A brand-new worktree needs Electron installed once, before its first preview.** Electron's binary
+is a download rather than a package file: it is never hard-linked out of the pnpm store, so every
+worktree carries its own copy (hundreds of MB) and `pnpm install` alone does not put it there. That
+is a real per-worktree cost of running previews in parallel — disk, and a wait on the first start.
+The launcher checks for it before starting anything and prints the exact command
+(`node <worktree>/apps/desktop/node_modules/electron/install.js`); without that check electron-vite
+would bring the dev server up and only then fail with a bare `Error: Electron uninstall`. The
+download itself is cached across worktrees, so a second worktree on the same Electron version
+usually extracts rather than downloads. Never point one worktree at another's `dist` directory: the
+versions can differ and the mismatch fails silently.
 
 Profiles are never garbage-collected, and each one adds a local browser grant on the production
 account for this machine's daemon. The ceilings are generous but finite (1024 in the worker, 256 per
