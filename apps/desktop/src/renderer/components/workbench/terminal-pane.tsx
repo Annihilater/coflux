@@ -4,13 +4,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type IDecoration, type IMarker } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import { useToast } from "@astryxdesign/core/Toast";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import type { FsWriteResult } from "@coflux/client";
 
+import { commandOutputText, createCommandMarkReader } from "@/components/workbench/terminal-command-marks";
 import {
   canSendTerminalInput,
   canSendTerminalResize,
@@ -81,6 +82,22 @@ function fillContextMenuTrigger(element: HTMLDivElement | null): void {
   element.style.height = "100%";
 }
 
+/** 命令装饰条的颜色，取自上面的终端主题。 */
+const COMMAND_COLORS = { running: "#6a6a6a", success: "#4fae6e", failure: "#e05c6a", unknown: "#c9a227" } as const;
+/** 命令账本上限：markers 会随 scrollback 裁剪自行 dispose，这条只是防病态输出把账本撑爆。 */
+const MAX_TRACKED_COMMANDS = 500;
+
+/** 命令导航（OSC 133）对 React 层暴露的接口；账本本身活在挂载期闭包里。 */
+type TerminalCommandNavigation = {
+  count: () => number;
+  /** 滚到上/下一个提示符。 */
+  scrollBy: (delta: -1 | 1) => void;
+  /** 最后一条已结束命令的输出；没有则返回 null。 */
+  lastOutput: () => string | null;
+  /** gap 恢复（快照覆盖）与「重新打开」时清账：快照是渲染好的屏幕，里面没有 OSC 133。 */
+  clear: () => void;
+};
+
 function extForMime(mime: string): string {
   switch (mime) {
     case "image/png":
@@ -148,11 +165,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   const showToast = useToast();
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const commandsRef = useRef<TerminalCommandNavigation | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
   // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
   const [menuSelection, setMenuSelection] = useState(false);
+  const [menuCommands, setMenuCommands] = useState(0);
   // 链接悬停提示（需要修饰键才激活，不提示的话没人猜得到）；位置用 fixed，省掉容器坐标换算。
   const [linkHint, setLinkHint] = useState<{ label: string; x: number; y: number } | null>(null);
 
@@ -301,6 +320,113 @@ export function TerminalPane(props: TerminalPaneProps) {
         );
       },
     });
+    // 命令边界（OSC 133）：shell 集成早就在往流里发，这里才第一次有人接。
+    // 标记只用来认边界；载荷里的会话标识全程留在 createCommandMarkReader 的闭包里
+    // （不进 state、不打日志、不进错误信息，见 terminal-command-marks.ts）。
+    type CommandEntry = {
+      prompt: IMarker;
+      decoration: IDecoration | undefined;
+      element: HTMLElement | undefined;
+      state: keyof typeof COMMAND_COLORS;
+      start: IMarker | undefined;
+      end: IMarker | undefined;
+    };
+    const commands: CommandEntry[] = [];
+    const markReader = createCommandMarkReader();
+
+    const paintCommand = (entry: CommandEntry) => {
+      const element = entry.element;
+      if (!element) return;
+      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 host 的 pl-3 内边距，当成 Cursor 那样的行首标记条。
+      element.style.width = "3px";
+      element.style.height = "100%";
+      element.style.marginLeft = "-9px";
+      element.style.borderRadius = "2px";
+      element.style.backgroundColor = COMMAND_COLORS[entry.state];
+    };
+    const dropCommand = (entry: CommandEntry) => {
+      const index = commands.indexOf(entry);
+      if (index >= 0) commands.splice(index, 1);
+      entry.decoration?.dispose();
+      entry.start?.dispose();
+      entry.end?.dispose();
+    };
+    const clearCommands = () => {
+      for (const entry of [...commands]) {
+        dropCommand(entry);
+        entry.prompt.dispose();
+      }
+      commands.length = 0;
+    };
+    const beginCommand = () => {
+      // 上一条没等到 D 就又出提示符：shell 被 exec 掉或钩子被跳过，按「未知」收尾而不是一直转。
+      const previous = commands[commands.length - 1];
+      if (previous && previous.state === "running") {
+        previous.state = "unknown";
+        paintCommand(previous);
+      }
+      const prompt = terminal.registerMarker(0);
+      const entry: CommandEntry = {
+        prompt,
+        decoration: terminal.registerDecoration({ marker: prompt, x: 0, width: 1 }),
+        element: undefined,
+        state: "unknown",
+        start: undefined,
+        end: undefined,
+      };
+      entry.decoration?.onRender((element) => {
+        entry.element = element;
+        paintCommand(entry);
+      });
+      // marker 随 scrollback 裁剪自行 dispose，账本跟着掉这一行。
+      prompt.onDispose(() => dropCommand(entry));
+      commands.push(entry);
+      while (commands.length > MAX_TRACKED_COMMANDS) {
+        const oldest = commands[0]!;
+        dropCommand(oldest);
+        oldest.prompt.dispose();
+      }
+    };
+    terminal.parser.registerOscHandler(133, (data) => {
+      const mark = markReader.read(data);
+      if (!mark) return false;
+      const current = commands[commands.length - 1];
+      if (mark.kind === "prompt-start") {
+        beginCommand();
+      } else if (mark.kind === "command-start" && current) {
+        current.start = terminal.registerMarker(0);
+        current.state = "running";
+        paintCommand(current);
+      } else if (mark.kind === "command-end" && current) {
+        current.end = terminal.registerMarker(0);
+        current.state = mark.exitCode === undefined ? "unknown" : mark.exitCode === 0 ? "success" : "failure";
+        paintCommand(current);
+      }
+      return true;
+    });
+
+    const promptLines = () => commands.map((entry) => entry.prompt.line).filter((line) => line >= 0);
+    commandsRef.current = {
+      count: () => commands.length,
+      scrollBy: (delta) => {
+        const lines = promptLines().sort((a, b) => a - b);
+        const from = terminal.buffer.active.viewportY;
+        const target = delta < 0 ? lines.filter((line) => line < from).pop() : lines.find((line) => line > from);
+        if (target !== undefined) terminal.scrollToLine(target);
+      },
+      lastOutput: () => {
+        const entry = [...commands].reverse().find((item) => item.start && item.start.line >= 0 && item.state !== "running");
+        if (!entry?.start) return null;
+        const buffer = terminal.buffer.active;
+        const last = (entry.end && entry.end.line >= 0 ? entry.end.line : buffer.baseY + buffer.cursorY) - 1;
+        const lines: string[] = [];
+        for (let y = entry.start.line; y <= last; y++) lines.push(buffer.getLine(y)?.translateToString(true) ?? "");
+        const text = commandOutputText(lines);
+        return text.length > 0 ? text : null;
+      },
+      clear: clearCommands,
+    };
+
     terminal.open(host);
     // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
     // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
@@ -377,6 +503,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       reset: () => {
         terminal.reset();
         terminal.clear();
+        clearCommands();
       },
       writeSystem: (message, tone = "warning") => {
         const color = tone === "error" ? "31" : tone === "success" ? "32" : "33";
@@ -543,6 +670,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       terminalRef.current = null;
       controllerRef.current = null;
       searchAddonRef.current = null;
+      commandsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -555,7 +683,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     const controller = controllerRef.current;
     if (!sessionId || !terminal || !controller) return;
     const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
-      if (replace) terminal.reset();
+      if (replace) {
+        // gap 恢复：快照是渲染好的屏幕，里面没有 OSC 133，旧的命令边界跟着这一屏一起作废。
+        terminal.reset();
+        commandsRef.current?.clear();
+      }
       terminal.write(data);
       props.onOutput(props.taskId, sessionId);
     });
@@ -609,16 +741,33 @@ export function TerminalPane(props: TerminalPaneProps) {
     );
   }
 
-  // ⌘F：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里没有 KeyF，
-  // 不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  function copyLastCommandOutput() {
+    const text = commandsRef.current?.lastOutput() ?? null;
+    if (text === null) {
+      showToast({ body: "没有可复制的命令输出", type: "error" });
+      return;
+    }
+    void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
+  }
+
+  // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里
+  // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
   useEffect(() => {
     if (!props.active) return;
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      if (event.code !== "KeyF") return;
+      if (event.code === "KeyF") {
+        event.preventDefault();
+        event.stopPropagation();
+        setSearchOpen(true);
+        // 已经开着时 searchOpen 不变、下面那个 effect 不会重跑，这里补上「换个词重搜」的全选。
+        searchInputRef.current?.select();
+        return;
+      }
+      if (event.code !== "ArrowUp" && event.code !== "ArrowDown") return;
       event.preventDefault();
       event.stopPropagation();
-      setSearchOpen(true);
+      commandsRef.current?.scrollBy(event.code === "ArrowUp" ? -1 : 1);
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
@@ -637,7 +786,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     { label: "粘贴", onClick: pasteFromClipboard },
     { type: "divider" },
     { label: "全选", onClick: () => terminalRef.current?.selectAll() },
-    { label: "查找…", onClick: () => setSearchOpen(true) },
+    { label: `查找…  ${SHORTCUT_MODIFIER_PREFIX}F`, onClick: () => setSearchOpen(true) },
+    { type: "divider" },
+    // 命令导航（OSC 133）：没有 shell 集成的会话里一条边界都收不到，这几项就是灰的。
+    { label: `上一个命令  ${SHORTCUT_MODIFIER_PREFIX}↑`, isDisabled: menuCommands === 0, onClick: () => commandsRef.current?.scrollBy(-1) },
+    { label: `下一个命令  ${SHORTCUT_MODIFIER_PREFIX}↓`, isDisabled: menuCommands === 0, onClick: () => commandsRef.current?.scrollBy(1) },
+    { label: "复制上一条命令的输出", isDisabled: menuCommands === 0, onClick: copyLastCommandOutput },
     { type: "divider" },
     { label: "清屏", onClick: () => terminalRef.current?.clear() },
   ];
@@ -645,6 +799,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   function handleContextMenuOpenChange(open: boolean) {
     if (open) {
       setMenuSelection(Boolean(terminalRef.current?.hasSelection()));
+      setMenuCommands(commandsRef.current?.count() ?? 0);
       return;
     }
     // 菜单自己也要收焦点，等它归位后再把焦点还给终端。
@@ -664,7 +819,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         ref={fillContextMenuTrigger}
         label="终端操作"
         size="sm"
-        menuWidth={180}
+        menuWidth={220}
         items={contextMenuItems}
         onOpenChange={handleContextMenuOpenChange}
       >
