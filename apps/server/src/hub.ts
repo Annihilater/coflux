@@ -278,6 +278,17 @@ class StaleDaemonConnectionError extends Error {}
 /** 操作层（plan 091，账号接口 消费）的统一结果：错误一律是可读文案，不抛。 */
 export type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/**
+ * The outcome of removing a task record. `gone` — the task no longer exists, or no longer belongs to
+ * this device — is kept apart from a real `failed` because removal is idempotent: the caller's intent
+ * already holds, so the requester is owed a `taskRemoved`, not an error. The cases carry their own
+ * message so the wording stays where it is produced; callers branch on `case`, never on the text.
+ */
+type TaskRemoval =
+  | { case: "removed"; taskId: TaskId }
+  | { case: "gone"; message: string }
+  | { case: "failed"; message: string };
+
 /** 用户名 + 密码凭证校验的结果（WS clientAuth 与页面登录共用，plan 107）：busy = scrypt 并发已满。 */
 export type CredentialCheck =
   | { case: "ok"; accountId: AccountId; userId: string | null }
@@ -3111,8 +3122,16 @@ export class Hub {
       }
       case "taskRemove": {
         const initial = await this.requireTask(client, msg.payload.value.taskId);
+        // requireTask already answered with a ServerError; a second reply would be one too many.
         if (!initial) return;
-        await this.removeTaskRecord(initial, false);
+        // Every request gets exactly one answer. A real removal is answered by its broadcast; a task
+        // that is already gone gets a point-to-point `taskRemoved`, because the removal is idempotent
+        // and silence here leaves the requester with nothing to wait for but a timeout. `ServerError`
+        // stays reserved for a genuine failure: clients consume it as a global signal and it disturbs
+        // unrelated terminals.
+        const removal = await this.removeTaskRecord(initial, false);
+        if (removal.case === "gone") this.sendClient(client, { case: "taskRemoved", value: { taskId: initial.id } });
+        else if (removal.case === "failed") this.sendClient(client, { case: "error", value: { message: removal.message } });
         break;
       }
       case "taskRead": {
@@ -3218,22 +3237,27 @@ export class Hub {
 
   /** 删任务记录（含 checkpoint）：与 checkpoint/taskCreate/removeDevice 共用 device 父锁；锁后重读并在
    * 同一事务删 checkpoint + task，防迟到 checkpoint 在 taskRemove 后插回孤儿。web 由 UI 保证只删已退出的；
-   * 账号接口传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。 */
-  private async removeTaskRecord(initial: Task, rejectRunning: boolean): Promise<OperationOutcome<TaskId>> {
+   * 账号接口传 rejectRunning=true 在同一事务内拒绝仍在运行的终端（plan 091）。
+   *
+   * The result names its case instead of only carrying a message: "the task is already gone" is an
+   * idempotent success for the caller's intent, while a revoked device or a still-running terminal
+   * is a real failure, and a caller must not have to match user-facing copy to tell them apart. */
+  private async removeTaskRecord(initial: Task, rejectRunning: boolean): Promise<TaskRemoval> {
     type RemoveTaskTx =
-      | { case: "error"; message: string }
+      | { case: "gone"; message: string }
+      | { case: "failed"; message: string }
       | { case: "removed"; task: Task; cancelledPreparedOperationIds: string[] };
     const removal = await this.store.transaction<RemoveTaskTx>(async (tx) => {
       const device = await tx.claimActiveDevice(initial.daemonId, initial.accountId);
-      if (!device) return { case: "error", message: "设备已撤销或不属于本账号" };
+      if (!device) return { case: "failed", message: "设备已撤销或不属于本账号" };
       const current = await tx.getTask(initial.id);
       if (
         !current ||
         current.accountId !== initial.accountId ||
         current.daemonId !== initial.daemonId
-      ) return { case: "error", message: "任务已不存在" };
+      ) return { case: "gone", message: "任务已不存在" };
       if (rejectRunning && (current.status === TaskStatus.RUNNING || current.sessionId)) {
-        return { case: "error", message: "终端仍在运行，先 stop_terminal 再删除" };
+        return { case: "failed", message: "终端仍在运行，先 stop_terminal 再删除" };
       }
       const cancelledPreparedOperationIds = await tx.expirePreparedOperationsByTarget(
         current.accountId,
@@ -3246,7 +3270,7 @@ export class Hub {
       await tx.removeTask(current.id);
       return { case: "removed", task: current, cancelledPreparedOperationIds };
     });
-    if (removal.case === "error") return { ok: false, error: removal.message };
+    if (removal.case !== "removed") return removal;
     // 删除已提交：先取消旧 exit/catalog continuation，再按 task 完整身份摘运行时，
     // 最后广播 removed。catalog 可能在 taskRemove 锁后重读前已清空 DB session_id，
     // 所以不能只依赖返回 task.sessionId；内存映射仍保留可核对的 taskId。
@@ -3257,7 +3281,7 @@ export class Hub {
       "任务已删除，session.create 已取消",
     );
     this.broadcast(task.accountId, { case: "taskRemoved", value: { taskId: task.id } });
-    return { ok: true, value: task.id };
+    return { case: "removed", taskId: task.id };
   }
 
   /** 构建版本准入的"允许版本集合"（plan 033）：env 显式覆盖 ∪ 每个 build-id.txt 文件的
@@ -4175,7 +4199,10 @@ export class Hub {
     const task = await this.store.getTask(terminalId);
     if (!task || task.accountId !== accountId) return { ok: false, error: `终端 ${terminalId} 不存在或不属于当前账号` };
     if (task.status === TaskStatus.RUNNING || task.sessionId) return { ok: false, error: "终端仍在运行，先 stop_terminal 再删除" };
-    return await this.removeTaskRecord(task, true);
+    // The account interface keeps its outcome shape and its wording: here "already gone" is still an
+    // error, because the caller asked about one specific terminal it had just looked up.
+    const removal = await this.removeTaskRecord(task, true);
+    return removal.case === "removed" ? { ok: true, value: removal.taskId } : { ok: false, error: removal.message };
   }
 
   /** `device.exec`: one-shot command execution on a device, ssh semantics (`ssh host "cmd"`).
