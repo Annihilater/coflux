@@ -209,6 +209,27 @@ Out of scope:
   removing inherited environment.
 - A validation command fails twice after one reasonable fix.
 
+## Verification record (2026-09-16)
+
+- `cargo test` with `RUSTFLAGS="-D warnings"`: coflux-cli 38 passed, coflux-protocol
+  42 passed, coflux-worker 123 passed, coflux-supervisor 82 passed / **3 failed**.
+  The three are `shell_integration::tests::{bash,zsh}_function_translates_the_variable_into_plugin_dir`
+  and `zsh_chain_runs_user_rc_in_order_including_a_user_set_zdotdir`; they fail
+  **identically on the baseline** (verified by restoring `sessions.rs` to
+  `9bf06535` and re-running: 8 passed / 3 failed), so they are pre-existing and
+  environmental, not caused by this change. They spawn a real zsh/bash whose
+  `claude` function resolves to this machine's live
+  `~/.coflux/agent-integrations/…` directory instead of the temp dir the test
+  sets — a coflux-instrumented development machine cannot run them. `/etc/zshenv`
+  and `/etc/zshrc` were checked and are clean, so the exact injection point is
+  still unidentified.
+- The new test passes: `sessions::tests::pty_device_path_names_an_existing_char_device_of_this_session`.
+- **Not verified on a real machine**: `grok doctor` reporting `native: remote
+  (pbcopy)` needs a daemon built from this branch and a runtime restart. Two
+  desktop dev instances from other worktrees were running on this machine at
+  verification time, so swapping the daemon binaries would have disrupted
+  unrelated work. This is the one acceptance item left for the user.
+
 ## Maintenance notes
 
 - This is the emitting half of cross-machine copy; the receiving half is plan
