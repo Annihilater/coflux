@@ -72,16 +72,6 @@ const SEARCH_OPTIONS: ISearchOptions = {
 
 const NO_SEARCH_RESULTS = { index: -1, count: 0 };
 
-/**
- * Astryx 的 ContextMenu 触发区默认「包住内容」，而终端要整块可右键。
- * 仓库没有编译 StyleX，triggerXstyle 用不了，只能拿到元素后直接铺满。
- */
-function fillContextMenuTrigger(element: HTMLDivElement | null): void {
-  if (!element) return;
-  element.style.width = "100%";
-  element.style.height = "100%";
-}
-
 /** 命令装饰条的颜色，取自上面的终端主题。 */
 const COMMAND_COLORS = { running: "#6a6a6a", success: "#4fae6e", failure: "#e05c6a", unknown: "#c9a227" } as const;
 /** 命令账本上限：markers 会随 scrollback 裁剪自行 dispose，这条只是防病态输出把账本撑爆。 */
@@ -809,21 +799,28 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   // pointer-events-auto：面板层整体是 pointer-events-none（plan 104，见 terminal-panes.tsx），
   // 只有当前可见的面板把鼠标事件（选区、链接、拖拽上传）收回来。
+  //
+  // 单格 grid（grid-cols-1 grid-rows-1，两条轨道都是 minmax(0,1fr)）：ContextMenu 的触发区默认
+  // 「包住内容」——它没有 display/尺寸样式，而本仓库没编译 StyleX，triggerXstyle 用不了。
+  // 作为 grid item 它被两个方向 stretch 满整格。这条不依赖 ContextMenu 的任何实现细节：
+  // 任何在流内的子元素都会被 stretch。终端本身靠下面 host 的 absolute inset-0 铺满（两道保险），
+  // 但触发区的盒子仍需是整格——ContextMenu 的光标锚点按「触发区内的偏移」定位，
+  // 触发区塌了菜单就会弹错地方。
+  // 搜索框/链接提示/拖拽遮罩都是 absolute，不是 grid item，定位仍相对这个容器，行为不变。
   return (
     <div
-      className={props.active ? "pointer-events-auto absolute inset-0 block" : "absolute inset-0 hidden"}
+      className={props.active ? "pointer-events-auto absolute inset-0 grid grid-cols-1 grid-rows-1" : "absolute inset-0 hidden"}
       aria-hidden={!props.active}
     >
-      {/* macOS 上 Electron 不提供默认右键菜单，不接管的话右键完全没反应。 */}
-      <ContextMenu
-        ref={fillContextMenuTrigger}
-        label="终端操作"
-        size="sm"
-        menuWidth={220}
-        items={contextMenuItems}
-        onOpenChange={handleContextMenuOpenChange}
-      >
-        <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      {/* macOS 上 Electron 不提供默认右键菜单，不接管的话右键完全没反应。
+          不传 ref：布局已不靠它。（顺带记下已核实的行为：ContextMenu 把 ref 经 useMergedRefs 合到
+          真实的触发 <div> 上，children 就挂在那个 div 里、只多一个零尺寸的 <span> 光标锚点兄弟，
+          见 @astryxdesign/core/src/ContextMenu/ContextMenu.tsx 的 return。） */}
+      <ContextMenu label="终端操作" size="sm" menuWidth={220} items={contextMenuItems} onOpenChange={handleContextMenuOpenChange}>
+        {/* absolute inset-0 而不是 h-full：铺满的是「最近的定位祖先」——触发区（position: relative）
+            与外层容器（absolute inset-0）两者的盒子都正好是整格，谁来当这个祖先都一样大。
+            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。 */}
+        <div ref={hostRef} className={`absolute inset-0 pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       </ContextMenu>
       {searchOpen ? (
         <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">

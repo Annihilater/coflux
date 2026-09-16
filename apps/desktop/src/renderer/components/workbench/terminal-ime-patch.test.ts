@@ -38,17 +38,35 @@ function inputEvent(inputType: string, data: string | null) {
   return { ev, cancelled };
 }
 
-test("补丁生效：IME 直接提交的字符由 input 事件确定性发送一次，并清空 textarea、吃掉事件", () => {
+test("补丁生效：IME 直接提交的字符由 input 事件确定性发送一次，并清空 textarea", () => {
   const { core, sent } = fakeCore();
   const result = applyImeCommittedInputPatch(core);
   assert.deepEqual(result, { applied: true, missing: [] });
 
   core.textarea!.value = "？";
-  const { ev, cancelled } = inputEvent("insertText", "？");
+  const { ev } = inputEvent("insertText", "？");
   assert.equal(core._inputEvent!(ev), true);
   assert.deepEqual(sent, [{ data: "？", wasUserInput: true }]);
   assert.equal(core.textarea!.value, "");
-  assert.deepEqual(cancelled, { prevented: 1, stopped: 1 });
+});
+
+/**
+ * 补丁不取消 input 事件。6.0.0 里那句 `core.cancel(ev)` 受内部选项 `cancelEvents` 门控，
+ * 而它默认 false、apps/desktop 也从没设过，所以那一刀每次都空转；beta 里方法和选项都已删除。
+ * 真去调 stopPropagation 会把事件挡在 textarea 及其祖先的其它监听器之外——那是升级凭空引入的
+ * 新行为，不是"保持原样"。这条用例就是拦着它被再加回来。
+ */
+test("补丁不取消 input 事件：preventDefault / stopPropagation 一次都不调", () => {
+  const { core } = fakeCore();
+  applyImeCommittedInputPatch(core);
+
+  const committed = inputEvent("insertText", "！");
+  core._inputEvent!(committed.ev);
+  assert.deepEqual(committed.cancelled, { prevented: 0, stopped: 0 });
+
+  const backspace = inputEvent("deleteContentBackward", null);
+  core._inputEvent!(backspace.ev);
+  assert.deepEqual(backspace.cancelled, { prevented: 0, stopped: 0 });
 });
 
 test("竞态 diff 路径被停用：_handleAnyTextareaChanges 变成 no-op", () => {

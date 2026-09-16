@@ -19,13 +19,36 @@
  *
  * ## 6.0.0 → 6.1.0-beta.304 的差异
  *
- * `CoreBrowserTerminal.cancel(ev)` 整个方法被删了（6.0.0 里它就是
- * `preventDefault() + stopPropagation()`，受默认为 true 的 `cancelEvents` 选项门控），
- * 这里改为直接调这两个方法，语义与 6.0.0 默认选项下一致。
+ * `CoreBrowserTerminal.cancel(ev)` 整个方法被删了。**补丁不补这一刀**，因为 6.0.0 下它本来就
+ * 什么都没做：
+ *
+ * ```ts
+ * public cancel(ev, force?) {
+ *   if (!this.options.cancelEvents && !force) return;   // ← 每次都从这里返回
+ *   ev.preventDefault(); ev.stopPropagation(); return false;
+ * }
+ * ```
+ *
+ * `cancelEvents` 的默认值是 **false**（6.0.0 的 `common/services/OptionsService.ts` defaults 里
+ * 写死 `cancelEvents: false`；它连 `ITerminalOptions` 都没进，是个内部选项），而 apps/desktop
+ * 从来没设过它——旧补丁里那句 `core.cancel!(ev)` 不带 force，因此每一次都走 early return。
+ * 到了 beta，`cancel` 方法与 `cancelEvents` 选项在整棵源码树里都已不存在，也就没有"跟着选项走"
+ * 这个选项了。
+ *
+ * 所以这里**不调** `preventDefault()` / `stopPropagation()`：真调了反而是这次升级凭空引入的新行为
+ * （`input` 事件不可取消，`preventDefault` 是空转，但 `stopPropagation` 会把事件挡在 textarea 及其
+ * 祖先上的其它监听器之外），而这个模块的全部职责恰恰是"别悄悄改 IME 行为"。
+ * terminal-ime-patch.test.ts 有一条用例专门盯着"没有取消事件"，防止它再被加回来。
+ *
  * `CompositionHelper._isComposing` 新增了公开 getter `isComposing`，优先读公开面。
  */
 
-/** 补丁要改的 input 事件面（MouseEvent/InputEvent 的子集，便于无 DOM 单测）。 */
+/**
+ * 补丁要改的 input 事件面（InputEvent 的子集，便于无 DOM 单测）。
+ *
+ * `preventDefault` / `stopPropagation` 留在类型里只是为了说明"真实 InputEvent 有这两个方法，
+ * 而我们刻意不调"（理由见上），单测据此断言补丁路径从不取消事件。
+ */
 export type ImeInputEvent = {
   inputType: string;
   data: string | null;
@@ -103,24 +126,17 @@ export function applyImeCommittedInputPatch(core: XtermCoreInternals | null | un
       core._unprocessedDeadKey = false;
       coreService.triggerDataEvent(ev.data, true);
       textarea.value = ""; // 及时清空，textarea 累积残值正是上游 diff 路径不可靠的来源之一
-      cancelInputEvent(ev);
+      // 不取消事件：6.0.0 的 cancel(ev) 在 cancelEvents 默认 false 下本就是空操作，见文件头。
       return true;
     }
     if (ev.inputType === "deleteContentBackward") {
       // 对应被停用的 diff 路径里"值变短发 DEL"分支（IME 吞掉 Backspace keydown 的场景）
       coreService.triggerDataEvent(DEL, true);
       textarea.value = "";
-      cancelInputEvent(ev);
       return true;
     }
     return origInputEvent.call(core, ev);
   };
 
   return { applied: true, missing: [] };
-}
-
-/** 6.0.0 的 `CoreBrowserTerminal.cancel(ev)` 在 6.1 beta 被删，这里就是它默认选项下的全部行为。 */
-function cancelInputEvent(ev: ImeInputEvent): void {
-  ev.preventDefault();
-  ev.stopPropagation();
 }
