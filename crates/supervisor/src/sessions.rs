@@ -41,6 +41,41 @@ pub fn prepend_path_segment(segment: &str, current: Option<&str>) -> String {
     parts.join(":")
 }
 
+/// supervisor 自身多由 launchd 拉起，环境里既没有 locale 也没有 `COLORTERM`；PTY 里的 shell 于是
+/// 落在 `LC_CTYPE="C"`，宽字符/emoji 的列宽判定全错。补的是「空」，不是「错」。
+///
+/// `C.UTF-8` 而不是 `en_US.UTF-8`：我们要修的只是 charmap，不是 collation/messages/格式化。
+/// `C.UTF-8` 把 `LC_COLLATE` 留在与今天逐字相同的字节序上（`en_US.UTF-8` 会改 `ls`/`sort` 的
+/// 排序），且在 glibc ≥ 2.35 / musl / macOS 上都内建，不依赖发行版是否生成过某个 locale。
+const DEFAULT_LOCALE: &str = "C.UTF-8";
+/// locale 判定顺序与 POSIX `setlocale` 一致：`LC_ALL` > `LC_CTYPE` > `LANG`。三者**只要有一个非空**
+/// 就整体不注入，父环境的 locale 原样透传——包括用户故意设的 `LANG=C`。「保留父 locale」优先于
+/// 「保证 UTF-8」：这里修的是空 locale，不是错 locale。
+const LOCALE_ENV_VARS: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+/// truecolor 能力声明；父环境已有值（如 `24bit`）则透传。
+const DEFAULT_COLORTERM: &str = "truecolor";
+/// 宿主终端标识。与 `TERM` 同类：它描述的是「这个 tty 由谁提供」，在 coflux 会话里答案只能是
+/// coflux，父环境继承下来的 `Apple_Terminal` / `vscode` 是错的，故无条件覆盖。
+const TERM_PROGRAM_VALUE: &str = "coflux";
+
+/// PTY 会话 shell 的 locale / 颜色环境（plan 20260916-terminal-cursor-parity M1）。
+///
+/// 返回的是**覆盖项**：调用方必须在拷贝 `std::env::vars()` **之后**逐条写入，否则被 supervisor
+/// 自身环境盖回去（与 `PATH` / `COFLUX_*` 同一条约束）。`lookup` 读的是 supervisor 自身环境，
+/// 单测可传入模拟的父环境，把结果当纯值断言。
+fn terminal_env_overrides(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+    let non_empty = |key: &str| lookup(key).is_some_and(|value| !value.is_empty());
+    let mut overrides = Vec::new();
+    if !LOCALE_ENV_VARS.iter().any(|key| non_empty(key)) {
+        overrides.push(("LANG", DEFAULT_LOCALE.to_string()));
+    }
+    if !non_empty("COLORTERM") {
+        overrides.push(("COLORTERM", DEFAULT_COLORTERM.to_string()));
+    }
+    overrides.push(("TERM_PROGRAM", TERM_PROGRAM_VALUE.to_string()));
+    overrides
+}
+
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
 /// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
@@ -856,6 +891,11 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        // plan 20260916-terminal-cursor-parity M1：locale / COLORTERM / TERM_PROGRAM。与下面两段
+        // 同理，必须写在拷贝 std::env 之后，否则被 supervisor 自身环境覆盖回去。
+        for (key, value) in terminal_env_overrides(|key| std::env::var(key).ok()) {
+            command.env(key, value);
+        }
         command.env("COFLUX_HOME", &self.home);
         // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
         // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
@@ -2091,6 +2131,112 @@ mod tests {
         );
         // 空段照原样保留（PATH 里的空段有"当前目录"语义，不替用户清理）
         assert_eq!(prepend_path_segment("/x", Some("/a::/b")), "/x:/a::/b");
+    }
+
+    /// 把「拷贝 std::env::vars() 再逐条覆盖」这一步建模成纯值：模拟的父环境 + 覆盖项 = 子进程
+    /// 实际拿到的环境。不起真 shell 读 `locale`——本 crate 已有三条测试因为起真 shell 而在
+    /// 装了 coflux agent 集成的开发机上必假红。
+    fn spawn_env(parent: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut env: BTreeMap<String, String> = parent
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        let lookup = |key: &str| {
+            parent
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        };
+        for (key, value) in terminal_env_overrides(lookup) {
+            env.insert(key.to_string(), value);
+        }
+        env
+    }
+
+    #[test]
+    fn spawn_env_injects_utf8_locale_only_when_the_parent_has_none() {
+        // 父环境三个 locale 变量全空：注入 UTF-8 默认值，shell 于是拿到 UTF-8 的 LC_CTYPE。
+        let injected = spawn_env(&[("PATH", "/usr/bin")]);
+        assert_eq!(injected.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert!(
+            injected["LANG"].to_ascii_uppercase().contains("UTF-8"),
+            "注入的 locale 必须是 UTF-8"
+        );
+        assert_eq!(injected.get("LC_ALL"), None, "不新增 LC_ALL");
+        assert_eq!(injected.get("LC_CTYPE"), None, "不新增 LC_CTYPE");
+
+        // 空串等同于未设置：shell 里 `LANG=` 与没有 LANG 的 setlocale 行为一致。
+        let empty = spawn_env(&[("LANG", ""), ("LC_ALL", ""), ("LC_CTYPE", "")]);
+        assert_eq!(empty.get("LANG").map(String::as_str), Some("C.UTF-8"));
+    }
+
+    #[test]
+    fn spawn_env_passes_the_parent_locale_through_verbatim_including_non_utf8() {
+        // 三者任一非空 → 整体不注入。故意设的非 UTF-8 locale 也原样透传：
+        // 「保留父 locale」优先于「保证 UTF-8」。
+        let deliberate_c = spawn_env(&[("LANG", "C")]);
+        assert_eq!(deliberate_c.get("LANG").map(String::as_str), Some("C"));
+        assert_eq!(deliberate_c.get("LC_ALL"), None);
+        assert_eq!(deliberate_c.get("LC_CTYPE"), None);
+
+        // LC_ALL 单独存在时也不能给 LANG 补一个与之矛盾的默认值。
+        let lc_all_only = spawn_env(&[("LC_ALL", "ja_JP.eucJP")]);
+        assert_eq!(
+            lc_all_only.get("LC_ALL").map(String::as_str),
+            Some("ja_JP.eucJP")
+        );
+        assert_eq!(lc_all_only.get("LANG"), None, "LC_ALL 已定调，不再注入 LANG");
+
+        // LC_CTYPE 同理——它正是宽字符判定真正读的那一个。
+        let lc_ctype_only = spawn_env(&[("LC_CTYPE", "zh_CN.GB18030")]);
+        assert_eq!(
+            lc_ctype_only.get("LC_CTYPE").map(String::as_str),
+            Some("zh_CN.GB18030")
+        );
+        assert_eq!(lc_ctype_only.get("LANG"), None);
+
+        // 三者同时存在时优先级不影响结论：一个都不改。
+        let all_three = spawn_env(&[
+            ("LC_ALL", "de_DE.UTF-8"),
+            ("LC_CTYPE", "de_DE.UTF-8"),
+            ("LANG", "de_DE.UTF-8"),
+        ]);
+        assert_eq!(
+            all_three.get("LANG").map(String::as_str),
+            Some("de_DE.UTF-8")
+        );
+    }
+
+    #[test]
+    fn spawn_env_fills_colorterm_when_absent_and_always_names_coflux() {
+        let injected = spawn_env(&[]);
+        assert_eq!(
+            injected.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+        assert_eq!(
+            injected.get("TERM_PROGRAM").map(String::as_str),
+            Some("coflux")
+        );
+
+        // 父环境已声明颜色能力 → 透传，不替用户「升级」。
+        let existing = spawn_env(&[("COLORTERM", "24bit")]);
+        assert_eq!(existing.get("COLORTERM").map(String::as_str), Some("24bit"));
+
+        // TERM_PROGRAM 与 TERM 同类：描述宿主终端，coflux 会话里继承来的值是错的。
+        let inherited = spawn_env(&[("TERM_PROGRAM", "Apple_Terminal")]);
+        assert_eq!(
+            inherited.get("TERM_PROGRAM").map(String::as_str),
+            Some("coflux")
+        );
+    }
+
+    #[test]
+    fn spawn_env_keeps_every_other_parent_variable_untouched() {
+        let env = spawn_env(&[("PATH", "/usr/bin"), ("HOME", "/h"), ("EDITOR", "vi")]);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/h"));
+        assert_eq!(env.get("EDITOR").map(String::as_str), Some("vi"));
     }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
