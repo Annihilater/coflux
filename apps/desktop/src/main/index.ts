@@ -159,8 +159,10 @@ if (!app.requestSingleInstanceLock()) {
     installOriginRewrite();
 
     // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
-    // 只放行全屏与剪贴板写入（用户手势）。其余（摄像头/麦克风/地理位置/...）一律拒绝。
-    const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write"]);
+    // 只放行全屏与剪贴板读写。其余（摄像头/麦克风/地理位置/...）一律拒绝。
+    // clipboard-read 是终端右键「粘贴」与 OSC 52 读取剪贴板必需的（两者都走
+    // navigator.clipboard.readText()）；不放行的话没有报错，只是静默什么都不发生。
+    const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write", "clipboard-read"]);
     session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(allowedPermissions.has(permission)));
     session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
 

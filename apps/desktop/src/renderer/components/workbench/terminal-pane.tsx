@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import { useToast } from "@astryxdesign/core/Toast";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import type { FsWriteResult } from "@coflux/client";
 
 import {
@@ -12,9 +16,11 @@ import {
   canSendTerminalResize,
   type TerminalControlState,
 } from "@/components/workbench/terminal-control-state";
+import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 
 /** 控制权状态与输入门控的真相源在 terminal-control-state.ts（纯值语义，可无 DOM 单测）；
  * 这里原样再导出，调用方（terminal-attach.ts 等）的 import 路径不变。 */
@@ -51,6 +57,29 @@ const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
 // 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+
+/** ⌘F 查找的高亮：颜色只接受 #RRGGBB，取自上面的终端主题。开着 decorations 才有
+ * onDidChangeResults（命中计数），所以它不是纯装饰。 */
+const SEARCH_OPTIONS: ISearchOptions = {
+  decorations: {
+    matchBackground: "#3a3a3a",
+    matchOverviewRuler: "#6a6a6a",
+    activeMatchBackground: "#c9a227",
+    activeMatchColorOverviewRuler: "#c9a227",
+  },
+};
+
+const NO_SEARCH_RESULTS = { index: -1, count: 0 };
+
+/**
+ * Astryx 的 ContextMenu 触发区默认「包住内容」，而终端要整块可右键。
+ * 仓库没有编译 StyleX，triggerXstyle 用不了，只能拿到元素后直接铺满。
+ */
+function fillContextMenuTrigger(element: HTMLDivElement | null): void {
+  if (!element) return;
+  element.style.width = "100%";
+  element.style.height = "100%";
+}
 
 function extForMime(mime: string): string {
   switch (mime) {
@@ -117,6 +146,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   // 上传中用光标转圈表达进行态；成功不打扰，只在失败时弹 toast 告知原因——不写进终端画面避免污染 claude 会话。
   const [isUploading, setIsUploading] = useState(false);
   const showToast = useToast();
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
+  // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
+  const [menuSelection, setMenuSelection] = useState(false);
+  // 链接悬停提示（需要修饰键才激活，不提示的话没人猜得到）；位置用 fixed，省掉容器坐标换算。
+  const [linkHint, setLinkHint] = useState<{ label: string; x: number; y: number } | null>(null);
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
@@ -196,17 +234,73 @@ export function TerminalPane(props: TerminalPaneProps) {
     // 这里是 11，Unicode 12-17 新增的字符两边宽度仍不一致，gap 恢复时表现为折行位置对不上。
     terminal.loadAddon(new Unicode11Addon());
     terminal.unicode.activeVersion = "11";
+    // ⌘F 查找（命中高亮 + 计数）与 OSC 52 剪贴板。
+    // OSC 52 的「读」走 navigator.clipboard.readText()，需要主进程放行 clipboard-read
+    // （见 main/index.ts 的 allowedPermissions），不放行时不报错、只是什么都不发生。
+    const searchAddon = new SearchAddon();
+    terminal.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
+    searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => setSearchResults({ index: resultIndex, count: resultCount }));
+    terminal.loadAddon(new ClipboardAddon());
+
     // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
     // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
     // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
     // 这里带 URL 调 window.open，主进程的 setWindowOpenHandler 拿到真实 URL 交 shell.openExternal；
     // 返回值在桌面版恒为 null（deny），不据此分支。
     terminal.loadAddon(
-      new WebLinksAddon((event, uri) => {
-        if (!shouldOpenTerminalLink(event)) return;
-        window.open(uri, "_blank", "noopener");
-      }),
+      new WebLinksAddon(
+        (event, uri) => {
+          setLinkHint(null);
+          if (!shouldOpenTerminalLink(event)) return;
+          window.open(uri, "_blank", "noopener");
+        },
+        {
+          hover: (event) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击打开`, x: event.clientX, y: event.clientY }),
+          leave: () => setLinkHint(null),
+        },
+      ),
     );
+
+    // 文件引用（`src/a.ts:12:5`）：悬停有下划线与提示，⌘+点击把原文复制到剪贴板。
+    // 不是「在编辑器里打开」——工作台没有编辑器面板，而本 plan 只许动主进程的权限集合，
+    // 没法新开一个打开文件的 IPC。对着 agent 终端而言，路径能一键进剪贴板就是最有用的动作。
+    terminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+        const { text, cellOf } = readTerminalLine(line);
+        const references = findFileReferences(text);
+        if (references.length === 0) {
+          callback(undefined);
+          return;
+        }
+        callback(
+          references.map((reference) => ({
+            // IBufferRange 是「1-based 含右端」，正好等于 0-based 右开端点（见 addon-web-links 的 LinkComputer）。
+            range: {
+              start: { x: cellOf[reference.start]! + 1, y: bufferLineNumber },
+              end: { x: cellOf[reference.end]!, y: bufferLineNumber },
+            },
+            text: reference.text,
+            decorations: { pointerCursor: true, underline: true },
+            activate: (event: MouseEvent, linkText: string) => {
+              setLinkHint(null);
+              if (!shouldOpenTerminalLink(event)) return;
+              void navigator.clipboard.writeText(linkText).then(
+                () => liveRef.current.showToast({ body: `已复制 ${linkText}`, type: "info" }),
+                () => liveRef.current.showToast({ body: "复制路径失败", type: "error" }),
+              );
+            },
+            hover: (event: MouseEvent) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击复制路径`, x: event.clientX, y: event.clientY }),
+            leave: () => setLinkHint(null),
+          })),
+        );
+      },
+    });
     terminal.open(host);
     // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
     // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
@@ -445,9 +539,10 @@ export function TerminalPane(props: TerminalPaneProps) {
       host.removeEventListener("dragleave", handleDragLeave);
       host.removeEventListener("drop", handleDrop);
       props.onDispose(props.taskId, controller);
-      terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
+      terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl/search/clipboard/unicode11）与输入监听
       terminalRef.current = null;
       controllerRef.current = null;
+      searchAddonRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -478,6 +573,84 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => cancelAnimationFrame(frame);
   }, [props.active]);
 
+  // 查找与右键菜单的动作：都在组件体里定义（由 React 事件触发，闭包捕获的就是当下的 props，
+  // 不像挂载期注册的那批必须经 liveRef）。
+  function runSearch(term: string, direction: "next" | "previous", incremental = false) {
+    const addon = searchAddonRef.current;
+    if (!addon) return;
+    if (term.length === 0) {
+      addon.clearDecorations();
+      setSearchResults(NO_SEARCH_RESULTS);
+      return;
+    }
+    if (direction === "next") addon.findNext(term, { ...SEARCH_OPTIONS, incremental });
+    else addon.findPrevious(term, SEARCH_OPTIONS);
+  }
+
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearchResults(NO_SEARCH_RESULTS);
+    searchAddonRef.current?.clearDecorations();
+    terminalRef.current?.focus();
+  }
+
+  function copySelection() {
+    const text = terminalRef.current?.getSelection() ?? "";
+    if (text.length === 0) return;
+    void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
+  }
+
+  function pasteFromClipboard() {
+    void navigator.clipboard.readText().then(
+      (text) => {
+        if (text.length > 0) terminalRef.current?.paste(text);
+      },
+      () => showToast({ body: "读取剪贴板失败", type: "error" }),
+    );
+  }
+
+  // ⌘F：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里没有 KeyF，
+  // 不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  useEffect(() => {
+    if (!props.active) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (event.code !== "KeyF") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSearchOpen(true);
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [props.active]);
+
+  // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
+  useEffect(() => {
+    if (!searchOpen) return;
+    const input = searchInputRef.current;
+    input?.focus();
+    input?.select();
+  }, [searchOpen]);
+
+  const contextMenuItems: ContextMenuOption[] = [
+    { label: "复制", isDisabled: !menuSelection, onClick: copySelection },
+    { label: "粘贴", onClick: pasteFromClipboard },
+    { type: "divider" },
+    { label: "全选", onClick: () => terminalRef.current?.selectAll() },
+    { label: "查找…", onClick: () => setSearchOpen(true) },
+    { type: "divider" },
+    { label: "清屏", onClick: () => terminalRef.current?.clear() },
+  ];
+
+  function handleContextMenuOpenChange(open: boolean) {
+    if (open) {
+      setMenuSelection(Boolean(terminalRef.current?.hasSelection()));
+      return;
+    }
+    // 菜单自己也要收焦点，等它归位后再把焦点还给终端。
+    requestAnimationFrame(() => terminalRef.current?.focus());
+  }
+
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   // pointer-events-auto：面板层整体是 pointer-events-none（plan 104，见 terminal-panes.tsx），
   // 只有当前可见的面板把鼠标事件（选区、链接、拖拽上传）收回来。
@@ -486,7 +659,62 @@ export function TerminalPane(props: TerminalPaneProps) {
       className={props.active ? "pointer-events-auto absolute inset-0 block" : "absolute inset-0 hidden"}
       aria-hidden={!props.active}
     >
-      <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      {/* macOS 上 Electron 不提供默认右键菜单，不接管的话右键完全没反应。 */}
+      <ContextMenu
+        ref={fillContextMenuTrigger}
+        label="终端操作"
+        size="sm"
+        menuWidth={180}
+        items={contextMenuItems}
+        onOpenChange={handleContextMenuOpenChange}
+      >
+        <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      </ContextMenu>
+      {searchOpen ? (
+        <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
+          <input
+            ref={searchInputRef}
+            value={searchTerm}
+            placeholder="查找"
+            aria-label="在终端里查找"
+            className="w-44 bg-transparent px-1 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+            onChange={(event) => {
+              setSearchTerm(event.target.value);
+              runSearch(event.target.value, "next", true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeSearch();
+                return;
+              }
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              runSearch(searchTerm, event.shiftKey ? "previous" : "next");
+            }}
+          />
+          <span className="min-w-12 text-center text-[11px] tabular-nums text-muted-foreground">
+            {searchTerm.length === 0 ? "" : searchResults.count === 0 ? "无结果" : `${searchResults.index + 1}/${searchResults.count}`}
+          </span>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="上一个匹配" onClick={() => runSearch(searchTerm, "previous")}>
+            <ChevronUp className="size-3.5" />
+          </button>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="下一个匹配" onClick={() => runSearch(searchTerm, "next")}>
+            <ChevronDown className="size-3.5" />
+          </button>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="关闭查找" onClick={closeSearch}>
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
+      {linkHint ? (
+        <div
+          className="pointer-events-none fixed z-30 rounded border border-border bg-background/95 px-1.5 py-0.5 text-[11px] text-muted-foreground shadow"
+          style={{ left: linkHint.x + 12, top: linkHint.y + 16 }}
+        >
+          {linkHint.label}
+        </div>
+      ) : null}
       {isDraggingFile ? (
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
           松开上传
