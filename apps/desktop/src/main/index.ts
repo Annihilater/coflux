@@ -200,7 +200,12 @@ if (!app.requestSingleInstanceLock()) {
         // 等正在接入的操作收敛，避免应用退出后才启动新的本机实例。
         if (localConnect) await localConnect;
         await daemonManager?.refresh();
-        if (daemonManager?.getState().error) { exitInFlight = false; return false; }
+        // Only a runtime action's failure gates the install. A failed account check says nothing
+        // about whether the local runtime is safe to stop and replace, and it now sticks around
+        // until the user leaves the settings section — gating on it would silently disable updates
+        // for anyone who was offline once.
+        const failure = daemonManager?.getState().error;
+        if (failure && failure.action !== "connect") { exitInFlight = false; return false; }
         quitting = true;
         return true;
       },
@@ -255,19 +260,28 @@ if (!app.requestSingleInstanceLock()) {
     });
     daemonManager = daemon;
     daemon.onChange((state) => sendToRenderer(IPC.daemonState, state));
+    // Enrollment runs automatically on every `authOk`, reconnects included, so a failure here is
+    // usually something the user never asked for — an app launch or a wake-up on a stalled network.
+    // It therefore reports itself the way every other machine-level failure does, through the daemon
+    // state (settings 「这台 Mac」 and the onboarding step with its retry), and never interrupts with
+    // a modal. Recovery needs no retry loop of its own: the next reconnect calls this again, and a
+    // successful attempt clears the recorded error.
     async function connectLocal(): Promise<void> {
       if (exitInFlight || quitting) return;
       if (localConnect) return localConnect;
       localConnect = (async () => {
         try {
-          const token = tokenStore.read();
-          if (!token) throw new Error("请先登录 Coflux");
-          await localAccount.connect(token);
-          if (exitInFlight || quitting) return;
+          const verified = await daemon.verifyAccount(async () => {
+            const token = tokenStore.read();
+            if (!token) throw new Error("请先登录 Coflux");
+            await localAccount.connect(token);
+          });
+          // A failed check must not reach the daemon start: the local runtime would come up for an
+          // account this Mac has not been confirmed to belong to.
+          if (!verified || exitInFlight || quitting) return;
           await daemon.enroll();
         } catch (error) {
           log.warn("本机接入失败", String(error));
-          await dialog.showMessageBox({ type: "error", message: "本机暂未接入", detail: String(error), buttons: ["好"] });
         } finally { localConnect = null; }
       })();
       return localConnect;

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { DesktopDaemonState } from "@/desktop-bridge";
 import {
   authorizeStepDetail,
+  daemonStatusLine,
   resolveDaemonActions,
   resolveOnboardingPage,
   resolveOnboardingSteps,
@@ -100,4 +101,25 @@ test("引导三步：安装 → 启动 → 授权 依次推进；失败落到对
   // 未开始（说明页）时三步全 pending
   const idle = resolveOnboardingSteps(NOT_INSTALLED, { ...local, started: false });
   assert.deepEqual([idle.install, idle.start, idle.authorize], ["pending", "pending", "pending"]);
+});
+
+test("账号接入是自己的一步：状态行说「接入账号」，引导里落在第一步并可重试", () => {
+  // 失败的自动接入不再弹窗，只留在这台 Mac 的状态行上（plan 20260916）
+  assert.equal(daemonStatusLine({ ...NOT_INSTALLED, busy: "connect" }).label, "正在接入账号…");
+  const stalled = daemonStatusLine({ ...NOT_INSTALLED, error: { action: "connect", message: "连接账号服务器超时，请检查网络后重试" } });
+  assert.equal(stalled.detail, "接入账号失败：连接账号服务器超时，请检查网络后重试");
+  assert.equal(stalled.tone, "error");
+  // 本机已在跑、只是账号校验失败：状态行仍要把原因说出来，而不是说启动失败
+  const whileRunning = daemonStatusLine({ ...RUNNING, error: { action: "connect", message: "请先退出当前账号，再切换账号" } });
+  assert.equal(whileRunning.label, "运行中");
+  assert.equal(whileRunning.detail, "接入账号失败：请先退出当前账号，再切换账号");
+
+  const local = { started: true, authError: null, fdaSettled: false };
+  const checking = resolveOnboardingSteps({ ...NOT_INSTALLED, busy: "connect" }, local);
+  assert.deepEqual([checking.install, checking.start, checking.authorize], ["active", "pending", "pending"]);
+  assert.equal(checking.failure, null);
+  const failed = resolveOnboardingSteps({ ...NOT_INSTALLED, error: { action: "connect", message: "请先登录 Coflux" } }, local);
+  assert.deepEqual([failed.install, failed.start, failed.authorize], ["failed", "pending", "pending"]);
+  assert.equal(failed.failure, "接入账号失败：请先登录 Coflux");
+  assert.equal(failed.retry, "enroll");
 });

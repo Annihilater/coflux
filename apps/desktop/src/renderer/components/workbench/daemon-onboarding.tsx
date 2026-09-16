@@ -71,6 +71,9 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
   const current = { ...local, authError: props.authError };
   const page = resolveOnboardingPage(state, current);
   const steps = resolveOnboardingSteps(state, current);
+  // The account check is part of the first step (see `resolveOnboardingSteps`), so its reason has to
+  // be readable there too — otherwise the step goes red with no explanation.
+  const prepareDetail = state.error && (state.error.action === "install" || state.error.action === "connect") ? state.error.message : undefined;
 
   function close() {
     bridge.daemonDismissError();
@@ -121,7 +124,7 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
             ) : null}
             {page === "progress" ? (
               <VStack gap={3} hAlign="stretch">
-                <StepRow state={steps.install} label="准备本机" detail={state.error?.action === "install" ? state.error.message : undefined} />
+                <StepRow state={steps.install} label="准备本机" detail={prepareDetail} />
                 <StepRow state={steps.start} label="启动终端" detail={state.error?.action === "start" ? state.error.message : undefined} />
                 <StepRow state={steps.authorize} label="授权" detail={steps.authorize === "pending" ? undefined : authorizeStepDetail(state, current)} />
                 {steps.failure ? <p className="text-sm leading-5 text-destructive">{steps.failure}</p> : null}

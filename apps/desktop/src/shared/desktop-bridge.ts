@@ -21,8 +21,13 @@ import type { NativeTransportBridge } from "./native-transport";
  */
 export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" | "running" | "update-ready";
 
-/** 主进程正在执行的动作；接入拆成 install（落盘三件 + settings + plist）与 start（launchctl load）两步 */
-export type DesktopDaemonBusy = "install" | "start" | "restart" | "stop" | "remove";
+/**
+ * 主进程正在执行的动作；接入拆成 install（落盘三件 + settings + plist）与 start（launchctl load）两步。
+ * `connect` is the account check that runs before an enrollment. It is its own action rather than
+ * part of `start` because it fails for its own reasons — no network, another account owns this Mac —
+ * while the local runtime may be running perfectly; borrowing `start`'s label would misname the cause.
+ */
+export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "stop" | "remove";
 
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
