@@ -8,6 +8,12 @@ use std::collections::{HashMap, VecDeque};
 use coflux_protocol::ipc::CommandStateInfo;
 use vt100::{Cell, Color, Screen};
 
+/// 逻辑行上限 → VT physical row 容量的余量：一条逻辑行最多按 4 个 physical row 折行计费，
+/// 否则窄窗口下 history 会先被 physical 容量截断，拿不满 `history_line_limit` 条逻辑行。
+///
+/// 它同时是单 session 常驻内存的乘数：`line_limit × 4` 行，每行 `cols` 个 32 字节 cell
+/// （`vendor/vt100/src/cell.rs` 断言了 `size_of::<Cell>() == 32`），行是滚出屏幕时才分配的。
+/// 调 `DEFAULT_HISTORY_LINE_LIMIT`（`main.rs`）前先按这条算术估一遍。
 const HISTORY_WRAP_FACTOR: usize = 4;
 const RETRANSMIT_LIMIT: usize = 512 * 1024;
 // vt100 0.16 使用的 vte 0.15 最多保留 32 个 CSI 参数/子参数；scanner 必须遵循同一

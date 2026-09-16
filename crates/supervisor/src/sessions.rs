@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::logln;
 use coflux_protocol::wire::{
@@ -41,6 +41,104 @@ pub fn prepend_path_segment(segment: &str, current: Option<&str>) -> String {
     parts.join(":")
 }
 
+/// supervisor 自身多由 launchd 拉起，环境里既没有 locale 也没有 `COLORTERM`；PTY 里的 shell 于是
+/// 落在 `LC_CTYPE="C"`，宽字符/emoji 的列宽判定全错。补的是「空」，不是「错」。
+///
+/// `C.UTF-8` 而不是 `en_US.UTF-8`：我们要修的只是 charmap，不是 collation/messages/格式化。
+/// `C.UTF-8` 把 `LC_COLLATE` 留在与今天逐字相同的字节序上（`en_US.UTF-8` 会改 `ls`/`sort` 的
+/// 排序），且在 glibc ≥ 2.35 / musl / macOS 上都内建，不依赖发行版是否生成过某个 locale。
+const DEFAULT_LOCALE: &str = "C.UTF-8";
+/// locale 判定顺序与 POSIX `setlocale` 一致：`LC_ALL` > `LC_CTYPE` > `LANG`。三者**只要有一个非空**
+/// 就整体不注入，父环境的 locale 原样透传——包括用户故意设的 `LANG=C`。「保留父 locale」优先于
+/// 「保证 UTF-8」：这里修的是空 locale，不是错 locale。
+const LOCALE_ENV_VARS: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+/// truecolor 能力声明；父环境已有值（如 `24bit`）则透传。
+const DEFAULT_COLORTERM: &str = "truecolor";
+/// 宿主终端标识。与 `TERM` 同类：它描述的是「这个 tty 由谁提供」，在 coflux 会话里答案只能是
+/// coflux，父环境继承下来的 `Apple_Terminal` / `vscode` 是错的，故无条件覆盖。
+const TERM_PROGRAM_VALUE: &str = "coflux";
+
+/// PTY 会话 shell 的 locale / 颜色环境（plan 20260916-terminal-cursor-parity M1）。
+///
+/// 返回的是**覆盖项**：调用方必须在拷贝 `std::env::vars()` **之后**逐条写入，否则被 supervisor
+/// 自身环境盖回去（与 `PATH` / `COFLUX_*` 同一条约束）。`lookup` 读的是 supervisor 自身环境，
+/// 单测可传入模拟的父环境，把结果当纯值断言。
+fn terminal_env_overrides(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+    let non_empty = |key: &str| lookup(key).is_some_and(|value| !value.is_empty());
+    let mut overrides = Vec::new();
+    if !LOCALE_ENV_VARS.iter().any(|key| non_empty(key)) {
+        overrides.push(("LANG", DEFAULT_LOCALE.to_string()));
+    }
+    if !non_empty("COLORTERM") {
+        overrides.push(("COLORTERM", DEFAULT_COLORTERM.to_string()));
+    }
+    overrides.push(("TERM_PROGRAM", TERM_PROGRAM_VALUE.to_string()));
+    overrides
+}
+
+/// 只做阻塞 read 的线程，把 PTY 原始分片交给合帧线程（plan 20260916-terminal-cursor-parity M2）。
+///
+/// read 侧必须独立成一条线程，合帧才可能有**时间**上界：`recv_timeout` 能在窗口耗尽时返回，
+/// 阻塞的 `read` 不能。同一条线程里合帧，只会把 burst 尾巴上的几百字节压到下一次读为止——
+/// 安静的终端上那可能是几秒甚至几分钟。
+fn spawn_pty_chunk_reader(mut reader: Box<dyn Read + Send>) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = sync_channel::<Vec<u8>>(PTY_CHUNK_QUEUE_RECORDS);
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                // 接收端消失（session 收尾）即停止读；sender drop 让合帧侧看到 EOF。
+                Ok(length) => {
+                    if sender.send(buffer[..length].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// 把 PTY 的连续小读合并成一帧。返回 `None` 表示读侧已经结束（EOF / 读错误）且队列已排空，
+/// 调用方转入 session 收尾。
+///
+/// 两条上界都是硬的：
+/// - **时间**——首个分片到手即开始计时，窗口耗尽就交付，绝不为了多攒一点而等下一次读；
+/// - **字节**——攒够 `max_bytes` 立刻交付，不等窗口走完。
+///
+/// 序号连续性由构造保证：每个 batch 原样、按序、一次性喂给 `SessionState::feed`，
+/// 而 `feed` 按字节数推进 `output_seq`，于是相邻帧必然 `to_seq + 1 == from_seq`。
+/// worker 正是在序号不连续时抬 gap——那恰是本函数要减少的事，不能反过来制造它。
+fn coalesce_pty_output(
+    chunks: &Receiver<Vec<u8>>,
+    window: Duration,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    let mut batch = chunks.recv().ok()?;
+    if batch.len() >= max_bytes {
+        return Some(batch);
+    }
+    let deadline = Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match chunks.recv_timeout(remaining) {
+            Ok(chunk) => {
+                batch.extend_from_slice(&chunk);
+                if batch.len() >= max_bytes {
+                    break;
+                }
+            }
+            // Timeout = PTY 安静下来；Disconnected = 读侧结束。两者都立刻交付已攒的字节。
+            Err(_) => break,
+        }
+    }
+    Some(batch)
+}
+
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
 /// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
@@ -48,7 +146,7 @@ const OPERATION_LEDGER_BYTES: usize = 4 * 1024 * 1024;
 /// HashMap control bytes、装载率余量与 VecDeque spare capacity 无法由稳定 API 精确取得；除
 /// `size_of` 可见的 key/value/String header 外，每条再收一段保守容器余量。
 const OPERATION_LEDGER_CONTAINER_SLOP: usize = 64;
-/// 每个 session 都持一个 PTY 子进程、reader OS thread 与终端历史；实际资源上限必须远低于
+/// 每个 session 都持一个 PTY 子进程、两条 OS thread（阻塞 read + 合帧/投递）与终端历史；实际资源上限必须远低于
 /// IPC 理论容量。128 个并发活终端已覆盖正常机群使用，同时把快照大小严格压在 record 上限内。
 const MAX_LIVE_SESSIONS: usize = 128;
 const WORKER_QUEUE_RECORDS: usize = 512;
@@ -57,6 +155,18 @@ const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
 /// 变成 supervisor 内存增长入口。
 const PTY_INPUT_QUEUE_RECORDS: usize = 256;
 const PTY_INPUT_QUEUE_BYTES: usize = 1024 * 1024;
+/// PTY 输出合帧窗口（plan 20260916-terminal-cursor-parity M2）。高吞吐时 PTY 一次 8 KB 的读能
+/// 每秒来几百次，每次读都要单独发一条 worker dirty record + 每订阅者一条 PtyOutput；
+/// worker 的 per-channel 队列在**条数**（256）与字节数上各有一个独立上限，条数先打满就是一次
+/// gap → snapshot → `terminal.reset()` 整屏重绘。合帧削的正是条数这一维。
+/// 5 ms 与 Cursor 取同一量级：低于感知阈，却足以把一次 burst 里的十几次读并成一帧。
+const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(5);
+/// 合帧的**字节**上界。没有它，一条持续 8 KB/次的 `yes` 会在窗口内无限累积，合出来的巨帧
+/// 比它取代的那些小帧更糟（客户端一次性 apply、relay 一次性搬运）。8 次读封顶。
+const OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
+/// read 线程与合帧线程之间的分片队列。满了就让 read 线程阻塞在 send 上——这与合帧前
+/// 「单线程正在处理、暂时不读」的背压语义完全一致，最多 512 KB 在途。
+const PTY_CHUNK_QUEUE_RECORDS: usize = 64;
 /// catalog 分页只在 request.max_page_bytes 非零时启用；旧 worker 仍拿单帧完整快照。
 const CATALOG_PAGE_MIN_BYTES: usize = 64 * 1024;
 const CATALOG_PAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -856,6 +966,11 @@ impl Sessions {
             command.env(key, value);
         }
         command.env("TERM", "xterm-256color");
+        // plan 20260916-terminal-cursor-parity M1：locale / COLORTERM / TERM_PROGRAM。与下面两段
+        // 同理，必须写在拷贝 std::env 之后，否则被 supervisor 自身环境覆盖回去。
+        for (key, value) in terminal_env_overrides(|key| std::env::var(key).ok()) {
+            command.env(key, value);
+        }
         command.env("COFLUX_HOME", &self.home);
         // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
         // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
@@ -1166,65 +1281,59 @@ impl Sessions {
         self: &Arc<Self>,
         session_id: String,
         session: SessionHandle,
-        mut reader: Box<dyn Read + Send>,
+        reader: Box<dyn Read + Send>,
     ) {
+        let chunks = spawn_pty_chunk_reader(reader);
         let this = Arc::clone(self);
         thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(length) => {
-                        let chunk = &buffer[..length];
-                        let mut locked = session.lock().unwrap();
-                        let pending = locked.state.feed(chunk);
+            while let Some(batch) =
+                coalesce_pty_output(&chunks, OUTPUT_COALESCE_WINDOW, OUTPUT_COALESCE_MAX_BYTES)
+            {
+                let mut locked = session.lock().unwrap();
+                let pending = locked.state.feed(&batch);
 
-                        // A coflux mark moved the command state: push it so the worker's `wait`
-                        // and do-script wake immediately (snapshots carry the same state as a
-                        // fallback). Best effort — a dropped push is repaired by the next snapshot.
-                        if let Some(state) = locked.state.take_command_change() {
-                            let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
-                                session_id: session_id.clone(),
-                                state,
-                            });
-                        }
-
-                        // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
-                        // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
-                        let dirty = match encode_frame(&DataFrame::Output {
-                            session_id: session_id.clone(),
-                            data: Vec::new(),
-                        }) {
-                            Ok(frame) => frame,
-                            Err(error) => {
-                                logln!("[supervisor] session dirty frame 编码失败 session={session_id}: {error}");
-                                return;
-                            }
-                        };
-                        if let Ok(record) = write_record(&dirty) {
-                            this.send_record(record);
-                        }
-
-                        for delivery in pending {
-                            let output = DevicePtyOutput {
-                                session_id: session_id.clone(),
-                                from_seq: delivery.delta.from_seq,
-                                to_seq: delivery.delta.to_seq,
-                                data: delivery.delta.data,
-                            };
-                            let sent = this.send_device(
-                                &delivery.channel_id,
-                                device_envelope::Payload::PtyOutput(output),
-                            );
-                            locked.state.delivery_result(
-                                &delivery.channel_id,
-                                delivery.delta.to_seq,
-                                sent,
-                            );
-                        }
-                        this.deliver_pending_gaps(&session_id, &mut locked.state);
-                    }
+                // A coflux mark moved the command state: push it so the worker's `wait`
+                // and do-script wake immediately (snapshots carry the same state as a
+                // fallback). Best effort — a dropped push is repaired by the next snapshot.
+                if let Some(state) = locked.state.take_command_change() {
+                    let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
+                        session_id: session_id.clone(),
+                        state,
+                    });
                 }
+
+                // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
+                // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
+                let dirty = match encode_frame(&DataFrame::Output {
+                    session_id: session_id.clone(),
+                    data: Vec::new(),
+                }) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        logln!(
+                            "[supervisor] session dirty frame 编码失败 session={session_id}: {error}"
+                        );
+                        return;
+                    }
+                };
+                if let Ok(record) = write_record(&dirty) {
+                    this.send_record(record);
+                }
+
+                for delivery in pending {
+                    let output = DevicePtyOutput {
+                        session_id: session_id.clone(),
+                        from_seq: delivery.delta.from_seq,
+                        to_seq: delivery.delta.to_seq,
+                        data: delivery.delta.data,
+                    };
+                    let sent = this
+                        .send_device(&delivery.channel_id, device_envelope::Payload::PtyOutput(output));
+                    locked
+                        .state
+                        .delivery_result(&delivery.channel_id, delivery.delta.to_seq, sent);
+                }
+                this.deliver_pending_gaps(&session_id, &mut locked.state);
             }
 
             // reader 可先见 EOF，而子进程仍存活；不能拿 session mutex 阻塞 wait，否则
@@ -2062,7 +2171,6 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     #[test]
     fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
@@ -2091,6 +2199,244 @@ mod tests {
         );
         // 空段照原样保留（PATH 里的空段有"当前目录"语义，不替用户清理）
         assert_eq!(prepend_path_segment("/x", Some("/a::/b")), "/x:/a::/b");
+    }
+
+    /// 把「拷贝 std::env::vars() 再逐条覆盖」这一步建模成纯值：模拟的父环境 + 覆盖项 = 子进程
+    /// 实际拿到的环境。不起真 shell 读 `locale`——本 crate 已有三条测试因为起真 shell 而在
+    /// 装了 coflux agent 集成的开发机上必假红。
+    fn spawn_env(parent: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut env: BTreeMap<String, String> = parent
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        let lookup = |key: &str| {
+            parent
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        };
+        for (key, value) in terminal_env_overrides(lookup) {
+            env.insert(key.to_string(), value);
+        }
+        env
+    }
+
+    #[test]
+    fn spawn_env_injects_utf8_locale_only_when_the_parent_has_none() {
+        // 父环境三个 locale 变量全空：注入 UTF-8 默认值，shell 于是拿到 UTF-8 的 LC_CTYPE。
+        let injected = spawn_env(&[("PATH", "/usr/bin")]);
+        assert_eq!(injected.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert!(
+            injected["LANG"].to_ascii_uppercase().contains("UTF-8"),
+            "注入的 locale 必须是 UTF-8"
+        );
+        assert_eq!(injected.get("LC_ALL"), None, "不新增 LC_ALL");
+        assert_eq!(injected.get("LC_CTYPE"), None, "不新增 LC_CTYPE");
+
+        // 空串等同于未设置：shell 里 `LANG=` 与没有 LANG 的 setlocale 行为一致。
+        let empty = spawn_env(&[("LANG", ""), ("LC_ALL", ""), ("LC_CTYPE", "")]);
+        assert_eq!(empty.get("LANG").map(String::as_str), Some("C.UTF-8"));
+    }
+
+    #[test]
+    fn spawn_env_passes_the_parent_locale_through_verbatim_including_non_utf8() {
+        // 三者任一非空 → 整体不注入。故意设的非 UTF-8 locale 也原样透传：
+        // 「保留父 locale」优先于「保证 UTF-8」。
+        let deliberate_c = spawn_env(&[("LANG", "C")]);
+        assert_eq!(deliberate_c.get("LANG").map(String::as_str), Some("C"));
+        assert_eq!(deliberate_c.get("LC_ALL"), None);
+        assert_eq!(deliberate_c.get("LC_CTYPE"), None);
+
+        // LC_ALL 单独存在时也不能给 LANG 补一个与之矛盾的默认值。
+        let lc_all_only = spawn_env(&[("LC_ALL", "ja_JP.eucJP")]);
+        assert_eq!(
+            lc_all_only.get("LC_ALL").map(String::as_str),
+            Some("ja_JP.eucJP")
+        );
+        assert_eq!(lc_all_only.get("LANG"), None, "LC_ALL 已定调，不再注入 LANG");
+
+        // LC_CTYPE 同理——它正是宽字符判定真正读的那一个。
+        let lc_ctype_only = spawn_env(&[("LC_CTYPE", "zh_CN.GB18030")]);
+        assert_eq!(
+            lc_ctype_only.get("LC_CTYPE").map(String::as_str),
+            Some("zh_CN.GB18030")
+        );
+        assert_eq!(lc_ctype_only.get("LANG"), None);
+
+        // 三者同时存在时优先级不影响结论：一个都不改。
+        let all_three = spawn_env(&[
+            ("LC_ALL", "de_DE.UTF-8"),
+            ("LC_CTYPE", "de_DE.UTF-8"),
+            ("LANG", "de_DE.UTF-8"),
+        ]);
+        assert_eq!(
+            all_three.get("LANG").map(String::as_str),
+            Some("de_DE.UTF-8")
+        );
+    }
+
+    #[test]
+    fn spawn_env_fills_colorterm_when_absent_and_always_names_coflux() {
+        let injected = spawn_env(&[]);
+        assert_eq!(
+            injected.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+        assert_eq!(
+            injected.get("TERM_PROGRAM").map(String::as_str),
+            Some("coflux")
+        );
+
+        // 父环境已声明颜色能力 → 透传，不替用户「升级」。
+        let existing = spawn_env(&[("COLORTERM", "24bit")]);
+        assert_eq!(existing.get("COLORTERM").map(String::as_str), Some("24bit"));
+
+        // TERM_PROGRAM 与 TERM 同类：描述宿主终端，coflux 会话里继承来的值是错的。
+        let inherited = spawn_env(&[("TERM_PROGRAM", "Apple_Terminal")]);
+        assert_eq!(
+            inherited.get("TERM_PROGRAM").map(String::as_str),
+            Some("coflux")
+        );
+    }
+
+    #[test]
+    fn spawn_env_keeps_every_other_parent_variable_untouched() {
+        let env = spawn_env(&[("PATH", "/usr/bin"), ("HOME", "/h"), ("EDITOR", "vi")]);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/h"));
+        assert_eq!(env.get("EDITOR").map(String::as_str), Some("vi"));
+    }
+
+    /// 把一串已经就绪的 PTY 分片喂给合帧器，返回它实际交付的帧。所有分片预先入队后即关闭
+    /// 发送端，于是不依赖任何时序：窗口从不真正等待，结果完全确定。
+    fn coalesce_all(reads: &[Vec<u8>], window: Duration, max_bytes: usize) -> Vec<Vec<u8>> {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(reads.len().max(1));
+        for read in reads {
+            sender.send(read.clone()).expect("测试队列不应满");
+        }
+        drop(sender);
+        let mut frames = Vec::new();
+        while let Some(batch) = coalesce_pty_output(&receiver, window, max_bytes) {
+            frames.push(batch);
+        }
+        frames
+    }
+
+    #[test]
+    fn coalesce_pty_output_merges_a_burst_into_fewer_frames_than_reads() {
+        // 高吞吐的形状：一次 burst 里几十次小读。worker 的 per-channel 队列先打满的是
+        // **条数**那一维，合帧削的正是它。
+        let reads: Vec<Vec<u8>> = (0..24u8)
+            .map(|index| vec![b'a' + index % 26; 96])
+            .collect();
+        let frames = coalesce_all(&reads, Duration::from_millis(50), 64 * 1024);
+
+        assert!(
+            frames.len() < reads.len(),
+            "合帧后帧数必须少于读次数：{} 帧 / {} 次读",
+            frames.len(),
+            reads.len()
+        );
+        assert_eq!(
+            frames.concat(),
+            reads.concat(),
+            "合帧只许改分帧，不许丢字节或改顺序"
+        );
+    }
+
+    #[test]
+    fn coalesce_pty_output_is_bounded_by_the_window_not_by_the_next_read() {
+        // 时间上界：窗口内没有新分片就必须交付已有的，绝不压到下一次读为止——安静的终端上
+        // 「下一次读」可能是几分钟以后，那会把回显延迟变成挂起。
+        let (sender, receiver) = sync_channel::<Vec<u8>>(4);
+        sender.send(b"prompt$ ".to_vec()).expect("首个分片应入队");
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            let _ = sender.send(b"late".to_vec());
+        });
+
+        let started = Instant::now();
+        let first = coalesce_pty_output(&receiver, Duration::from_millis(5), 64 * 1024)
+            .expect("读侧仍在，必有一帧");
+        let elapsed = started.elapsed();
+        assert_eq!(first, b"prompt$ ".to_vec());
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "必须在窗口内交付，而不是等下一次读：{elapsed:?}"
+        );
+
+        late.join().expect("迟到分片线程应正常结束");
+        let next = coalesce_pty_output(&receiver, Duration::from_millis(5), 64 * 1024)
+            .expect("迟到的分片进入下一帧");
+        assert_eq!(next, b"late".to_vec(), "窗口外的字节一个都不能丢");
+    }
+
+    #[test]
+    fn coalesce_pty_output_stops_at_the_byte_budget_instead_of_merging_unboundedly() {
+        // 字节上界：没有它，一条持续刷屏的命令会在窗口内无限累积，合出的巨帧比它取代的
+        // 那些小帧更糟。窗口给到 60 s 就是为了证明「先撞预算」——真等窗口这条用例会挂死。
+        let budget = 64 * 1024;
+        let reads: Vec<Vec<u8>> = (0..32).map(|_| vec![b'x'; 8 * 1024]).collect();
+        let frames = coalesce_all(&reads, Duration::from_secs(60), budget);
+
+        assert_eq!(frames.len(), 4, "256 KB / 64 KB 预算 = 4 帧");
+        for frame in &frames {
+            assert!(
+                frame.len() <= budget,
+                "单帧不得超过字节预算：{} > {budget}",
+                frame.len()
+            );
+        }
+        assert_eq!(frames.concat().len(), 32 * 8 * 1024);
+    }
+
+    #[test]
+    fn coalesce_pty_output_delivers_an_oversized_read_without_waiting_for_the_window() {
+        // 单次读本身就超预算时必须原样直出；否则这里会在窗口上干等 60 s。
+        let single = vec![vec![b'y'; 128 * 1024]];
+        let frames = coalesce_all(&single, Duration::from_secs(60), 64 * 1024);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), 128 * 1024);
+    }
+
+    #[test]
+    fn coalesced_frames_stay_sequence_contiguous_through_sessiond() {
+        // 合帧最危险的失败模式不是"合得不够"，而是把帧序号弄断：worker 一见序号不连续就抬
+        // gap → snapshot → 整屏重绘，正好是本 milestone 要减少的那件事。
+        let reads: Vec<Vec<u8>> = (0..12)
+            .map(|index| format!("chunk-{index:02} ").into_bytes())
+            .collect();
+        let frames = coalesce_all(&reads, Duration::from_millis(50), 64 * 1024);
+        assert!(frames.len() < reads.len(), "前提：确实发生了合帧");
+
+        let mut state = SessionState::new(24, 80, 100);
+        state
+            .attach("channel-1", "client-1", 1, None)
+            .expect("attach 应成功");
+
+        let mut next_expected = 1u64;
+        let mut delivered: Vec<u8> = Vec::new();
+        for frame in &frames {
+            let pending = state.feed(frame);
+            assert_eq!(pending.len(), 1, "唯一订阅者应收到唯一一条 delta");
+            let delta = &pending[0].delta;
+            assert_eq!(
+                delta.from_seq, next_expected,
+                "帧必须与上一帧首尾相接，否则 worker 抬 gap"
+            );
+            assert_eq!(
+                delta.to_seq,
+                delta.from_seq + delta.data.len() as u64 - 1,
+                "序号区间必须正好覆盖该帧字节数"
+            );
+            next_expected = delta.to_seq + 1;
+            delivered.extend_from_slice(&delta.data);
+            state.delivery_result("channel-1", delta.to_seq, true);
+        }
+
+        assert_eq!(delivered, reads.concat(), "字节流逐字不变");
+        assert_eq!(state.output_seq(), reads.concat().len() as u64);
+        assert!(state.pending_gaps().is_empty(), "序号连续 → 不抬 gap");
     }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
