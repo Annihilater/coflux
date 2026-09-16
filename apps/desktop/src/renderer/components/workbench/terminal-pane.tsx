@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@coflux/client";
 
+import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
 
 /** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
@@ -44,52 +46,6 @@ const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
 // 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
-
-/** xterm 6.0.0 私有内部结构（仅补丁用到的字段），升级 @xterm/xterm 需复验。 */
-type XtermCoreInternals = {
-  _compositionHelper?: { _isComposing: boolean; _isSendingComposition: boolean; _handleAnyTextareaChanges: () => void };
-  _inputEvent?: (ev: InputEvent) => boolean;
-  _keyPressHandled?: boolean;
-  _unprocessedDeadKey?: boolean;
-  coreService?: { triggerDataEvent: (data: string, wasUserInput: boolean) => void };
-  textarea?: HTMLTextAreaElement;
-  cancel?: (ev: Event) => void;
-};
-
-/** 全角标点丢字 workaround（上游 xtermjs/xterm.js#5887，6.1.0-beta 仍未修）：
- * 中文 IME 直接提交（无 composition 会话）的字符只出现在 textarea 'input' 事件里，
- * 但 xterm 的 _inputEvent 被 (!ev.composed || !_keyDownSeen) 门控挡住，兜底的
- * CompositionHelper setTimeout(0) textarea diff 又与 IME 落字时序竞态——
- * 表现为全角 ？！ 等（带 Shift 的标点）需连输两次才出一个。
- * 这里改为由 input 事件确定性发送并停用竞态 diff 路径；任一内部字段缺失
- * （日后升级 xterm 内部改名）则整体跳过，行为回落为上游现状。 */
-function patchImeCommittedInput(terminal: Terminal): void {
-  const core = (terminal as unknown as { _core?: XtermCoreInternals })._core;
-  const helper = core?._compositionHelper;
-  const origInputEvent = core?._inputEvent;
-  if (!core || !helper || !origInputEvent || !core.coreService || !core.textarea || !core.cancel) return;
-
-  helper._handleAnyTextareaChanges = () => {};
-  core._inputEvent = (ev: InputEvent) => {
-    if (helper._isComposing || helper._isSendingComposition) return false;
-    // Alt/Option 组合字符走 keypress 已发过（_keyPressHandled），不能重复发。
-    if (ev.inputType === "insertText" && ev.data && !core._keyPressHandled) {
-      core._unprocessedDeadKey = false;
-      core.coreService!.triggerDataEvent(ev.data, true);
-      core.textarea!.value = ""; // 及时清空，textarea 累积残值正是上游 diff 路径不可靠的来源之一
-      core.cancel!(ev);
-      return true;
-    }
-    if (ev.inputType === "deleteContentBackward") {
-      // 对应被停用的 diff 路径里"值变短发 DEL"分支（IME 吞掉 Backspace keydown 的场景）
-      core.coreService!.triggerDataEvent("\x7f", true);
-      core.textarea!.value = "";
-      core.cancel!(ev);
-      return true;
-    }
-    return origInputEvent.call(core, ev);
-  };
-}
 
 function extForMime(mime: string): string {
   switch (mime) {
@@ -190,7 +146,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (!host) return;
 
     const terminal = new Terminal({
-      allowProposedApi: false,
+      // addon-unicode11 走的是标记为 (EXPERIMENTAL) 的 terminal.unicode.register，
+      // allowProposedApi 为 false 时它在 activate 阶段直接抛错（不是降级渲染），必须放行。
+      allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
@@ -198,6 +156,10 @@ export function TerminalPane(props: TerminalPaneProps) {
       fontSize: 12, // 等宽字体同 px 视觉大于 UI sans（页面 base 13px），降 1px 找平衡（VS Code 同款配比）
       lineHeight: 1.25,
       scrollback: 10_000,
+      // kitty 键盘协议（CSI u）：Shift+Enter 之类的组合键才有办法编码给远端 TUI。
+      // 由应用在运行时协商启用，不进快照——gap 恢复后的 terminal.reset() 会让已启用它的 TUI
+      // 面对一个「忘了这回事」的终端，协议级模式持久化不在本 plan 范围内。
+      vtExtensions: { kittyKeyboard: true },
       theme: {
         background: "#0a0a0a",
         foreground: "#e4e4e4",
@@ -216,6 +178,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    // Unicode 11 宽度表：emoji 与全角标点按两格算，否则光标漂移、行尾留垃圾（Claude Code 首当其冲）。
+    // 残留分歧（本 plan 不关）：supervisor 快照用的 vt100 走 unicode-width 0.2.2 = Unicode 17，
+    // 这里是 11，Unicode 12-17 新增的字符两边宽度仍不一致，gap 恢复时表现为折行位置对不上。
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = "11";
     // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
     // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
     // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
@@ -228,7 +195,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       }),
     );
     terminal.open(host);
-    patchImeCommittedInput(terminal);
+    // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
+    // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
+    const imePatch = applyImeCommittedInputPatch((terminal as unknown as { _core?: XtermCoreInternals })._core);
     terminalRef.current = terminal;
 
     // WebGL 渲染器动态加载（addon 约 247KB，不进首屏主 chunk）：
@@ -281,6 +250,10 @@ export function TerminalPane(props: TerminalPaneProps) {
       },
     };
     controllerRef.current = controller;
+    if (!imePatch.applied) {
+      console.error("xterm 的 IME 提交补丁未生效，缺失内部字段：", imePatch.missing.join(", "));
+      controller.writeSystem("输入法补丁未生效（xterm 内部结构已变），全角标点可能需连按两次", "error");
+    }
     props.onReady(props.taskId, controller);
 
     // 输入/resize 只在 active && owned 时发送（安全语义，见 TerminalControlState）。
