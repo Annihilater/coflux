@@ -387,7 +387,7 @@ Out of scope:
 
 | Purpose | Command | Expected result |
 | --- | --- | --- |
-| Rust tests | `cargo test -p coflux-supervisor` | see the baseline note below |
+| Rust tests | `COFLUX_HOME= cargo test -p coflux-supervisor` | exit 0 |
 | Desktop tests | `pnpm -C apps/desktop test` | exit 0 |
 | Typecheck | `pnpm -C apps/desktop typecheck` | exit 0 |
 | Desktop walkthrough (acceptance) | `pnpm dev:desktop:prod` | user drives it |
@@ -395,22 +395,31 @@ Out of scope:
 There is no lint script for `apps/desktop` and no linter configured in the
 repository — do not go looking for one.
 
-**`cargo test -p coflux-supervisor` is red on a developer machine before this plan
-changes anything.** Three tests fail on a machine that has coflux's own agent
-integration installed, because they start a real shell that then picks up
-`~/.coflux/agent-integrations/<sha>` instead of the plugin dir the test created:
+**Run the Rust tests with `COFLUX_HOME` emptied, or three of them fail for reasons
+that have nothing to do with this plan.** A plain `cargo test -p coflux-supervisor`
+on a developer machine gives `81 passed; 3 failed`:
 `shell_integration::tests::{zsh_function_translates_the_variable_into_plugin_dir,
 bash_function_translates_the_variable_into_plugin_dir,
-zsh_chain_runs_user_rc_in_order_including_a_user_set_zdotdir}`. Setting
-`COFLUX_CLAUDE_PLUGIN_DIR` does not help. These are unrelated to this plan and are
-**not** to be fixed here — treat the run as passing when only those three fail, and
-do not let them consume a STOP budget. CI runs the same command
-(`.github/workflows/ci.yml:182`) in a clean environment where they pass.
+zsh_chain_runs_user_rc_in_order_including_a_user_set_zdotdir}`. They start a real
+shell, which then picks up the machine's own installed coflux rc chain and its
+`~/.coflux/agent-integrations/<sha>` plugin dir instead of the one the test created.
+Emptying `COFLUX_HOME` makes the rc chain's `claude` wrapper stand down (it gates on
+`test -n "$COFLUX_HOME"`) and the suite goes green at 84/84. Empty the variable —
+`COFLUX_HOME= cargo test …` — rather than unsetting it with `env -u`, which the
+Bash guard rejects in this session. Setting `COFLUX_CLAUDE_PLUGIN_DIR` does not
+help. CI runs the plain command (`.github/workflows/ci.yml:182`) in a clean
+environment where all 84 pass.
+
+Two adjacent traps when running any of these: `cargo test` is fail-fast across
+crates, so a red supervisor crate silently skips the ones after it; and piping a
+command into `tail` hands you `tail`'s exit code, so a failing run reports
+`exited with code 0`. Redirect to a file and check the status separately, or read
+`$pipestatus[1]`.
 
 ## Done criteria
 
-- [ ] All listed non-acceptance commands pass, with the documented Rust baseline
-      failures as the only exception.
+- [ ] All listed non-acceptance commands pass, including the Rust suite at 84/84
+      with `COFLUX_HOME` emptied.
 - [ ] When the parent environment has no `LC_ALL`/`LC_CTYPE`/`LANG`, a spawned
       shell gets a UTF-8 locale and a non-empty `COLORTERM`; when the parent sets
       any one of them — `LANG=C` included — the child gets that value verbatim and
