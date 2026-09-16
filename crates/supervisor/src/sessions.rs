@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::logln;
 use coflux_protocol::wire::{
@@ -83,7 +83,7 @@ const OPERATION_LEDGER_BYTES: usize = 4 * 1024 * 1024;
 /// HashMap control bytes、装载率余量与 VecDeque spare capacity 无法由稳定 API 精确取得；除
 /// `size_of` 可见的 key/value/String header 外，每条再收一段保守容器余量。
 const OPERATION_LEDGER_CONTAINER_SLOP: usize = 64;
-/// 每个 session 都持一个 PTY 子进程、reader OS thread 与终端历史；实际资源上限必须远低于
+/// 每个 session 都持一个 PTY 子进程、两条 OS thread（阻塞 read + 合帧/投递）与终端历史；实际资源上限必须远低于
 /// IPC 理论容量。128 个并发活终端已覆盖正常机群使用，同时把快照大小严格压在 record 上限内。
 const MAX_LIVE_SESSIONS: usize = 128;
 const WORKER_QUEUE_RECORDS: usize = 512;
@@ -92,6 +92,81 @@ const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
 /// 变成 supervisor 内存增长入口。
 const PTY_INPUT_QUEUE_RECORDS: usize = 256;
 const PTY_INPUT_QUEUE_BYTES: usize = 1024 * 1024;
+/// PTY 输出合帧窗口（plan 20260916-terminal-cursor-parity M2）。高吞吐时 PTY 一次 8 KB 的读能
+/// 每秒来几百次，每次读都要单独发一条 worker dirty record + 每订阅者一条 PtyOutput；
+/// worker 的 per-channel 队列在**条数**（256）与字节数上各有一个独立上限，条数先打满就是一次
+/// gap → snapshot → `terminal.reset()` 整屏重绘。合帧削的正是条数这一维。
+/// 5 ms 与 Cursor 取同一量级：低于感知阈，却足以把一次 burst 里的十几次读并成一帧。
+const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(5);
+/// 合帧的**字节**上界。没有它，一条持续 8 KB/次的 `yes` 会在窗口内无限累积，合出来的巨帧
+/// 比它取代的那些小帧更糟（客户端一次性 apply、relay 一次性搬运）。8 次读封顶。
+const OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
+/// read 线程与合帧线程之间的分片队列。满了就让 read 线程阻塞在 send 上——这与合帧前
+/// 「单线程正在处理、暂时不读」的背压语义完全一致，最多 512 KB 在途。
+const PTY_CHUNK_QUEUE_RECORDS: usize = 64;
+
+/// 只做阻塞 read 的线程，把 PTY 原始分片交给合帧线程。
+///
+/// read 侧必须独立成一条线程，合帧才可能有**时间**上界：`recv_timeout` 能在窗口耗尽时返回，
+/// 阻塞的 `read` 不能。同一条线程里合帧，只会把 burst 尾巴上的几百字节压到下一次读为止——
+/// 安静的终端上那可能是几秒甚至几分钟。
+fn spawn_pty_chunk_reader(mut reader: Box<dyn Read + Send>) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = sync_channel::<Vec<u8>>(PTY_CHUNK_QUEUE_RECORDS);
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                // 接收端消失（session 收尾）即停止读；sender drop 让合帧侧看到 EOF。
+                Ok(length) => {
+                    if sender.send(buffer[..length].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// 把 PTY 的连续小读合并成一帧。返回 `None` 表示读侧已经结束（EOF / 读错误）且队列已排空，
+/// 调用方转入 session 收尾。
+///
+/// 两条上界都是硬的：
+/// - **时间**——首个分片到手即开始计时，窗口耗尽就交付，绝不为了多攒一点而等下一次读；
+/// - **字节**——攒够 `max_bytes` 立刻交付，不等窗口走完。
+///
+/// 序号连续性由构造保证：每个 batch 原样、按序、一次性喂给 `SessionState::feed`，
+/// 而 `feed` 按字节数推进 `output_seq`，于是相邻帧必然 `to_seq + 1 == from_seq`。
+/// worker 正是在序号不连续时抬 gap——那恰是本函数要减少的事，不能反过来制造它。
+fn coalesce_pty_output(
+    chunks: &Receiver<Vec<u8>>,
+    window: Duration,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    let mut batch = chunks.recv().ok()?;
+    if batch.len() >= max_bytes {
+        return Some(batch);
+    }
+    let deadline = Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match chunks.recv_timeout(remaining) {
+            Ok(chunk) => {
+                batch.extend_from_slice(&chunk);
+                if batch.len() >= max_bytes {
+                    break;
+                }
+            }
+            // Timeout = PTY 安静下来；Disconnected = 读侧结束。两者都立刻交付已攒的字节。
+            Err(_) => break,
+        }
+    }
+    Some(batch)
+}
 /// catalog 分页只在 request.max_page_bytes 非零时启用；旧 worker 仍拿单帧完整快照。
 const CATALOG_PAGE_MIN_BYTES: usize = 64 * 1024;
 const CATALOG_PAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -1206,65 +1281,59 @@ impl Sessions {
         self: &Arc<Self>,
         session_id: String,
         session: SessionHandle,
-        mut reader: Box<dyn Read + Send>,
+        reader: Box<dyn Read + Send>,
     ) {
+        let chunks = spawn_pty_chunk_reader(reader);
         let this = Arc::clone(self);
         thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(length) => {
-                        let chunk = &buffer[..length];
-                        let mut locked = session.lock().unwrap();
-                        let pending = locked.state.feed(chunk);
+            while let Some(batch) =
+                coalesce_pty_output(&chunks, OUTPUT_COALESCE_WINDOW, OUTPUT_COALESCE_MAX_BYTES)
+            {
+                let mut locked = session.lock().unwrap();
+                let pending = locked.state.feed(&batch);
 
-                        // A coflux mark moved the command state: push it so the worker's `wait`
-                        // and do-script wake immediately (snapshots carry the same state as a
-                        // fallback). Best effort — a dropped push is repaired by the next snapshot.
-                        if let Some(state) = locked.state.take_command_change() {
-                            let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
-                                session_id: session_id.clone(),
-                                state,
-                            });
-                        }
-
-                        // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
-                        // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
-                        let dirty = match encode_frame(&DataFrame::Output {
-                            session_id: session_id.clone(),
-                            data: Vec::new(),
-                        }) {
-                            Ok(frame) => frame,
-                            Err(error) => {
-                                logln!("[supervisor] session dirty frame 编码失败 session={session_id}: {error}");
-                                return;
-                            }
-                        };
-                        if let Ok(record) = write_record(&dirty) {
-                            this.send_record(record);
-                        }
-
-                        for delivery in pending {
-                            let output = DevicePtyOutput {
-                                session_id: session_id.clone(),
-                                from_seq: delivery.delta.from_seq,
-                                to_seq: delivery.delta.to_seq,
-                                data: delivery.delta.data,
-                            };
-                            let sent = this.send_device(
-                                &delivery.channel_id,
-                                device_envelope::Payload::PtyOutput(output),
-                            );
-                            locked.state.delivery_result(
-                                &delivery.channel_id,
-                                delivery.delta.to_seq,
-                                sent,
-                            );
-                        }
-                        this.deliver_pending_gaps(&session_id, &mut locked.state);
-                    }
+                // A coflux mark moved the command state: push it so the worker's `wait`
+                // and do-script wake immediately (snapshots carry the same state as a
+                // fallback). Best effort — a dropped push is repaired by the next snapshot.
+                if let Some(state) = locked.state.take_command_change() {
+                    let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
+                        session_id: session_id.clone(),
+                        state,
+                    });
                 }
+
+                // 只通知 worker 该 session 的派生 checkpoint 已脏；PTY 原始字节不离开
+                // supervisor/sessiond。保留旧 output frame 编号便于跨版本 worker 忽略 payload。
+                let dirty = match encode_frame(&DataFrame::Output {
+                    session_id: session_id.clone(),
+                    data: Vec::new(),
+                }) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        logln!(
+                            "[supervisor] session dirty frame 编码失败 session={session_id}: {error}"
+                        );
+                        return;
+                    }
+                };
+                if let Ok(record) = write_record(&dirty) {
+                    this.send_record(record);
+                }
+
+                for delivery in pending {
+                    let output = DevicePtyOutput {
+                        session_id: session_id.clone(),
+                        from_seq: delivery.delta.from_seq,
+                        to_seq: delivery.delta.to_seq,
+                        data: delivery.delta.data,
+                    };
+                    let sent = this
+                        .send_device(&delivery.channel_id, device_envelope::Payload::PtyOutput(output));
+                    locked
+                        .state
+                        .delivery_result(&delivery.channel_id, delivery.delta.to_seq, sent);
+                }
+                this.deliver_pending_gaps(&session_id, &mut locked.state);
             }
 
             // reader 可先见 EOF，而子进程仍存活；不能拿 session mutex 阻塞 wait，否则
@@ -2102,7 +2171,6 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     #[test]
     fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
@@ -2237,6 +2305,138 @@ mod tests {
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(env.get("HOME").map(String::as_str), Some("/h"));
         assert_eq!(env.get("EDITOR").map(String::as_str), Some("vi"));
+    }
+
+    /// 把一串已经就绪的 PTY 分片喂给合帧器，返回它实际交付的帧。所有分片预先入队后即关闭
+    /// 发送端，于是不依赖任何时序：窗口从不真正等待，结果完全确定。
+    fn coalesce_all(reads: &[Vec<u8>], window: Duration, max_bytes: usize) -> Vec<Vec<u8>> {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(reads.len().max(1));
+        for read in reads {
+            sender.send(read.clone()).expect("测试队列不应满");
+        }
+        drop(sender);
+        let mut frames = Vec::new();
+        while let Some(batch) = coalesce_pty_output(&receiver, window, max_bytes) {
+            frames.push(batch);
+        }
+        frames
+    }
+
+    #[test]
+    fn coalesce_pty_output_merges_a_burst_into_fewer_frames_than_reads() {
+        // 高吞吐的形状：一次 burst 里几十次小读。worker 的 per-channel 队列先打满的是
+        // **条数**那一维，合帧削的正是它。
+        let reads: Vec<Vec<u8>> = (0..24u8)
+            .map(|index| vec![b'a' + index % 26; 96])
+            .collect();
+        let frames = coalesce_all(&reads, Duration::from_millis(50), 64 * 1024);
+
+        assert!(
+            frames.len() < reads.len(),
+            "合帧后帧数必须少于读次数：{} 帧 / {} 次读",
+            frames.len(),
+            reads.len()
+        );
+        assert_eq!(
+            frames.concat(),
+            reads.concat(),
+            "合帧只许改分帧，不许丢字节或改顺序"
+        );
+    }
+
+    #[test]
+    fn coalesce_pty_output_is_bounded_by_the_window_not_by_the_next_read() {
+        // 时间上界：窗口内没有新分片就必须交付已有的，绝不压到下一次读为止——安静的终端上
+        // 「下一次读」可能是几分钟以后，那会把回显延迟变成挂起。
+        let (sender, receiver) = sync_channel::<Vec<u8>>(4);
+        sender.send(b"prompt$ ".to_vec()).expect("首个分片应入队");
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            let _ = sender.send(b"late".to_vec());
+        });
+
+        let started = Instant::now();
+        let first = coalesce_pty_output(&receiver, Duration::from_millis(5), 64 * 1024)
+            .expect("读侧仍在，必有一帧");
+        let elapsed = started.elapsed();
+        assert_eq!(first, b"prompt$ ".to_vec());
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "必须在窗口内交付，而不是等下一次读：{elapsed:?}"
+        );
+
+        late.join().expect("迟到分片线程应正常结束");
+        let next = coalesce_pty_output(&receiver, Duration::from_millis(5), 64 * 1024)
+            .expect("迟到的分片进入下一帧");
+        assert_eq!(next, b"late".to_vec(), "窗口外的字节一个都不能丢");
+    }
+
+    #[test]
+    fn coalesce_pty_output_stops_at_the_byte_budget_instead_of_merging_unboundedly() {
+        // 字节上界：没有它，一条持续刷屏的命令会在窗口内无限累积，合出的巨帧比它取代的
+        // 那些小帧更糟。窗口给到 60 s 就是为了证明「先撞预算」——真等窗口这条用例会挂死。
+        let budget = 64 * 1024;
+        let reads: Vec<Vec<u8>> = (0..32).map(|_| vec![b'x'; 8 * 1024]).collect();
+        let frames = coalesce_all(&reads, Duration::from_secs(60), budget);
+
+        assert_eq!(frames.len(), 4, "256 KB / 64 KB 预算 = 4 帧");
+        for frame in &frames {
+            assert!(
+                frame.len() <= budget,
+                "单帧不得超过字节预算：{} > {budget}",
+                frame.len()
+            );
+        }
+        assert_eq!(frames.concat().len(), 32 * 8 * 1024);
+    }
+
+    #[test]
+    fn coalesce_pty_output_delivers_an_oversized_read_without_waiting_for_the_window() {
+        // 单次读本身就超预算时必须原样直出；否则这里会在窗口上干等 60 s。
+        let single = vec![vec![b'y'; 128 * 1024]];
+        let frames = coalesce_all(&single, Duration::from_secs(60), 64 * 1024);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), 128 * 1024);
+    }
+
+    #[test]
+    fn coalesced_frames_stay_sequence_contiguous_through_sessiond() {
+        // 合帧最危险的失败模式不是"合得不够"，而是把帧序号弄断：worker 一见序号不连续就抬
+        // gap → snapshot → 整屏重绘，正好是本 milestone 要减少的那件事。
+        let reads: Vec<Vec<u8>> = (0..12)
+            .map(|index| format!("chunk-{index:02} ").into_bytes())
+            .collect();
+        let frames = coalesce_all(&reads, Duration::from_millis(50), 64 * 1024);
+        assert!(frames.len() < reads.len(), "前提：确实发生了合帧");
+
+        let mut state = SessionState::new(24, 80, 100);
+        state
+            .attach("channel-1", "client-1", 1, None)
+            .expect("attach 应成功");
+
+        let mut next_expected = 1u64;
+        let mut delivered: Vec<u8> = Vec::new();
+        for frame in &frames {
+            let pending = state.feed(frame);
+            assert_eq!(pending.len(), 1, "唯一订阅者应收到唯一一条 delta");
+            let delta = &pending[0].delta;
+            assert_eq!(
+                delta.from_seq, next_expected,
+                "帧必须与上一帧首尾相接，否则 worker 抬 gap"
+            );
+            assert_eq!(
+                delta.to_seq,
+                delta.from_seq + delta.data.len() as u64 - 1,
+                "序号区间必须正好覆盖该帧字节数"
+            );
+            next_expected = delta.to_seq + 1;
+            delivered.extend_from_slice(&delta.data);
+            state.delivery_result("channel-1", delta.to_seq, true);
+        }
+
+        assert_eq!(delivered, reads.concat(), "字节流逐字不变");
+        assert_eq!(state.output_seq(), reads.concat().len() as u64);
+        assert!(state.pending_gaps().is_empty(), "序号连续 → 不抬 gap");
     }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
