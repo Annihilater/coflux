@@ -411,6 +411,48 @@ behavior is accepted by the user on a real machine, not by the agent.
   in step: a change on one side without the other reopens the asymmetry this
   plan closed.
 
+### Found during real-machine testing (2026-09-16)
+
+Two things surfaced when this was exercised against a real TUI. Neither is a
+defect in what this plan shipped; both are recorded here because the next
+person will hit them.
+
+- **Agent CLIs do not emit OSC 52 in a coflux terminal, so this receiver sits
+  idle until a follow-up lands.** grok picks its clipboard route by asking
+  whether it can reach the user's clipboard directly: `grok doctor` reports
+  `native: local (pbcopy)` / `osc 52: off` / `status: confirmed`, and it writes
+  to the clipboard **of the machine the PTY runs on** — invisible to a user
+  watching from another device, while reporting success. Injecting a remote
+  session signal flips it: with `SSH_CONNECTION`/`SSH_CLIENT`/`SSH_TTY` set,
+  the same `grok doctor` reports `native: remote (pbcopy)` and states "Grok
+  sends OSC 52". Claude Code follows the identical pattern — its binary carries
+  `SSH_CONNECTION`/`SSH_CLIENT`/`SSH_TTY` alongside both `]52;c;` and `pbcopy`.
+  But `crates/supervisor/src/sessions.rs:856-897` injects only `TERM` and the
+  `COFLUX_*` variables — **nothing tells the program it is being watched from
+  elsewhere**, and in coflux that is always possible, since any terminal can be
+  opened from another device at any time. Declaring the session remote is the
+  follow-up; it belongs in its own plan because it changes the runtime
+  environment of every program in every terminal (programs that branch on SSH
+  also stop auto-opening browsers, and so on). A narrower per-CLI switch was
+  investigated and rejected: grok's only other lever, `GROK_OSC52_SINK`, marks
+  OSC 52 `supported` but leaves `native: local`, so it does not redirect the
+  route — and it is undocumented.
+- **⌘C never copied a terminal selection, on any version of this app.** xterm
+  copies through a `copy` listener on its container
+  (`addDisposableListener(this.element, "copy", …)` → `copyHandler` →
+  `clipboardData.setData("text/plain", selectionService.selectionText)`), which
+  needs the browser to dispatch a `copy` event. xterm's selection is its own
+  model, not a DOM selection: the only mirror into the textarea is
+  `onLinuxMouseSelection` (Linux primary-selection semantics, never macOS), and
+  `_syncTextArea` mirrors the cursor row instead. Meanwhile `menu.ts:64`'s
+  `{ role: "copy" }` carries no `registerAccelerator: false` — unlike the
+  `pageShortcut` helper at `menu.ts:18-21` — so ⌘C is swallowed by the menu and
+  runs `webContents.copy()`, which finds no DOM selection and copies nothing.
+  Independent of fullscreen, mouse tracking, and this plan. Not fixed here: the
+  user's actual need was the cross-machine path above, and the fix (let ⌘C
+  reach the page, then route a terminal selection through the `writeClipboard`
+  IPC this plan added) is a separate change with its own UI surface.
+
 ### Review findings not adopted
 
 - *The drift-check command should also surface uncommitted and untracked
