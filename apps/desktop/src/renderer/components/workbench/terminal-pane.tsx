@@ -150,11 +150,19 @@ export function TerminalPane(props: TerminalPaneProps) {
       // allowProposedApi 为 false 时它在 activate 阶段直接抛错（不是降级渲染），必须放行。
       allowProposedApi: true,
       convertEol: false,
-      cursorBlink: true,
-      cursorStyle: "bar",
+      // 下面四项与 rescaleOverlappingGlyphs 一起对齐 Cursor 的默认观感（plan 20260916）：
+      // 不闪的块状光标、行高 1、对比度下限 4.5。fontFamily 不动——这串在 macOS 上实际解析到的
+      // 就是 Menlo（前三个字体都不存在），与 Cursor 用的是同一个。
+      cursorBlink: false,
+      cursorStyle: "block",
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: 12, // 等宽字体同 px 视觉大于 UI sans（页面 base 13px），降 1px 找平衡（VS Code 同款配比）
-      lineHeight: 1.25,
+      lineHeight: 1,
+      // 主题里 brightBlack 这类暗色按作者给的对比度渲染会糊；4.5 = WCAG AA 正文下限，
+      // xterm 会按背景色把不达标的前景色提亮到刚好达标，不改主题本身。
+      minimumContrastRatio: 4.5,
+      // 宽度超过一格的字形（部分 Nerd Font / powerline 图标）缩放到格内，不再压住右边的字符。
+      rescaleOverlappingGlyphs: true,
       scrollback: 10_000,
       // kitty 键盘协议（CSI u）：Shift+Enter 之类的组合键才有办法编码给远端 TUI。
       // 由应用在运行时协商启用，不进快照——gap 恢复后的 terminal.reset() 会让已启用它的 TUI
