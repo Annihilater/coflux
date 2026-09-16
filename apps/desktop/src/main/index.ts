@@ -17,7 +17,7 @@ import { daemonHomePaths } from "./daemon-paths";
 import { registerIpc } from "./ipc";
 import { log } from "./log";
 import { buildAppMenu } from "./menu";
-import { setDockBadge, showWorkspaceNotification } from "./notifications";
+import { setDockBadge, setDockBadgeLabel, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { createExecutorConfigStore } from "./executor-config";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
@@ -42,6 +42,12 @@ const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
 if (process.env.COFLUX_DESKTOP_USER_DATA) {
   app.setPath("userData", resolve(process.env.COFLUX_DESKTOP_USER_DATA));
 } else if (!app.isPackaged) app.setPath("userData", `${app.getPath("userData")}-dev`);
+
+// Dev-only instance label (plan 20260916-desktop-preview-parallel): scripts/dev.mjs derives it from
+// the worktree and hands it over here, so parallel previews are identifiable by window title and
+// Dock badge. A labelled input, nothing more — the main process never works out which instance it
+// is. Absent in every packaged run, and then titles and Dock behave exactly as before.
+const instanceLabel = process.env.COFLUX_DESKTOP_INSTANCE_LABEL?.trim() || undefined;
 
 // electron-vite 惯例：preload / 渲染层产物按主进程模块的相对位置找（out/main → out/preload、out/renderer）。
 // 不用 app 的 appPath：`electron out/main/index.js` 直接启动时它指向 out/main，会多拼一层；
@@ -155,6 +161,7 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(() => {
     log.info("启动", { version: app.getVersion(), packaged: app.isPackaged, electron: process.versions.electron, userData: app.getPath("userData") });
+    if (instanceLabel) setDockBadgeLabel(instanceLabel);
     registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
 
@@ -374,6 +381,7 @@ if (!app.requestSingleInstanceLock()) {
       trusted,
       isQuitting: () => quitting,
       windowStatePath: windowStatePath(),
+      instanceLabel,
       onStateError: (error) => log.warn("窗口位置写盘失败", error),
     });
   });
