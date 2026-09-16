@@ -76,36 +76,7 @@ fn terminal_env_overrides(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'sta
     overrides
 }
 
-const OPERATION_LEDGER_LIMIT: usize = 4096;
-/// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
-/// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
-const OPERATION_LEDGER_BYTES: usize = 4 * 1024 * 1024;
-/// HashMap control bytes、装载率余量与 VecDeque spare capacity 无法由稳定 API 精确取得；除
-/// `size_of` 可见的 key/value/String header 外，每条再收一段保守容器余量。
-const OPERATION_LEDGER_CONTAINER_SLOP: usize = 64;
-/// 每个 session 都持一个 PTY 子进程、两条 OS thread（阻塞 read + 合帧/投递）与终端历史；实际资源上限必须远低于
-/// IPC 理论容量。128 个并发活终端已覆盖正常机群使用，同时把快照大小严格压在 record 上限内。
-const MAX_LIVE_SESSIONS: usize = 128;
-const WORKER_QUEUE_RECORDS: usize = 512;
-const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
-/// 与 client retained input 上限一致；两端都必须有界，不能把一个不读 stdin 的 PTY
-/// 变成 supervisor 内存增长入口。
-const PTY_INPUT_QUEUE_RECORDS: usize = 256;
-const PTY_INPUT_QUEUE_BYTES: usize = 1024 * 1024;
-/// PTY 输出合帧窗口（plan 20260916-terminal-cursor-parity M2）。高吞吐时 PTY 一次 8 KB 的读能
-/// 每秒来几百次，每次读都要单独发一条 worker dirty record + 每订阅者一条 PtyOutput；
-/// worker 的 per-channel 队列在**条数**（256）与字节数上各有一个独立上限，条数先打满就是一次
-/// gap → snapshot → `terminal.reset()` 整屏重绘。合帧削的正是条数这一维。
-/// 5 ms 与 Cursor 取同一量级：低于感知阈，却足以把一次 burst 里的十几次读并成一帧。
-const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(5);
-/// 合帧的**字节**上界。没有它，一条持续 8 KB/次的 `yes` 会在窗口内无限累积，合出来的巨帧
-/// 比它取代的那些小帧更糟（客户端一次性 apply、relay 一次性搬运）。8 次读封顶。
-const OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
-/// read 线程与合帧线程之间的分片队列。满了就让 read 线程阻塞在 send 上——这与合帧前
-/// 「单线程正在处理、暂时不读」的背压语义完全一致，最多 512 KB 在途。
-const PTY_CHUNK_QUEUE_RECORDS: usize = 64;
-
-/// 只做阻塞 read 的线程，把 PTY 原始分片交给合帧线程。
+/// 只做阻塞 read 的线程，把 PTY 原始分片交给合帧线程（plan 20260916-terminal-cursor-parity M2）。
 ///
 /// read 侧必须独立成一条线程，合帧才可能有**时间**上界：`recv_timeout` 能在窗口耗尽时返回，
 /// 阻塞的 `read` 不能。同一条线程里合帧，只会把 burst 尾巴上的几百字节压到下一次读为止——
@@ -167,6 +138,35 @@ fn coalesce_pty_output(
     }
     Some(batch)
 }
+
+const OPERATION_LEDGER_LIMIT: usize = 4096;
+/// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
+/// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
+const OPERATION_LEDGER_BYTES: usize = 4 * 1024 * 1024;
+/// HashMap control bytes、装载率余量与 VecDeque spare capacity 无法由稳定 API 精确取得；除
+/// `size_of` 可见的 key/value/String header 外，每条再收一段保守容器余量。
+const OPERATION_LEDGER_CONTAINER_SLOP: usize = 64;
+/// 每个 session 都持一个 PTY 子进程、两条 OS thread（阻塞 read + 合帧/投递）与终端历史；实际资源上限必须远低于
+/// IPC 理论容量。128 个并发活终端已覆盖正常机群使用，同时把快照大小严格压在 record 上限内。
+const MAX_LIVE_SESSIONS: usize = 128;
+const WORKER_QUEUE_RECORDS: usize = 512;
+const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
+/// 与 client retained input 上限一致；两端都必须有界，不能把一个不读 stdin 的 PTY
+/// 变成 supervisor 内存增长入口。
+const PTY_INPUT_QUEUE_RECORDS: usize = 256;
+const PTY_INPUT_QUEUE_BYTES: usize = 1024 * 1024;
+/// PTY 输出合帧窗口（plan 20260916-terminal-cursor-parity M2）。高吞吐时 PTY 一次 8 KB 的读能
+/// 每秒来几百次，每次读都要单独发一条 worker dirty record + 每订阅者一条 PtyOutput；
+/// worker 的 per-channel 队列在**条数**（256）与字节数上各有一个独立上限，条数先打满就是一次
+/// gap → snapshot → `terminal.reset()` 整屏重绘。合帧削的正是条数这一维。
+/// 5 ms 与 Cursor 取同一量级：低于感知阈，却足以把一次 burst 里的十几次读并成一帧。
+const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(5);
+/// 合帧的**字节**上界。没有它，一条持续 8 KB/次的 `yes` 会在窗口内无限累积，合出来的巨帧
+/// 比它取代的那些小帧更糟（客户端一次性 apply、relay 一次性搬运）。8 次读封顶。
+const OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
+/// read 线程与合帧线程之间的分片队列。满了就让 read 线程阻塞在 send 上——这与合帧前
+/// 「单线程正在处理、暂时不读」的背压语义完全一致，最多 512 KB 在途。
+const PTY_CHUNK_QUEUE_RECORDS: usize = 64;
 /// catalog 分页只在 request.max_page_bytes 非零时启用；旧 worker 仍拿单帧完整快照。
 const CATALOG_PAGE_MIN_BYTES: usize = 64 * 1024;
 const CATALOG_PAGE_MAX_BYTES: usize = 1024 * 1024;
