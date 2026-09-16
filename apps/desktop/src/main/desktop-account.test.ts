@@ -126,9 +126,9 @@ test("each later stage times out with its own message, and only cleanup claims a
   const { WebSocketServer } = await import("ws");
   const { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema, CONTROL_PROTOCOL_VERSION } = await import("@coflux/protocol");
   const expected = {
-    snapshot: /^读取账号信息超时，请重试$/,
-    cleanup: /^本机终端清理超时，已保留待重试记录$/,
-    logout: /^退出登录确认超时，已保留待重试记录$/,
+    snapshot: "读取账号信息超时，请重试",
+    cleanup: "本机终端清理超时，已保留待重试记录",
+    logout: "退出登录确认超时，已保留待重试记录",
   };
   for (const stalled of ["snapshot", "cleanup", "logout"] as const) {
     const server = new WebSocketServer({ port: 0 });
@@ -151,9 +151,17 @@ test("each later stage times out with its own message, and only cleanup claims a
       const address = server.address(); assert(address && typeof address !== "string");
       await assert.rejects(
         accountControl(`ws://127.0.0.1:${address.port}`, "session", { daemonId: "local", accountId: "owner", revoke: true }, budgets(stalled)),
-        expected[stalled],
-        `stage ${stalled}`,
+        // Exact equality on the message, through a validation function: a RegExp here would be
+        // matched against `String(error)` — `Error: <message>` — so the stage each message belongs
+        // to could only be pinned down loosely.
+        (error: unknown) => {
+          assert.equal((error as Error).message, expected[stalled], `stage ${stalled}`);
+          return true;
+        },
       );
-    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+    } finally {
+      for (const client of server.clients) client.terminate();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   }
 });

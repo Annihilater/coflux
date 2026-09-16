@@ -139,10 +139,14 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       await check();
       return true;
     } catch (failure) {
-      error = { action: "connect", message: failure instanceof Error ? failure.message : String(failure) };
-      log.warn("本机操作失败", { action: "connect", message: error.message });
+      const message = failure instanceof Error ? failure.message : String(failure);
+      log.warn("本机操作失败", { action: "connect", message });
+      // Staying out of the `action` slot means a run() can start while `check()` is still in flight,
+      // and it then owns `busy` / `error` — it cleared `error` for itself and the user is watching
+      // the restart they just asked for. Write only while the `connect` slot is still ours.
+      if (busy === "connect") error = { action: "connect", message };
       return false;
-    } finally { busy = undefined; emit(); }
+    } finally { if (busy === "connect") { busy = undefined; emit(); } }
   }
   async function migrateLegacy(): Promise<boolean> {
     if (!existsSync(paths.plist)) return true;
