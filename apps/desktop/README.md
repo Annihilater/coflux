@@ -17,15 +17,15 @@ pnpm dev:server
 pnpm -C apps/desktop dev
 ```
 
-The renderer uses port 5274 for HMR. Its control connection goes directly to `ws://localhost:8787/client`; an available Vite page does not imply that the server is running.
+The renderer's control connection goes directly to `ws://localhost:8787/client`; an available Vite page does not imply that the server is running.
+
+`pnpm dev:desktop` and `pnpm dev:desktop:prod` run through `scripts/dev.mjs`, which derives one preview instance per worktree — profile directory, HMR port and instance label — so several branch previews can run side by side. The main worktree keeps the baseline `Coflux-dev` profile on port 5274. Everything about running, identifying and stopping previews lives in the [desktop-preview skill](../../.agents/skills/desktop-preview/SKILL.md); the launcher is the only place that derives an instance, and the app itself accepts `COFLUX_DESKTOP_USER_DATA`, `COFLUX_DESKTOP_RENDERER_PORT` and `COFLUX_DESKTOP_INSTANCE_LABEL` as labelled inputs. `COFLUX_DESKTOP_USER_DATA` and `COFLUX_HOME` remain the manual isolation variables for acceptance instances.
 
 ```sh
 pnpm -C apps/desktop typecheck
 pnpm -C apps/desktop test
 pnpm -C apps/desktop build
 ```
-
-Development data lives under `Coflux-dev`, separate from installed-app credentials and runtime state. Use `COFLUX_DESKTOP_USER_DATA` and `COFLUX_HOME` for isolated acceptance instances.
 
 ## Bundling the runtime
 
