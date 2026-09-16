@@ -477,9 +477,45 @@ command into `tail` hands you `tail`'s exit code, so a failing run reports
   queue; it is in fact bounded on records *and* bytes
   (`crates/worker/src/device.rs:33-38`), so frame-count reduction is only one of two
   overflow dimensions.
-- The width divergence against the snapshot's Unicode 17 table does not go away
-  with this plan and should be recorded here with whatever the executor measures.
-  The real fix is for xterm's table to catch up, not for us to patch either side.
+- **Measured width residual**: the renderer now reads Unicode 11 while the snapshot
+  path reads Unicode 17 (`unicode-width 0.2.2`, `tables.rs:165`). Characters added in
+  Unicode 12–17 — emoji Claude Code uses — are still 2 cells in the snapshot and 1 in
+  the renderer, and because snapshots are stitched with `\r\n`, that shows up as a
+  line-break disagreement after a gap recovery, not as a width glitch. The real fix is
+  for xterm's table to catch up, not for us to patch either side. Both this and the
+  kitty-mode-after-reset residual are also commented in place in `terminal-pane.tsx`.
+
+- **Echo now costs one coalescing window.** Output merging is unconditional: a single
+  echoed keystroke waits out `OUTPUT_COALESCE_WINDOW` (5ms) before it is delivered,
+  because the merge starts when the first chunk arrives. Cursor's `TerminalDataBufferer`
+  behaves the same way, so this is not worse than the thing we set out to match — but
+  our path is longer than its one IPC hop, so the 5ms lands on top of more. If a
+  real-machine walkthrough says typing feels sluggish, this window is the first knob;
+  the structural alternative is to deliver the first chunk immediately and only merge
+  while chunks arrive back-to-back, which would give interactive echo zero added latency
+  and keep the benefit for bursts. That was not built here because the plan's decision
+  named Cursor's shape.
+
+- **`cancelEvents` is off and always was.** The old IME patch called
+  `core.cancel(ev)`, which checks an internal `cancelEvents` option that defaults to
+  `false` and that this app never sets — so that call was a no-op for its entire life.
+  The option and the `cancel` method are both gone in 6.1. The patch therefore does not
+  cancel the input event, and `terminal-ime-patch.test.ts` asserts `preventDefault` and
+  `stopPropagation` are never called. Anyone "restoring" that call would be adding
+  behavior, not preserving it.
+
+- **Two deliberate narrowings.** `TERM_PROGRAM=coflux` is set unconditionally rather
+  than only-when-absent (inheriting `Apple_Terminal`/`vscode` into a coflux PTY is
+  simply wrong, and the adjacent `TERM` is unconditional too). And M6's file links copy
+  the `path:line:col` to the clipboard instead of opening an editor: the workbench has
+  no editor surface, and opening one would need a main-process IPC this plan's scope
+  does not allow.
+
+- **OSC 133 marks authenticate by trust-on-first-use.** The session secret has no
+  out-of-band channel to the renderer, so the first well-formed mark establishes it and
+  later marks must match verbatim. Shell integration emits `A` before the first prompt,
+  so nothing user-controlled gets to speak first. Worst case if that were ever beaten is
+  that command navigation stops working — the secret still never leaves the closure.
 - This plan was revised on advisor review before execution. The review's
   substantive catches, all verified against the code: the beta upgrade silently
   disabling the IME patch; right-click paste needing an Electron permission we deny;
