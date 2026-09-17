@@ -67,7 +67,7 @@ Three machines, with one central instance—the agreed B7 product model in [OPEN
                      └────────┬───────────────────────────────
                               │ Same-datacenter public network, RTT 1.4ms
                               v
-                     ┌──────────────── prod-jp (Japan, 82.40.34.55)
+                     ┌──────────────── prod-jp (Japan, 82.40.34.37)
                      │  coflux-server → 127.0.0.1:8787 (not public)
                      │  PostgreSQL 17 → 127.0.0.1:5432
                      │  Caddy: static SPA, Host routing, preview domains
@@ -90,12 +90,14 @@ Daemons run on users' machines, not as part of these server roles. prod-bj also 
 | `api.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp:8787 | owo, HTTP-01 |
 | `app.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp SPA + `/client` WS | owo, HTTP-01 |
 | `m.coflux.dev` | 45.94.40.233 | DNS-only | owo → prod-jp frozen mobile | owo, HTTP-01 |
-| `*.coflux.dev` | 82.40.34.55 | **Proxied** | Direct to prod-jp port previews | prod-jp, **DNS-01** |
-| `www.coflux.dev` | 82.40.34.55 | Proxied | No dedicated site; matches preview block | — |
+| `*.coflux.dev` | 82.40.34.37 | **Proxied** | Direct to prod-jp port previews | prod-jp, **DNS-01** |
+| `www.coflux.dev` | 82.40.34.37 | Proxied | No dedicated site; matches preview block | — |
 | `relay.coflux.dev`<br>`relay-jp.coflux.dev` | 45.94.40.233 | DNS-only | owo relay:8790 | owo, HTTP-01 |
 | `relay-bj.coflux.yourantiandi.com` | 49.232.53.23 | DNSPod wildcard | prod-bj relay:8790 | prod-bj |
 
 `api`/`app`/`m` originally had **no dedicated records**, relying on the wildcard. Plan 089 created explicit DNS-only records on 2026-09-04; explicit records override wildcards. The wildcard stayed proxied, providing rollback: delete those three records and the wildcard takes over.
+
+**DERP admission outage, 2026-09-17 — read this before moving the centre.** prod-bj's `coflux-derp` runs stock `derper` with `-verify-client-url-fail-open=false`: it asks the centre about every client key and relays for nobody when it cannot ask. That call used to travel through `coflux-derp-admission-tunnel.service`, an SSH tunnel whose target host and port were written into the unit file *on prod-bj*. When prod-jp changed IP the tunnel died, admission failed closed, and every remote device in the account went dark for hours — while the control plane stayed healthy, `coflux device exec` kept working, and clients showed only 「正在探测」 forever. The single visible symptom was in prod-bj's own log: `rejected: Post "http://127.0.0.1:8793/verify": connection refused`. The tunnel is now disabled and masked out of the boot sequence; `-verify-client-url` points at `https://derp:<token>@api.coflux.dev/derp-verify`, held in `/etc/coflux-derp/admission.env` (0600) because a systemd unit is world-readable. Diagnose future relay silence with `journalctl -u coflux-derp | grep rejected` first.
 
 The mainland machine, prod-bj, hosts only the relay server role and uses the registered domain `yourantiandi.com`. `coflux.dev` has no mainland ICP registration and does not point to mainland IPs.
 
@@ -108,6 +110,7 @@ Connect with `ssh root@prod-jp`. Debian 13, four cores, 7.8GB. **This host is sh
 - Database: apt-installed PostgreSQL 17, listening only on `127.0.0.1`, database and role both named `coflux`. Daily `/etc/cron.daily/coflux-pg-backup` writes custom-format (`-Fc`) backups to `/var/backups/coflux/`, retaining 14.
 - Authentication: `COFLUX_AUTH=password`, self-managed users/scrypt; Supabase is retired. Create users with `DATABASE_URL=... node --import tsx scripts/create-user.mjs --email .. --password ..`.
 - The four coflux sites—apex/api/app/m—use **`tls internal`**, since public ACME cannot validate this backend after DNS moves to ingress. `*.coflux.dev` still uses the Cloudflare DNS-01 plugin; **leave it unchanged**.
+- **DERP admission** (2026-09-18): `COFLUX_DERP_ADMISSION_TOKEN` in `server.env`, and `api.coflux.dev` carries a `handle /derp-verify*` route to the loopback admission listener on 8793. The relay authenticates with Basic credentials built from that token; the secret is never in a path or a log. This replaced an SSH tunnel from prod-bj — see the outage note under prod-bj. **When this host's address changes, nothing here needs editing**, which is the whole point of the change.
 - Version 1.0.0 account CLI uses central `/api/client/login` and `/api/client/command`. Desktop and standalone CLI both depend on them; deploy the center before updating 1.0.0 clients. MCP/dedicated OAuth routes are removed; old tables remain through historical migrations. `COFLUX_PUBLIC_URL=https://api.coflux.dev` still serves device authorization and preview pages. Whole-site API proxying needs no Caddy changes.
 
 ## owo-jp-gw: public ingress and JP relay
@@ -197,7 +200,7 @@ The relay key locations above belong to the pre-migration inventory. Native DERP
 
 ## Rollback
 
-**Ingress routing**, subject to roughly 300-second DNS TTL rather than near-instant proxied origin changes: delete the `api`/`app`/`m` A records so the wildcard takes over, restore apex to `82.40.34.55` with proxying, then remove `tls internal` from prod-jp's four sites.
+**Ingress routing**, subject to roughly 300-second DNS TTL rather than near-instant proxied origin changes: delete the `api`/`app`/`m` A records so the wildcard takes over, restore apex to `82.40.34.37` with proxying, then remove `tls internal` from prod-jp's four sites.
 
 **Code**: check out the previous tag, reinstall dependencies, and restart server. Frozen web builds do not participate.
 
