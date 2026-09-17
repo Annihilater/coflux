@@ -12,6 +12,43 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Maple Mono CN v7.9，四面自带（public/fonts/，OFL-1.1 许可证同目录 OFL.txt 随行，这是再分发义务）。
+ * 为什么自带：本机实测一个第三方字体都没装，所有声明都是幽灵声明（Inter/JetBrains Mono/SF Mono…
+ * 全部解析到 Helvetica），终端实际落到 Menlo + PingFang SC 兜底 —— Menlo 拉丁步进 0.602em，
+ * xterm 给 CJK 分两格 = 1.204em，而 PingFang 的 CJK 步进是 1.0em，于是中文字符坐在比字形更宽的
+ * 格子里，栏位对不齐。Maple Mono CN 是拉丁 0.600em / CJK 1.200em 的精确 2:1，正好填满两格分配。
+ * 这个 2:1 比值就是它值 21MB 的全部理由：将来换字体若不保这条，misalignment 原样回来。
+ * 这里必须排在上面 @import 之后：CSS 要求 @import 在其他规则之前，@font-face 抢到前面会让
+ * postcss-import 跳过后续 import。族名字符串与 main.tsx 里 loadFonts() 的参数必须完全一致
+ * ——那个函数按未加引号的族名精确匹配，不匹配就 reject。 */
+@font-face {
+  font-family: "Maple Mono CN";
+  src: url(/fonts/MapleMono-CN-Regular.woff2) format("woff2");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Maple Mono CN";
+  src: url(/fonts/MapleMono-CN-Bold.woff2) format("woff2");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Maple Mono CN";
+  src: url(/fonts/MapleMono-CN-Italic.woff2) format("woff2");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "Maple Mono CN";
+  src: url(/fonts/MapleMono-CN-BoldItalic.woff2) format("woff2");
+  font-weight: 700;
+  font-style: italic;
+}
+
 /* Cursor 式近黑 IDE：低对比分层、暖调灰阶、无彩强调。
  * 三层地面（由深至浅）：terminal(终端纸面) < background(应用底) < sidebar/card(面板)。 */
 :root {
