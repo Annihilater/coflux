@@ -284,6 +284,8 @@ function shortcutRows(): { keys: string[]; description: string }[] {
     { keys: [...mod, "["], description: "上一个终端" },
     { keys: [...mod, "]"], description: "下一个终端" },
     { keys: [...mod, "N"], description: "新建工作区" },
+    // ⌘R 不在 use-global-shortcuts 里：它由原生菜单的 role: "reload" 注册（见 main/menu.ts）。
+    { keys: [...mod, "R"], description: "重新载入界面" },
     { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
   ];
   // 这一条不是快捷键而是鼠标手势，且只在 macOS 成立：xterm 的 shouldForceSelection 在别的平台

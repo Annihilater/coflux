@@ -21,6 +21,7 @@ import { setDockBadge, setDockBadgeLabel, showWorkspaceNotification } from "./no
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { createExecutorConfigStore } from "./executor-config";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
+import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
@@ -394,6 +395,17 @@ if (!app.requestSingleInstanceLock()) {
       }),
     );
 
+    // 渲染层被重建（⌘R / devtools 重载 / 渲染进程崩溃恢复）时，把跟着它一起消失的主进程状态归零。
+    // 三件都必须幂等：首次 loadURL 也会触发同一个事件。理由与取舍见 renderer-reset.ts。
+    const resetForRebuiltRenderer = createRendererResetListener(
+      {
+        closeTransport: () => nativeTransport?.close(),
+        resetExecutorChannel: () => executor.setChannel(""),
+        setBadge: setDockBadge,
+      },
+      trusted,
+    );
+
     mainWindow = createMainWindow({
       preloadPath: PRELOAD_PATH,
       url: devRendererUrl ?? APP_URL,
@@ -401,6 +413,7 @@ if (!app.requestSingleInstanceLock()) {
       isQuitting: () => quitting,
       windowStatePath: windowStatePath(),
       instanceLabel,
+      onNavigated: resetForRebuiltRenderer,
       onStateError: (error) => log.warn("窗口位置写盘失败", error),
     });
   });
