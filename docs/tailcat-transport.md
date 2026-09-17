@@ -174,13 +174,30 @@ names and upstream `sha256-raw:` pins. It checks endpoint reachability, not
 successful authenticated DERP forwarding. Real stop/refuse-connection tests are
 required in addition to this signal.
 
-`COFLUX_DERP_ADMISSION_PORT` starts a separate loopback-only admission listener
-on the Coflux server. Point stock `derper` at its `/verify` route and explicitly
-set `-verify-client-url-fail-open=false`; upstream's default is **true**. When
-DERP runs on another host, use authenticated private forwarding to the listener.
-Do not expose it through the public application reverse proxy. Admission accepts
-only registered serving keys or keys of centrally owned channel grants. A
-network admission check is never a replacement for worker challenge validation.
+`COFLUX_DERP_ADMISSION_PORT` starts a separate admission listener on the Coflux
+server, bound to loopback and never mounted on the application's own port. Point
+stock `derper` at it and explicitly set `-verify-client-url-fail-open=false`;
+upstream's default is **true**. Admission accepts only registered serving keys or
+keys of centrally owned channel grants. A network admission check is never a
+replacement for worker challenge validation.
+
+Set `COFLUX_DERP_ADMISSION_TOKEN` (32 characters or more) whenever DERP runs on
+another host. The listener then answers exactly one route,
+`POST /derp-verify/<token>`, and the unauthenticated `/verify` stops existing;
+publish that route through the reverse proxy already terminating TLS for the
+centre, and configure `-verify-client-url` with the resulting `https://` URL.
+Keep the token out of access logs — both the centre's proxy and any gateway in
+front of it need that path excluded, because the path *is* the credential. Stock
+`derper` offers no other way to authenticate: `-verify-client-url` takes a URL
+and accepts neither a header nor a client certificate.
+
+Do not reach the listener through an SSH tunnel from the relay host. That was
+the earlier arrangement and it pins the centre's address inside a unit file on a
+machine that nobody edits when the centre moves: on 2026-09-17 the centre changed
+IP, the tunnel died, admission failed closed, and every remote device in the
+account went dark for hours while the control plane stayed healthy and reported
+nothing. A hostname re-resolved per request degrades to a DNS change; a
+`host:port` baked into another machine's systemd unit does not.
 Use an ordinary publicly trusted certificate in production; a local fixture's
 certificate still needs a SAN because stock derper verifies its own hostname at
 startup, before client TLS settings matter.

@@ -33,7 +33,7 @@ const { store, hub } = currentAppStorage.run(app, () => ({
 // hub 结构性满足 ProxyServerContext（routeTable/proxyGate/tunnels 三个只读字段）；proxy.ts 不反向导入 Hub，
 // 避免 hub.ts ⇄ proxy.ts 循环依赖（见 plan 006 决策：依赖倒置）。
 const proxyCtx: ProxyServerContext = hub;
-const derpAdmission = process.env.COFLUX_DERP_ADMISSION_PORT ? startDerpAdmission((key) => hub.tailcat.admitted(key), Number(process.env.COFLUX_DERP_ADMISSION_PORT)) : undefined;
+const derpAdmission = process.env.COFLUX_DERP_ADMISSION_PORT ? startDerpAdmission((key) => hub.tailcat.admitted(key), Number(process.env.COFLUX_DERP_ADMISSION_PORT), process.env.COFLUX_DERP_ADMISSION_TOKEN ?? "") : undefined;
 
 const listener = getRequestListener(fetchHandler);
 const httpServer = http.createServer((req, res) => {
