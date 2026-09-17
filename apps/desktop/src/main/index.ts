@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
+import { app, clipboard, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
@@ -17,7 +17,7 @@ import { daemonHomePaths } from "./daemon-paths";
 import { registerIpc } from "./ipc";
 import { log } from "./log";
 import { buildAppMenu } from "./menu";
-import { setDockBadge, showWorkspaceNotification } from "./notifications";
+import { setDockBadge, setDockBadgeLabel, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { createExecutorConfigStore } from "./executor-config";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
@@ -42,6 +42,12 @@ const trusted = { appOrigin: APP_ORIGIN, devRendererUrl };
 if (process.env.COFLUX_DESKTOP_USER_DATA) {
   app.setPath("userData", resolve(process.env.COFLUX_DESKTOP_USER_DATA));
 } else if (!app.isPackaged) app.setPath("userData", `${app.getPath("userData")}-dev`);
+
+// Dev-only instance label (plan 20260916-desktop-preview-parallel): scripts/dev.mjs derives it from
+// the worktree and hands it over here, so parallel previews are identifiable by window title and
+// Dock badge. A labelled input, nothing more — the main process never works out which instance it
+// is. Absent in every packaged run, and then titles and Dock behave exactly as before.
+const instanceLabel = process.env.COFLUX_DESKTOP_INSTANCE_LABEL?.trim() || undefined;
 
 // electron-vite 惯例：preload / 渲染层产物按主进程模块的相对位置找（out/main → out/preload、out/renderer）。
 // 不用 app 的 appPath：`electron out/main/index.js` 直接启动时它指向 out/main，会多拼一层；
@@ -155,12 +161,15 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(() => {
     log.info("启动", { version: app.getVersion(), packaged: app.isPackaged, electron: process.versions.electron, userData: app.getPath("userData") });
+    if (instanceLabel) setDockBadgeLabel(instanceLabel);
     registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
 
     // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
-    // 只放行全屏与剪贴板写入（用户手势）。其余（摄像头/麦克风/地理位置/...）一律拒绝。
-    const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write"]);
+    // 只放行全屏与剪贴板读写。其余（摄像头/麦克风/地理位置/...）一律拒绝。
+    // clipboard-read 是终端右键「粘贴」与 OSC 52 读取剪贴板必需的（两者都走
+    // navigator.clipboard.readText()）；不放行的话没有报错，只是静默什么都不发生。
+    const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write", "clipboard-read"]);
     session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(allowedPermissions.has(permission)));
     session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
 
@@ -338,6 +347,8 @@ if (!app.requestSingleInstanceLock()) {
           });
         },
         setBadge: setDockBadge,
+        // 终端 OSC 52：文本已在渲染层解码并过门控，这里只负责落进系统剪贴板。
+        writeClipboard: (text) => clipboard.writeText(text),
         // 侧栏账号菜单的「服务器地址…」（plan 110）：与原生菜单项走同一个对话框
         showServerInfo: () => void showServerInfo(serverUrl),
         checkForUpdates: updater.checkForUpdates,
@@ -388,6 +399,7 @@ if (!app.requestSingleInstanceLock()) {
       trusted,
       isQuitting: () => quitting,
       windowStatePath: windowStatePath(),
+      instanceLabel,
       onStateError: (error) => log.warn("窗口位置写盘失败", error),
     });
   });

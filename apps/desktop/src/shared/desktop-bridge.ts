@@ -101,6 +101,12 @@ export type DesktopBridge = {
   notify(notification: DesktopNotification): void;
   /** Combined automatic attention and unread inbox count; zero clears the badge. */
   setBadge(count: number): void;
+  /**
+   * 把一段文本写进系统剪贴板（终端里的 OSC 52 用）。必须走主进程：OSC 52 是 PTY 输出流上
+   * 冒出来的，背后没有任何用户手势，`navigator.clipboard.writeText()` 在页面失焦时必被拒——
+   * 而"后台 agent 干完活复制一段东西"恰恰就是失焦那一刻。只有写，没有读。
+   */
+  writeClipboard(text: string): void;
   onFocusNotification(listener: (notification: DesktopNotification) => void): () => void;
   onFocusWorkspace(listener: (workspaceId: string) => void): () => void;
   onCommand(listener: (command: DesktopCommand) => void): () => void;
