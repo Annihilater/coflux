@@ -555,6 +555,14 @@ agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等�
                           任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
                           --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
                           用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
+  coflux project import <path> [--device <id>] [--name <名称>]
+                          把设备上的一个 git 仓库目录变成项目（路径在仓库里就导入仓库根），并
+                          建好它的主工作区；打印一行 JSON：projectId / name / repoPath /
+                          defaultBranch / workspaceId / path / alreadyImported。<path> 必填，
+                          只接受绝对路径或 ~ 开头的路径（它在目标设备上解析）——导入当前目录写
+                          coflux project import "$PWD"。--device 缺省取 COFLUX_DEVICE_ID。
+                          同一个仓库根导入第二次不会多出一个项目：返回已有的那个，
+                          alreadyImported=true
   coflux workspace new --project <id> --branch <分支> [--existing-branch]
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>]

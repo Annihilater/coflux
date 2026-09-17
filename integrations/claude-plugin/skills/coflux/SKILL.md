@@ -481,6 +481,7 @@ never as a command argument. Account commands return JSON. A workspace ID identi
 coflux device list
 coflux device exec <deviceId> --cmd="<command>" [--cwd=<dir>] [--timeout=<seconds>]
 coflux project list --device <deviceId>
+coflux project import <path> [--device <deviceId>] [--name <name>]
 coflux workspace list --device <deviceId>
 coflux workspace new --project <projectId> --branch <branch>
 coflux terminal new --workspace <workspaceId> --title <title> [--cmd <command>]
@@ -505,6 +506,31 @@ is immediate), and `stop` is `close`.
 Read before sending; stop immediately when the user takes over. If a write times out, inspect the
 result before retrying. Exiting the CLI does not stop its terminals. Delete workspaces through
 `coflux workspace remove` so the filesystem and workspace records stay consistent.
+
+### Turn a repository into a project
+
+```sh
+coflux project import "$PWD"
+coflux project import /srv/checkouts/api --device <deviceId> --name api
+```
+
+A repository that is not a project yet has no workspaces, so nothing else in this skill can reach
+it: `workspace new` needs a `projectId`. This is the command that creates one, without the user
+having to click Import in the desktop app.
+
+`<path>` is required and must be **absolute or start with `~/`** — it is resolved on the target
+device, so importing the current directory is written explicitly as `"$PWD"`. Any path inside the
+repository imports the repository root. `--device` selects the machine and defaults to
+`COFLUX_DEVICE_ID`; with neither, the command fails rather than guessing. `--name` overrides the
+project name, which otherwise comes from the git remote and falls back to the directory name.
+
+Success is one line of JSON: `projectId`, `name`, `repoPath`, `defaultBranch`, the main workspace's
+`workspaceId` and `path`, and `alreadyImported`. A repository root on a device has exactly one
+project, so importing the same repository twice returns the existing one with
+`alreadyImported: true` and creates nothing — re-running it is safe. Failures are one sentence and a
+non-zero exit: "不是 git 仓库" (the path is not inside a repository), "设备离线，无法执行该操作"
+(that device is not connected), and a submitted-but-unfinished import tells you to check
+`coflux project list`.
 
 ### Run one command on another machine
 

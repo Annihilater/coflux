@@ -66,6 +66,12 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
         command.deviceId = resolved.value;
         return { ok: true };
       }
+      case "project.import": {
+        const resolved = await resolveHandle("device", command.daemonId);
+        if (!resolved.ok) return resolved;
+        command.daemonId = resolved.value;
+        return { ok: true };
+      }
       default:
         return { ok: true };
     }
@@ -97,6 +103,12 @@ export const ClientCommandHandler = withSchema(ClientCommandContract.schemas, as
     case "logout":
       await hub.revokeClientSession(accountId, tokenHash);
       return reply({ ok: true, value: null });
+    // `project.import` is addressed by device, so its daemonId accepts a handle like `device.exec` does;
+    // the outcome carries both the new project's handle and its main workspace's.
+    case "project.import": return reply(carrying(
+      await hub.importProjectForAccount(accountId, command),
+      (value) => ({ ...value, ref: entityRef("project", value.projectId), workspaceRef: entityRef("workspace", value.workspaceId) }),
+    ));
     case "workspace.new": return reply(carrying(await hub.createWorkspaceForAccount(accountId, command), workspaceRef));
     case "workspace.rename": return reply(carrying(await hub.renameWorkspaceForAccount(accountId, command.workspaceId, command.name), workspaceRef));
     case "workspace.remove": return reply(carrying(

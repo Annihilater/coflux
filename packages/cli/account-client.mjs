@@ -89,6 +89,22 @@ export async function runAccountCommand(positionals, flags, home) {
   const sessionPath = join(home, "cli-session.json");
   const required = (key) => { if (!flags[key]) throw new Error(`缺少 --${key}`); return flags[key]; };
   const target = () => { if (!id) throw new Error("缺少目标 ID"); return id; };
+  // `project import <path>`: the path is resolved on the **target device** (`~` expansion and
+  // `git rev-parse --show-toplevel` both happen there), so the CLI only checks its shape — the same
+  // rule as `device exec --cwd`. Expanding it here would resolve the caller's home on the wrong machine.
+  const importPath = () => {
+    const value = (id ?? "").trim();
+    if (!value) throw new Error('缺少要导入的路径（导入当前目录写 coflux project import "$PWD"）');
+    if (!(value.startsWith("/") || value === "~" || value.startsWith("~/"))) throw new Error('路径要绝对路径或 ~ 开头（它在目标设备上解析）；导入当前目录写 coflux project import "$PWD"');
+    return value;
+  };
+  // `--device` falls back to the daemon-issued COFLUX_DEVICE_ID; empty on both sides is an error,
+  // never a guess — silently importing onto the wrong machine is worse than failing.
+  const deviceTarget = () => {
+    const value = (flags.device || process.env.COFLUX_DEVICE_ID || "").trim();
+    if (!value) throw new Error("缺少设备：请加 --device <id>（coflux device list 可以看到）");
+    return value;
+  };
   const print = (value) => console.log(JSON.stringify(value));
   if (command === "login") {
     const server = origin(flags.server || "https://api.coflux.dev");
@@ -153,6 +169,9 @@ export async function runAccountCommand(positionals, flags, home) {
     process.exit(exitCode);
   }
   let operation;
+  if (command === "project") {
+    if (sub === "import") operation = { op: "project.import", daemonId: deviceTarget(), path: importPath(), ...(flags.name ? { name: flags.name } : {}) };
+  }
   if (command === "workspace") {
     if (sub === "new") operation = { op: "workspace.new", projectId: required("project"), branch: required("branch"), createNew: !flags["existing-branch"], ...(flags.name ? { name: flags.name } : {}) };
     if (sub === "rename") operation = { op: "workspace.rename", workspaceId: target(), name: required("name") };
@@ -168,7 +187,8 @@ export async function runAccountCommand(positionals, flags, home) {
     if (["stop", "remove"].includes(sub)) operation = { op: `terminal.${sub}`, terminalId: target() };
   }
   if (!operation && command !== "whoami" && command !== "ports" && sub !== "list") throw new Error("未知账号命令");
-  if (operation && (flags.device || (flags.workspace && operation.op !== "terminal.new"))) throw new Error("目标 ID 已确定作用范围，请不要附加设备或工作区筛选参数");
+  // `project.import` is addressed by device like `snapshot`, so `--device` is an input to it rather than a filter.
+  if (operation && ((flags.device && operation.op !== "project.import") || (flags.workspace && operation.op !== "terminal.new"))) throw new Error("目标 ID 已确定作用范围，请不要附加设备或工作区筛选参数");
   let value = await call(operation || { op: "snapshot" });
   if (command === "whoami") value = { accountId: value.accountId };
   else if (sub === "list" || command === "ports") {
