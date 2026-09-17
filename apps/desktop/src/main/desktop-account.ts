@@ -7,8 +7,37 @@ type Cleanup = { accountId: string; token: string; daemonId: string };
 type AccountData = { accountId: string | null; credentials: Record<string, string>; pending: Cleanup[] };
 export type AccountSnapshot = { accountId: string; daemonIds: string[] };
 
+/** The phase the control connection is in; each one owns its deadline and its failure message. */
+export type AccountControlStage = "connect" | "snapshot" | "cleanup" | "logout";
+export type AccountControlTimeouts = Record<AccountControlStage, number>;
+
+/**
+ * Production budgets. `connect` is the most generous because the stall behind this split is a TLS
+ * handshake on a cross-border link, where the socket neither opens nor errors. A whole run can now
+ * take the sum of these, and `connect()` may make several runs, so keep them modest.
+ */
+export const ACCOUNT_CONTROL_TIMEOUTS: AccountControlTimeouts = { connect: 20_000, snapshot: 15_000, cleanup: 15_000, logout: 15_000 };
+
+/**
+ * One deadline for the whole connection could only name one phase, so it named the wrong one: a
+ * stalled handshake was reported as an account cleanup that had kept a retry record, with nothing
+ * pending at all. Only the two cleanup-side stages ever run with a persisted entry, so only they
+ * make that claim.
+ */
+const STAGE_TIMEOUT_MESSAGE: Record<AccountControlStage, string> = {
+  connect: "连接账号服务器超时，请检查网络后重试",
+  snapshot: "读取账号信息超时，请重试",
+  cleanup: "本机终端清理超时，已保留待重试记录",
+  logout: "退出登录确认超时，已保留待重试记录",
+};
+
 /** 窄用途控制连接：只读取归属，或清理指定本机的终端并撤销退出的会话。 */
-export function accountControl(serverUrl: string, token: string, cleanup?: { daemonId: string; accountId: string; revoke: boolean }): Promise<AccountSnapshot> {
+export function accountControl(
+  serverUrl: string,
+  token: string,
+  cleanup?: { daemonId: string; accountId: string; revoke: boolean },
+  timeouts: AccountControlTimeouts = ACCOUNT_CONTROL_TIMEOUTS,
+): Promise<AccountSnapshot> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(serverUrl);
     socket.binaryType = "arraybuffer";
@@ -17,21 +46,30 @@ export function accountControl(serverUrl: string, token: string, cleanup?: { dae
     let finished = false;
     let logoutSent = false;
     const remaining = new Set<string>();
-    const timer = setTimeout(() => finish(new Error("账号清理连接超时，已保留待重试记录")), 15000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    /** Entering a stage resets both the deadline and the message that deadline will fail with. */
+    function enter(stage: AccountControlStage) {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => finish(new Error(STAGE_TIMEOUT_MESSAGE[stage])), timeouts[stage]);
+    }
     function finish(error?: Error) {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       socket.close();
       if (error) reject(error); else if (snapshot) resolve(snapshot); else reject(new Error("账号快照缺失"));
     }
     const send = (payload: ClientToServerPayload) => socket.send(encodeClientToServer(create(ClientToServerSchema, { payload })));
     function completeCleanup() {
       if (remaining.size || !snapshot || logoutSent || finished) return;
-      if (cleanup?.revoke) { logoutSent = true; send({ case: "clientLogout", value: {} }); }
+      if (cleanup?.revoke) { logoutSent = true; enter("logout"); send({ case: "clientLogout", value: {} }); }
       else finish();
     }
-    socket.onopen = () => send({ case: "clientAuth", value: { clientToken: token, clientKind: "desktop", clientVersion: "desktop-lifecycle", controlProtocolVersion: CONTROL_PROTOCOL_VERSION } });
+    enter("connect");
+    socket.onopen = () => {
+      enter("snapshot");
+      send({ case: "clientAuth", value: { clientToken: token, clientKind: "desktop", clientVersion: "desktop-lifecycle", controlProtocolVersion: CONTROL_PROTOCOL_VERSION } });
+    };
     socket.onerror = () => finish(new Error("账号服务器暂不可达"));
     socket.onclose = (event) => {
       if (logoutSent && event.code === 4001) finish();
@@ -51,6 +89,7 @@ export function accountControl(serverUrl: string, token: string, cleanup?: { dae
           snapshot = { accountId, daemonIds: payload.value.daemons.map((d) => d.daemonId) };
           if (!cleanup) return finish();
           for (const task of payload.value.tasks) if (task.daemonId === cleanup.daemonId) remaining.add(task.id);
+          enter("cleanup");
           for (const taskId of remaining) send({ case: "taskRemove", value: { taskId } });
           completeCleanup();
         } else if (payload.case === "taskRemoved") {

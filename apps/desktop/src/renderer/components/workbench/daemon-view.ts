@@ -22,6 +22,7 @@ export type DaemonStatusLine = {
 };
 
 export const DAEMON_BUSY_LABEL: Record<DesktopDaemonBusy, string> = {
+  connect: "接入账号",
   install: "安装组件",
   start: "启动服务",
   restart: "重启服务",
@@ -190,9 +191,12 @@ export type OnboardingSteps = {
 
 export function resolveOnboardingSteps(state: DesktopDaemonState, local: OnboardingLocal): OnboardingSteps {
   const error = state.error;
+  // The account check belongs to the first step: it runs before anything is installed, and its
+  // retry is the same 「接入」 the user already has there.
+  const prepareFailed = error?.action === "install" || error?.action === "connect";
   let install: OnboardingStepState = "pending";
-  if (error?.action === "install") install = "failed";
-  else if (state.busy === "install") install = "active";
+  if (prepareFailed) install = "failed";
+  else if (state.busy === "install" || state.busy === "connect") install = "active";
   else if (state.installed) install = "done";
   else if (local.started) install = "active";
 
@@ -207,7 +211,7 @@ export function resolveOnboardingSteps(state: DesktopDaemonState, local: Onboard
   else if (start === "done") authorize = local.authError ? "failed" : "active";
 
   const failure =
-    error && (error.action === "install" || error.action === "start")
+    error && (error.action === "connect" || error.action === "install" || error.action === "start")
       ? `${DAEMON_BUSY_LABEL[error.action]}失败：${error.message}`
       : authorize === "failed"
         ? `授权失败：${local.authError}`

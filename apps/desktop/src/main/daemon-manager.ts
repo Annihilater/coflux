@@ -41,6 +41,15 @@ export type DaemonManager = {
   getState: () => DesktopDaemonState;
   refresh: () => Promise<void>;
   onChange: (listener: (state: DesktopDaemonState) => void) => () => void;
+  /**
+   * Runs the account check that precedes an enrollment and reports whether it passed, so the caller
+   * can skip `enroll()` on failure. It shares `busy` / `error` with the other actions — a failure
+   * shows up in the same status line and onboarding step — and differs from `run()` in three ways
+   * that matter here: it returns its outcome, it waits for an in-flight action instead of quietly
+   * skipping the check, and it stays out of the `action` slot so `stopForExit` never has to wait out
+   * a stalled network handshake.
+   */
+  verifyAccount: (check: () => Promise<void>) => Promise<boolean>;
   enroll: () => Promise<void>;
   restart: () => Promise<void>;
   stop: () => Promise<void>;
@@ -118,6 +127,27 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     })();
     return action;
   }
+  /** See `DaemonManager.verifyAccount`. Deliberately beside `run()`, not inside it. */
+  async function verifyAccount(check: () => Promise<void>): Promise<boolean> {
+    // Waiting, never returning the in-flight action: a reconnect landing during a restart must
+    // still verify the account, not inherit that action's result.
+    while (action) await action;
+    busy = "connect";
+    error = undefined;
+    emit();
+    try {
+      await check();
+      return true;
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      log.warn("本机操作失败", { action: "connect", message });
+      // Staying out of the `action` slot means a run() can start while `check()` is still in flight,
+      // and it then owns `busy` / `error` — it cleared `error` for itself and the user is watching
+      // the restart they just asked for. Write only while the `connect` slot is still ours.
+      if (busy === "connect") error = { action: "connect", message };
+      return false;
+    } finally { if (busy === "connect") { busy = undefined; emit(); } }
+  }
   async function migrateLegacy(): Promise<boolean> {
     if (!existsSync(paths.plist)) return true;
     // 不自动接管系统服务：用户必须知道迁移会结束其终端。
@@ -182,6 +212,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
   return {
     getState: () => state, refresh,
     onChange: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    verifyAccount,
     enroll: () => run("start", start),
     restart: () => run("restart", async () => { if (await stopConfirmed("restart")) await start(); }),
     stop: () => run("stop", async () => { await stopConfirmed("stop"); }),

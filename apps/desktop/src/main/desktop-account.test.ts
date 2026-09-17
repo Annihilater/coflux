@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createDesktopAccount, accountControl } from "./desktop-account";
+import { createDesktopAccount, accountControl, type AccountControlStage, type AccountControlTimeouts } from "./desktop-account";
+
+/** Every stage gets room to finish on localhost; the one under test is the only tight deadline. */
+function budgets(stalled: AccountControlStage): AccountControlTimeouts {
+  const roomy: AccountControlTimeouts = { connect: 5000, snapshot: 5000, cleanup: 5000, logout: 5000 };
+  roomy[stalled] = 50;
+  return roomy;
+}
 
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "coflux-account-"));
@@ -93,5 +101,67 @@ test("account control rejects obsolete server versions before subscription or cl
         assert.deepEqual(received, ["clientAuth", "clientSubscribe"]);
       }
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  }
+});
+
+test("a stalled handshake blames the connection, not an account cleanup that never ran", async () => {
+  // A ws server would complete the handshake and open the socket, which is exactly what must not
+  // happen here: a bare TCP listener accepts the connection and then says nothing at all.
+  const accepted: Socket[] = [];
+  const server = createServer(socket => { accepted.push(socket); });
+  await new Promise<void>(resolve => { server.listen(0, "127.0.0.1", () => resolve()); });
+  try {
+    const address = server.address(); assert(address && typeof address !== "string");
+    await assert.rejects(
+      accountControl(`ws://127.0.0.1:${address.port}`, "session", undefined, budgets("connect")),
+      /连接账号服务器超时，请检查网络后重试/,
+    );
+  } finally {
+    for (const socket of accepted) socket.destroy();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("each later stage times out with its own message, and only cleanup claims a retry record", async () => {
+  const { WebSocketServer } = await import("ws");
+  const { create, decodeClientToServer, encodeServerToClient, ServerToClientSchema, CONTROL_PROTOCOL_VERSION } = await import("@coflux/protocol");
+  const expected = {
+    snapshot: "读取账号信息超时，请重试",
+    cleanup: "本机终端清理超时，已保留待重试记录",
+    logout: "退出登录确认超时，已保留待重试记录",
+  };
+  for (const stalled of ["snapshot", "cleanup", "logout"] as const) {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>(resolve => server.once("listening", resolve));
+    // Answers everything up to the stalled stage, then goes silent while holding the socket open.
+    server.on("connection", socket => {
+      socket.on("message", bytes => {
+        const payload = decodeClientToServer(new Uint8Array(bytes as Buffer))?.payload;
+        if (payload?.case === "clientAuth") {
+          socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "authOk", value: { accountId: "owner", controlProtocolVersion: CONTROL_PROTOCOL_VERSION } } })));
+        } else if (payload?.case === "clientSubscribe" && stalled !== "snapshot") {
+          socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "stateSnapshot", value: { tasks: [{ id: "t-1", daemonId: "local" }] } } })));
+        } else if (payload?.case === "taskRemove" && stalled !== "cleanup") {
+          socket.send(encodeServerToClient(create(ServerToClientSchema, { payload: { case: "taskRemoved", value: { taskId: payload.value.taskId } } })));
+        }
+        // clientLogout is never answered: the 4001 close is what would settle it.
+      });
+    });
+    try {
+      const address = server.address(); assert(address && typeof address !== "string");
+      await assert.rejects(
+        accountControl(`ws://127.0.0.1:${address.port}`, "session", { daemonId: "local", accountId: "owner", revoke: true }, budgets(stalled)),
+        // Exact equality on the message, through a validation function: a RegExp here would be
+        // matched against `String(error)` — `Error: <message>` — so the stage each message belongs
+        // to could only be pinned down loosely.
+        (error: unknown) => {
+          assert.equal((error as Error).message, expected[stalled], `stage ${stalled}`);
+          return true;
+        },
+      );
+    } finally {
+      for (const client of server.clients) client.terminate();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   }
 });
