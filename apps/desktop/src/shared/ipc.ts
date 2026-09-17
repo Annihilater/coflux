@@ -12,6 +12,8 @@ export const IPC = {
   logoutLocal: "desktop:logout-local",
   notify: "desktop:notify",
   setBadge: "desktop:set-badge",
+  /** 终端里的 OSC 52：远端程序要写本机剪贴板，只能由主进程的 Electron clipboard 落地 */
+  clipboardWrite: "desktop:clipboard-write",
   /** 「服务器地址…」原生对话框（plan 110）：settings.json 路径与「打开设置文件」只有主进程有 */
   showServerInfo: "desktop:show-server-info",
   checkForUpdates: "desktop:check-for-updates",

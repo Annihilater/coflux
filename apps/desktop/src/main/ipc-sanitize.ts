@@ -25,6 +25,18 @@ export function sanitizeBadgeCount(payload: unknown): number | null {
   return Math.min(999, Math.max(0, Math.floor(payload)));
 }
 
+/** OSC 52 写剪贴板的文本：源头是远端机器上跑的任意程序，按"只当数据"处理。
+ * 渲染层已经在**编码后**的 base64 上拦过一道（osc52-clipboard.ts），这里再按**解码后**的
+ * 字符数独立拦一道——两道闸各管一头。超限一律丢弃：半截的剪贴板内容比不复制更糟。
+ * 内容本身不清洗（换行、制表、首尾空格都要逐字节还原），只管形状与大小。 */
+const MAX_CLIPBOARD_TEXT = 768 * 1024;
+
+export function sanitizeClipboardText(payload: unknown): string | null {
+  if (typeof payload !== "string") return null;
+  if (payload.length === 0 || payload.length > MAX_CLIPBOARD_TEXT) return null;
+  return payload;
+}
+
 /** 会话 token：非空、不超长、不含控制字符/空白的字符串才落盘。 */
 export function sanitizeSessionToken(payload: unknown): string | null {
   if (typeof payload !== "string") return null;

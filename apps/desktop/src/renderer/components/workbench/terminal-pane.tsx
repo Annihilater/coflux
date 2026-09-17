@@ -1,17 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type IDecoration, type IMarker } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import { useToast } from "@astryxdesign/core/Toast";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import type { FsWriteResult } from "@coflux/client";
 
+import { commandOutputText, createCommandMarkReader } from "@/components/workbench/terminal-command-marks";
+import {
+  canSendTerminalInput,
+  canSendTerminalResize,
+  type TerminalControlState,
+} from "@/components/workbench/terminal-control-state";
+import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
+import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
+import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
+import { desktop } from "@/config";
 
-/** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
- * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，
- * 输入门控与 attaching/stopped 一致（下方 owned 判等），不需要单独处理。 */
-export type TerminalControlState = "stopped" | "idle" | "attaching" | "owned" | "detached";
+/** 控制权状态与输入门控的真相源在 terminal-control-state.ts（纯值语义，可无 DOM 单测）；
+ * 这里原样再导出，调用方（terminal-attach.ts 等）的 import 路径不变。 */
+export type { TerminalControlState };
 
 export type TerminalController = {
   dimensions: () => { cols: number; rows: number };
@@ -45,51 +60,34 @@ const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可
 // 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 
-/** xterm 6.0.0 私有内部结构（仅补丁用到的字段），升级 @xterm/xterm 需复验。 */
-type XtermCoreInternals = {
-  _compositionHelper?: { _isComposing: boolean; _isSendingComposition: boolean; _handleAnyTextareaChanges: () => void };
-  _inputEvent?: (ev: InputEvent) => boolean;
-  _keyPressHandled?: boolean;
-  _unprocessedDeadKey?: boolean;
-  coreService?: { triggerDataEvent: (data: string, wasUserInput: boolean) => void };
-  textarea?: HTMLTextAreaElement;
-  cancel?: (ev: Event) => void;
+/** ⌘F 查找的高亮：颜色只接受 #RRGGBB，取自上面的终端主题。开着 decorations 才有
+ * onDidChangeResults（命中计数），所以它不是纯装饰。 */
+const SEARCH_OPTIONS: ISearchOptions = {
+  decorations: {
+    matchBackground: "#3a3a3a",
+    matchOverviewRuler: "#6a6a6a",
+    activeMatchBackground: "#c9a227",
+    activeMatchColorOverviewRuler: "#c9a227",
+  },
 };
 
-/** 全角标点丢字 workaround（上游 xtermjs/xterm.js#5887，6.1.0-beta 仍未修）：
- * 中文 IME 直接提交（无 composition 会话）的字符只出现在 textarea 'input' 事件里，
- * 但 xterm 的 _inputEvent 被 (!ev.composed || !_keyDownSeen) 门控挡住，兜底的
- * CompositionHelper setTimeout(0) textarea diff 又与 IME 落字时序竞态——
- * 表现为全角 ？！ 等（带 Shift 的标点）需连输两次才出一个。
- * 这里改为由 input 事件确定性发送并停用竞态 diff 路径；任一内部字段缺失
- * （日后升级 xterm 内部改名）则整体跳过，行为回落为上游现状。 */
-function patchImeCommittedInput(terminal: Terminal): void {
-  const core = (terminal as unknown as { _core?: XtermCoreInternals })._core;
-  const helper = core?._compositionHelper;
-  const origInputEvent = core?._inputEvent;
-  if (!core || !helper || !origInputEvent || !core.coreService || !core.textarea || !core.cancel) return;
+const NO_SEARCH_RESULTS = { index: -1, count: 0 };
 
-  helper._handleAnyTextareaChanges = () => {};
-  core._inputEvent = (ev: InputEvent) => {
-    if (helper._isComposing || helper._isSendingComposition) return false;
-    // Alt/Option 组合字符走 keypress 已发过（_keyPressHandled），不能重复发。
-    if (ev.inputType === "insertText" && ev.data && !core._keyPressHandled) {
-      core._unprocessedDeadKey = false;
-      core.coreService!.triggerDataEvent(ev.data, true);
-      core.textarea!.value = ""; // 及时清空，textarea 累积残值正是上游 diff 路径不可靠的来源之一
-      core.cancel!(ev);
-      return true;
-    }
-    if (ev.inputType === "deleteContentBackward") {
-      // 对应被停用的 diff 路径里"值变短发 DEL"分支（IME 吞掉 Backspace keydown 的场景）
-      core.coreService!.triggerDataEvent("\x7f", true);
-      core.textarea!.value = "";
-      core.cancel!(ev);
-      return true;
-    }
-    return origInputEvent.call(core, ev);
-  };
-}
+/** 命令装饰条的颜色，取自上面的终端主题。 */
+const COMMAND_COLORS = { running: "#6a6a6a", success: "#4fae6e", failure: "#e05c6a", unknown: "#c9a227" } as const;
+/** 命令账本上限：markers 会随 scrollback 裁剪自行 dispose，这条只是防病态输出把账本撑爆。 */
+const MAX_TRACKED_COMMANDS = 500;
+
+/** 命令导航（OSC 133）对 React 层暴露的接口；账本本身活在挂载期闭包里。 */
+type TerminalCommandNavigation = {
+  count: () => number;
+  /** 滚到上/下一个提示符。 */
+  scrollBy: (delta: -1 | 1) => void;
+  /** 最后一条已结束命令的输出；没有则返回 null。 */
+  lastOutput: () => string | null;
+  /** gap 恢复（快照覆盖）与「重新打开」时清账：快照是渲染好的屏幕，里面没有 OSC 133。 */
+  clear: () => void;
+};
 
 function extForMime(mime: string): string {
   switch (mime) {
@@ -156,6 +154,17 @@ export function TerminalPane(props: TerminalPaneProps) {
   // 上传中用光标转圈表达进行态；成功不打扰，只在失败时弹 toast 告知原因——不写进终端画面避免污染 claude 会话。
   const [isUploading, setIsUploading] = useState(false);
   const showToast = useToast();
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const commandsRef = useRef<TerminalCommandNavigation | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
+  // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
+  const [menuSelection, setMenuSelection] = useState(false);
+  const [menuCommands, setMenuCommands] = useState(0);
+  // 链接悬停提示（需要修饰键才激活，不提示的话没人猜得到）；位置用 fixed，省掉容器坐标换算。
+  const [linkHint, setLinkHint] = useState<{ label: string; x: number; y: number } | null>(null);
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
@@ -190,14 +199,37 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (!host) return;
 
     const terminal = new Terminal({
-      allowProposedApi: false,
+      // addon-unicode11 走的是标记为 (EXPERIMENTAL) 的 terminal.unicode.register，
+      // allowProposedApi 为 false 时它在 activate 阶段直接抛错（不是降级渲染），必须放行。
+      allowProposedApi: true,
+      // 全屏 TUI（claude / grok 等开了 alternate screen + DECSET 1000/1002/1003）握着鼠标上报时，
+      // xterm 默认把 mousedown/drag 全转给应用，本地选区根本不成立 —— 于是没东西可 ⌘C。
+      // 每个终端都留的那道口子就是修饰键强制本地选区：macOS 上是 ⌥（iTerm2 / Terminal.app 同款），
+      // xterm 有这条路但默认关着。打开它，⌥+拖拽在任何抓鼠标的程序里都能划出选区。
+      macOptionClickForcesSelection: true,
+      // 上一条的直接后果：xterm 默认 ⌥+单击会往应用灌一串方向键把光标挪过去（VS Code 留着它，
+      // 因为那里的用户在 shell 提示符前）。我们的用户在 agent TUI 里，同一个手势变成一串噪声输入，
+      // 而 ⌥ 现在又是选区手势——必须关掉。
+      altClickMovesCursor: false,
       convertEol: false,
-      cursorBlink: true,
-      cursorStyle: "bar",
+      // 下面四项与 rescaleOverlappingGlyphs 一起对齐 Cursor 的默认观感（plan 20260916）：
+      // 不闪的块状光标、行高 1、对比度下限 4.5。fontFamily 不动——这串在 macOS 上实际解析到的
+      // 就是 Menlo（前三个字体都不存在），与 Cursor 用的是同一个。
+      cursorBlink: false,
+      cursorStyle: "block",
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: 12, // 等宽字体同 px 视觉大于 UI sans（页面 base 13px），降 1px 找平衡（VS Code 同款配比）
-      lineHeight: 1.25,
+      lineHeight: 1,
+      // 主题里 brightBlack 这类暗色按作者给的对比度渲染会糊；4.5 = WCAG AA 正文下限，
+      // xterm 会按背景色把不达标的前景色提亮到刚好达标，不改主题本身。
+      minimumContrastRatio: 4.5,
+      // 宽度超过一格的字形（部分 Nerd Font / powerline 图标）缩放到格内，不再压住右边的字符。
+      rescaleOverlappingGlyphs: true,
       scrollback: 10_000,
+      // kitty 键盘协议（CSI u）：Shift+Enter 之类的组合键才有办法编码给远端 TUI。
+      // 由应用在运行时协商启用，不进快照——gap 恢复后的 terminal.reset() 会让已启用它的 TUI
+      // 面对一个「忘了这回事」的终端，协议级模式持久化不在本 plan 范围内。
+      vtExtensions: { kittyKeyboard: true },
       theme: {
         background: "#0a0a0a",
         foreground: "#e4e4e4",
@@ -216,19 +248,188 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    // Unicode 11 宽度表：emoji 与全角标点按两格算，否则光标漂移、行尾留垃圾（Claude Code 首当其冲）。
+    // 残留分歧（本 plan 不关）：supervisor 快照用的 vt100 走 unicode-width 0.2.2 = Unicode 17，
+    // 这里是 11，Unicode 12-17 新增的字符两边宽度仍不一致，gap 恢复时表现为折行位置对不上。
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = "11";
+    // ⌘F 查找（命中高亮 + 计数）。OSC 52 不用 @xterm/addon-clipboard：addon 会答复查询，
+    // 而本项目的不变量是「查询绝不回一个字节」，写入也要过面板门控并走主进程 Electron clipboard
+    // （plan 20260914 的决策）。52 号 handler 在下面用 registerOscHandler 自己注册。
+    const searchAddon = new SearchAddon();
+    terminal.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
+    searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => setSearchResults({ index: resultIndex, count: resultCount }));
+
     // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
     // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
     // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
     // 这里带 URL 调 window.open，主进程的 setWindowOpenHandler 拿到真实 URL 交 shell.openExternal；
     // 返回值在桌面版恒为 null（deny），不据此分支。
     terminal.loadAddon(
-      new WebLinksAddon((event, uri) => {
-        if (!shouldOpenTerminalLink(event)) return;
-        window.open(uri, "_blank", "noopener");
-      }),
+      new WebLinksAddon(
+        (event, uri) => {
+          setLinkHint(null);
+          if (!shouldOpenTerminalLink(event)) return;
+          window.open(uri, "_blank", "noopener");
+        },
+        {
+          hover: (event) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击打开`, x: event.clientX, y: event.clientY }),
+          leave: () => setLinkHint(null),
+        },
+      ),
     );
+
+    // 文件引用（`src/a.ts:12:5`）：悬停有下划线与提示，⌘+点击把原文复制到剪贴板。
+    // 不是「在编辑器里打开」——工作台没有编辑器面板，而本 plan 只许动主进程的权限集合，
+    // 没法新开一个打开文件的 IPC。对着 agent 终端而言，路径能一键进剪贴板就是最有用的动作。
+    terminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+        const { text, cellOf } = readTerminalLine(line);
+        const references = findFileReferences(text);
+        if (references.length === 0) {
+          callback(undefined);
+          return;
+        }
+        callback(
+          references.map((reference) => ({
+            // IBufferRange 是「1-based 含右端」，正好等于 0-based 右开端点（见 addon-web-links 的 LinkComputer）。
+            range: {
+              start: { x: cellOf[reference.start]! + 1, y: bufferLineNumber },
+              end: { x: cellOf[reference.end]!, y: bufferLineNumber },
+            },
+            text: reference.text,
+            decorations: { pointerCursor: true, underline: true },
+            activate: (event: MouseEvent, linkText: string) => {
+              setLinkHint(null);
+              if (!shouldOpenTerminalLink(event)) return;
+              void navigator.clipboard.writeText(linkText).then(
+                () => liveRef.current.showToast({ body: `已复制 ${linkText}`, type: "info" }),
+                () => liveRef.current.showToast({ body: "复制路径失败", type: "error" }),
+              );
+            },
+            hover: (event: MouseEvent) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击复制路径`, x: event.clientX, y: event.clientY }),
+            leave: () => setLinkHint(null),
+          })),
+        );
+      },
+    });
+    // 命令边界（OSC 133）：shell 集成早就在往流里发，这里才第一次有人接。
+    // 标记只用来认边界；载荷里的会话标识全程留在 createCommandMarkReader 的闭包里
+    // （不进 state、不打日志、不进错误信息，见 terminal-command-marks.ts）。
+    type CommandEntry = {
+      prompt: IMarker;
+      decoration: IDecoration | undefined;
+      element: HTMLElement | undefined;
+      state: keyof typeof COMMAND_COLORS;
+      start: IMarker | undefined;
+      end: IMarker | undefined;
+    };
+    const commands: CommandEntry[] = [];
+    const markReader = createCommandMarkReader();
+
+    const paintCommand = (entry: CommandEntry) => {
+      const element = entry.element;
+      if (!element) return;
+      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 host 的 pl-3 内边距，当成 Cursor 那样的行首标记条。
+      element.style.width = "3px";
+      element.style.height = "100%";
+      element.style.marginLeft = "-9px";
+      element.style.borderRadius = "2px";
+      element.style.backgroundColor = COMMAND_COLORS[entry.state];
+    };
+    const dropCommand = (entry: CommandEntry) => {
+      const index = commands.indexOf(entry);
+      if (index >= 0) commands.splice(index, 1);
+      entry.decoration?.dispose();
+      entry.start?.dispose();
+      entry.end?.dispose();
+    };
+    const clearCommands = () => {
+      for (const entry of [...commands]) {
+        dropCommand(entry);
+        entry.prompt.dispose();
+      }
+      commands.length = 0;
+    };
+    const beginCommand = () => {
+      // 上一条没等到 D 就又出提示符：shell 被 exec 掉或钩子被跳过，按「未知」收尾而不是一直转。
+      const previous = commands[commands.length - 1];
+      if (previous && previous.state === "running") {
+        previous.state = "unknown";
+        paintCommand(previous);
+      }
+      const prompt = terminal.registerMarker(0);
+      const entry: CommandEntry = {
+        prompt,
+        decoration: terminal.registerDecoration({ marker: prompt, x: 0, width: 1 }),
+        element: undefined,
+        state: "unknown",
+        start: undefined,
+        end: undefined,
+      };
+      entry.decoration?.onRender((element) => {
+        entry.element = element;
+        paintCommand(entry);
+      });
+      // marker 随 scrollback 裁剪自行 dispose，账本跟着掉这一行。
+      prompt.onDispose(() => dropCommand(entry));
+      commands.push(entry);
+      while (commands.length > MAX_TRACKED_COMMANDS) {
+        const oldest = commands[0]!;
+        dropCommand(oldest);
+        oldest.prompt.dispose();
+      }
+    };
+    terminal.parser.registerOscHandler(133, (data) => {
+      const mark = markReader.read(data);
+      if (!mark) return false;
+      const current = commands[commands.length - 1];
+      if (mark.kind === "prompt-start") {
+        beginCommand();
+      } else if (mark.kind === "command-start" && current) {
+        current.start = terminal.registerMarker(0);
+        current.state = "running";
+        paintCommand(current);
+      } else if (mark.kind === "command-end" && current) {
+        current.end = terminal.registerMarker(0);
+        current.state = mark.exitCode === undefined ? "unknown" : mark.exitCode === 0 ? "success" : "failure";
+        paintCommand(current);
+      }
+      return true;
+    });
+
+    const promptLines = () => commands.map((entry) => entry.prompt.line).filter((line) => line >= 0);
+    commandsRef.current = {
+      count: () => commands.length,
+      scrollBy: (delta) => {
+        const lines = promptLines().sort((a, b) => a - b);
+        const from = terminal.buffer.active.viewportY;
+        const target = delta < 0 ? lines.filter((line) => line < from).pop() : lines.find((line) => line > from);
+        if (target !== undefined) terminal.scrollToLine(target);
+      },
+      lastOutput: () => {
+        const entry = [...commands].reverse().find((item) => item.start && item.start.line >= 0 && item.state !== "running");
+        if (!entry?.start) return null;
+        const buffer = terminal.buffer.active;
+        const last = (entry.end && entry.end.line >= 0 ? entry.end.line : buffer.baseY + buffer.cursorY) - 1;
+        const lines: string[] = [];
+        for (let y = entry.start.line; y <= last; y++) lines.push(buffer.getLine(y)?.translateToString(true) ?? "");
+        const text = commandOutputText(lines);
+        return text.length > 0 ? text : null;
+      },
+      clear: clearCommands,
+    };
+
     terminal.open(host);
-    patchImeCommittedInput(terminal);
+    // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
+    // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
+    const imePatch = applyImeCommittedInputPatch((terminal as unknown as { _core?: XtermCoreInternals })._core);
     terminalRef.current = terminal;
 
     // WebGL 渲染器动态加载（addon 约 247KB，不进首屏主 chunk）：
@@ -251,6 +452,19 @@ export function TerminalPane(props: TerminalPaneProps) {
         // chunk 加载失败（离线/网络异常），保持默认 DOM 渲染器。
       });
 
+    // 防抖窗口里待落地的那次 fit；applyFit 与卸载都要清掉它。
+    let pendingFit: number | undefined;
+    const applyFit = () => {
+      if (pendingFit !== undefined) {
+        window.clearTimeout(pendingFit);
+        pendingFit = undefined;
+      }
+      try {
+        fitAddon.fit();
+      } catch {
+        // 容器切换显示的瞬间可能尚无可测尺寸，下一次观察回调会再次 fit。
+      }
+    };
     const fit = () => {
       if (!liveRef.current.active || !host.isConnected) return;
       // 工作区保活模式下被 display:none 隐藏时尺寸为 0：FitAddon 会把终端钳到 2×1
@@ -258,11 +472,28 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 0 尺寸一律不 fit，切回显示后 WorkspaceTerminal 的 rAF fit 会用真实尺寸补上。
       const rect = host.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      // 拖窗口时 ResizeObserver 每帧都回调；六个 fit 入口全从这里过，判定统一放这儿（见 terminal-fit.ts）。
+      let proposed: TerminalFitProposal;
       try {
-        fitAddon.fit();
+        proposed = fitAddon.proposeDimensions();
       } catch {
-        // 容器切换显示的瞬间可能尚无可测尺寸，下一次观察回调会再次 fit。
+        return;
       }
+      const decision = decideTerminalFit({ cols: terminal.cols, rows: terminal.rows, bufferLines: terminal.buffer.active.length }, proposed);
+      if (decision === "skip") return;
+      if (decision === "immediate") {
+        applyFit();
+        return;
+      }
+      if (pendingFit !== undefined) window.clearTimeout(pendingFit);
+      pendingFit = window.setTimeout(() => {
+        pendingFit = undefined;
+        // 防抖落地时面板可能已经被隐藏（尺寸归零）：那条「不可见不 fit」的性质要一直成立。
+        if (!liveRef.current.active || !host.isConnected) return;
+        const size = host.getBoundingClientRect();
+        if (size.width === 0 || size.height === 0) return;
+        applyFit();
+      }, TERMINAL_FIT_LIMITS.debounceMs);
     };
     const controller: TerminalController = {
       dimensions: () => ({ cols: terminal.cols, rows: terminal.rows }),
@@ -271,6 +502,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       reset: () => {
         terminal.reset();
         terminal.clear();
+        clearCommands();
       },
       writeSystem: (message, tone = "warning") => {
         const color = tone === "error" ? "31" : tone === "success" ? "32" : "33";
@@ -281,16 +513,35 @@ export function TerminalPane(props: TerminalPaneProps) {
       },
     };
     controllerRef.current = controller;
+    if (!imePatch.applied) {
+      console.error("xterm 的 IME 提交补丁未生效，缺失内部字段：", imePatch.missing.join(", "));
+      controller.writeSystem("输入法补丁未生效（xterm 内部结构已变），全角标点可能需连按两次", "error");
+    }
     props.onReady(props.taskId, controller);
 
-    // 输入/resize 只在 active && owned 时发送（安全语义，见 TerminalControlState）。
+    // 输入/resize 的门控见 terminal-control-state.ts（输入含 attaching，尺寸只在 owned）。
     terminal.onData((data) => {
       const { active, controlState, sessionId, sendInput } = liveRef.current;
-      if (active && controlState === "owned" && sessionId) sendInput(sessionId, data);
+      if (active && canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
     });
     terminal.onResize(({ cols, rows }) => {
       const { active, controlState, sessionId, sendResize } = liveRef.current;
-      if (active && controlState === "owned" && sessionId) sendResize(sessionId, cols, rows);
+      if (active && canSendTerminalResize(controlState) && sessionId) sendResize(sessionId, cols, rows);
+    });
+
+    // OSC 52：远端程序（claude / tmux / vim…）把一段文本塞进本机剪贴板。xterm 6.0.0 自己没有
+    // 52 号 handler，载荷怎么解、什么时候写、查询怎么答都由这里决定（见 osc52-clipboard.ts）。
+    // 门控与 onData 同一条（active && owned）：好几个面板同时在出字，剪贴板却是全局唯一的，
+    // 后台 tab 或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
+    // ——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
+    // 无论写入、丢弃还是查询都返回 true：查询绝不回一个字节，也不让序列落到别的 handler 手里。
+    terminal.parser.registerOscHandler(52, (data) => {
+      const parsed = parseOsc52Payload(data);
+      if (parsed.kind === "write") {
+        const { active, controlState } = liveRef.current;
+        if (active && controlState === "owned") desktop.writeClipboard(parsed.text);
+      }
+      return true;
     });
 
     // 剪贴板贴图（plan 014）：capture 阶段挂在 host（xterm textarea 的祖先）上，
@@ -421,6 +672,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => {
       disposed = true;
       observer.disconnect();
+      if (pendingFit !== undefined) window.clearTimeout(pendingFit);
       dprQuery?.removeEventListener("change", onDprChange);
       host.removeEventListener("paste", handlePaste, { capture: true });
       host.removeEventListener("dragenter", handleDragEnter);
@@ -428,9 +680,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       host.removeEventListener("dragleave", handleDragLeave);
       host.removeEventListener("drop", handleDrop);
       props.onDispose(props.taskId, controller);
-      terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl）与输入监听
+      terminal.dispose(); // 一并 dispose 已挂载的 addons（fit/webgl/search/clipboard/unicode11）与输入监听
       terminalRef.current = null;
       controllerRef.current = null;
+      searchAddonRef.current = null;
+      commandsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -443,7 +697,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     const controller = controllerRef.current;
     if (!sessionId || !terminal || !controller) return;
     const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
-      if (replace) terminal.reset();
+      if (replace) {
+        // gap 恢复：快照是渲染好的屏幕，里面没有 OSC 133，旧的命令边界跟着这一屏一起作废。
+        terminal.reset();
+        commandsRef.current?.clear();
+      }
       terminal.write(data);
       props.onOutput(props.taskId, sessionId);
     });
@@ -461,15 +719,178 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => cancelAnimationFrame(frame);
   }, [props.active]);
 
+  // 查找与右键菜单的动作：都在组件体里定义（由 React 事件触发，闭包捕获的就是当下的 props，
+  // 不像挂载期注册的那批必须经 liveRef）。
+  function runSearch(term: string, direction: "next" | "previous", incremental = false) {
+    const addon = searchAddonRef.current;
+    if (!addon) return;
+    if (term.length === 0) {
+      addon.clearDecorations();
+      setSearchResults(NO_SEARCH_RESULTS);
+      return;
+    }
+    if (direction === "next") addon.findNext(term, { ...SEARCH_OPTIONS, incremental });
+    else addon.findPrevious(term, SEARCH_OPTIONS);
+  }
+
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearchResults(NO_SEARCH_RESULTS);
+    searchAddonRef.current?.clearDecorations();
+    terminalRef.current?.focus();
+  }
+
+  function copySelection() {
+    const text = terminalRef.current?.getSelection() ?? "";
+    if (text.length === 0) return;
+    void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
+  }
+
+  function pasteFromClipboard() {
+    void navigator.clipboard.readText().then(
+      (text) => {
+        if (text.length > 0) terminalRef.current?.paste(text);
+      },
+      () => showToast({ body: "读取剪贴板失败", type: "error" }),
+    );
+  }
+
+  function copyLastCommandOutput() {
+    const text = commandsRef.current?.lastOutput() ?? null;
+    if (text === null) {
+      showToast({ body: "没有可复制的命令输出", type: "error" });
+      return;
+    }
+    void navigator.clipboard.writeText(text).catch(() => showToast({ body: "复制失败", type: "error" }));
+  }
+
+  // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里
+  // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  useEffect(() => {
+    if (!props.active) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (event.code === "KeyF") {
+        event.preventDefault();
+        event.stopPropagation();
+        setSearchOpen(true);
+        // 已经开着时 searchOpen 不变、下面那个 effect 不会重跑，这里补上「换个词重搜」的全选。
+        searchInputRef.current?.select();
+        return;
+      }
+      if (event.code !== "ArrowUp" && event.code !== "ArrowDown") return;
+      event.preventDefault();
+      event.stopPropagation();
+      commandsRef.current?.scrollBy(event.code === "ArrowUp" ? -1 : 1);
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [props.active]);
+
+  // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
+  useEffect(() => {
+    if (!searchOpen) return;
+    const input = searchInputRef.current;
+    input?.focus();
+    input?.select();
+  }, [searchOpen]);
+
+  const contextMenuItems: ContextMenuOption[] = [
+    { label: "复制", isDisabled: !menuSelection, onClick: copySelection },
+    { label: "粘贴", onClick: pasteFromClipboard },
+    { type: "divider" },
+    { label: "全选", onClick: () => terminalRef.current?.selectAll() },
+    { label: `查找…  ${SHORTCUT_MODIFIER_PREFIX}F`, onClick: () => setSearchOpen(true) },
+    { type: "divider" },
+    // 命令导航（OSC 133）：没有 shell 集成的会话里一条边界都收不到，这几项就是灰的。
+    { label: `上一个命令  ${SHORTCUT_MODIFIER_PREFIX}↑`, isDisabled: menuCommands === 0, onClick: () => commandsRef.current?.scrollBy(-1) },
+    { label: `下一个命令  ${SHORTCUT_MODIFIER_PREFIX}↓`, isDisabled: menuCommands === 0, onClick: () => commandsRef.current?.scrollBy(1) },
+    { label: "复制上一条命令的输出", isDisabled: menuCommands === 0, onClick: copyLastCommandOutput },
+    { type: "divider" },
+    { label: "清屏", onClick: () => terminalRef.current?.clear() },
+  ];
+
+  function handleContextMenuOpenChange(open: boolean) {
+    if (open) {
+      setMenuSelection(Boolean(terminalRef.current?.hasSelection()));
+      setMenuCommands(commandsRef.current?.count() ?? 0);
+      return;
+    }
+    // 菜单自己也要收焦点，等它归位后再把焦点还给终端。
+    requestAnimationFrame(() => terminalRef.current?.focus());
+  }
+
   // Tab 切换用 display 隐藏而非卸载：卸载 xterm 会丢 scrollback 与选区。
   // pointer-events-auto：面板层整体是 pointer-events-none（plan 104，见 terminal-panes.tsx），
   // 只有当前可见的面板把鼠标事件（选区、链接、拖拽上传）收回来。
+  //
+  // 单格 grid（grid-cols-1 grid-rows-1，两条轨道都是 minmax(0,1fr)）：ContextMenu 的触发区默认
+  // 「包住内容」——它没有 display/尺寸样式，而本仓库没编译 StyleX，triggerXstyle 用不了。
+  // 作为 grid item 它被两个方向 stretch 满整格。这条不依赖 ContextMenu 的任何实现细节：
+  // 任何在流内的子元素都会被 stretch。终端本身靠下面 host 的 absolute inset-0 铺满（两道保险），
+  // 但触发区的盒子仍需是整格——ContextMenu 的光标锚点按「触发区内的偏移」定位，
+  // 触发区塌了菜单就会弹错地方。
+  // 搜索框/链接提示/拖拽遮罩都是 absolute，不是 grid item，定位仍相对这个容器，行为不变。
   return (
     <div
-      className={props.active ? "pointer-events-auto absolute inset-0 block" : "absolute inset-0 hidden"}
+      className={props.active ? "pointer-events-auto absolute inset-0 grid grid-cols-1 grid-rows-1" : "absolute inset-0 hidden"}
       aria-hidden={!props.active}
     >
-      <div ref={hostRef} className={`h-full w-full pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      {/* macOS 上 Electron 不提供默认右键菜单，不接管的话右键完全没反应。
+          不传 ref：布局已不靠它。（顺带记下已核实的行为：ContextMenu 把 ref 经 useMergedRefs 合到
+          真实的触发 <div> 上，children 就挂在那个 div 里、只多一个零尺寸的 <span> 光标锚点兄弟，
+          见 @astryxdesign/core/src/ContextMenu/ContextMenu.tsx 的 return。） */}
+      <ContextMenu label="终端操作" size="sm" menuWidth={220} items={contextMenuItems} onOpenChange={handleContextMenuOpenChange}>
+        {/* absolute inset-0 而不是 h-full：铺满的是「最近的定位祖先」——触发区（position: relative）
+            与外层容器（absolute inset-0）两者的盒子都正好是整格，谁来当这个祖先都一样大。
+            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。 */}
+        <div ref={hostRef} className={`absolute inset-0 pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+      </ContextMenu>
+      {searchOpen ? (
+        <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
+          <input
+            ref={searchInputRef}
+            value={searchTerm}
+            placeholder="查找"
+            aria-label="在终端里查找"
+            className="w-44 bg-transparent px-1 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+            onChange={(event) => {
+              setSearchTerm(event.target.value);
+              runSearch(event.target.value, "next", true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeSearch();
+                return;
+              }
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              runSearch(searchTerm, event.shiftKey ? "previous" : "next");
+            }}
+          />
+          <span className="min-w-12 text-center text-[11px] tabular-nums text-muted-foreground">
+            {searchTerm.length === 0 ? "" : searchResults.count === 0 ? "无结果" : `${searchResults.index + 1}/${searchResults.count}`}
+          </span>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="上一个匹配" onClick={() => runSearch(searchTerm, "previous")}>
+            <ChevronUp className="size-3.5" />
+          </button>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="下一个匹配" onClick={() => runSearch(searchTerm, "next")}>
+            <ChevronDown className="size-3.5" />
+          </button>
+          <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="关闭查找" onClick={closeSearch}>
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
+      {linkHint ? (
+        <div
+          className="pointer-events-none fixed z-30 rounded border border-border bg-background/95 px-1.5 py-0.5 text-[11px] text-muted-foreground shadow"
+          style={{ left: linkHint.x + 12, top: linkHint.y + 16 }}
+        >
+          {linkHint.label}
+        </div>
+      ) : null}
       {isDraggingFile ? (
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
           松开上传

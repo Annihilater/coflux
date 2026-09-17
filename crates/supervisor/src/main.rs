@@ -51,7 +51,16 @@ fn write_version_file(home: &str) {
     );
 }
 
-const DEFAULT_HISTORY_LINE_LIMIT: usize = 2_000;
+/// gap 恢复时客户端整个 buffer 会被这份 snapshot 取代，所以这个值就是「一次重绘之后用户还剩
+/// 多少回滚」。原值 2_000 把浏览器侧 10_000 行的 scrollback 砍掉 80%。
+///
+/// 取 5_000 而不是拉满到 10_000（plan 20260916-terminal-cursor-parity M2）：代价不是线性的，
+/// 而是 `line_limit × HISTORY_WRAP_FACTOR` 行 × 每行 `cols` 个 32 字节 cell 的常驻内存
+/// （`sessiond.rs` 顶部有同一段算术），并且 snapshot 每次 attach / resize / **进 alt screen**
+/// 都要 clone 整个 grid 重渲一遍，是 O(rows × cols)。拉满会让打开 vim/less 这类动作多出一次
+/// 可感知的卡顿——正好是本 plan 要消除的那种"手感差"。5_000 把恢复深度提到 2.5 倍，
+/// 同时保持 DEFAULT < MAX，使 `COFLUX_HISTORY_LINES` 仍能双向调整。
+const DEFAULT_HISTORY_LINE_LIMIT: usize = 5_000;
 /// history 会按逻辑行上限再乘 wrap 余量建立 VT scrollback；环境变量不能把单 session
 /// 的常驻内存放大到任意值，也不能用 0 意外关闭历史边界。
 const MAX_HISTORY_LINE_LIMIT: usize = 10_000;
@@ -359,6 +368,32 @@ mod sweep_tests {
             parse_history_line_limit(Some(&usize::MAX.to_string())),
             MAX_HISTORY_LINE_LIMIT
         );
+    }
+
+    #[test]
+    fn history_line_limit_default_leaves_room_for_the_env_override_in_both_directions() {
+        // 默认值本身必须落在 clamp 区间内，否则 `parse_history_line_limit(None)` 与
+        // 任何显式传入同一数字的结果会不一致。
+        assert_eq!(
+            parse_history_line_limit(Some(&DEFAULT_HISTORY_LINE_LIMIT.to_string())),
+            DEFAULT_HISTORY_LINE_LIMIT
+        );
+        // DEFAULT == MAX 会让 COFLUX_HISTORY_LINES 退化成「只能调小」，
+        // MAX 也就不再是一条真正的内存闸门。
+        assert!(
+            DEFAULT_HISTORY_LINE_LIMIT < MAX_HISTORY_LINE_LIMIT,
+            "默认值必须严格小于硬上限，env 覆盖才双向有效"
+        );
+        assert!(
+            DEFAULT_HISTORY_LINE_LIMIT >= 1,
+            "默认值不能落到 clamp 下界之外"
+        );
+        // 双向：调大到硬上限、调小到 1 都生效。
+        assert_eq!(
+            parse_history_line_limit(Some("10000")),
+            MAX_HISTORY_LINE_LIMIT
+        );
+        assert_eq!(parse_history_line_limit(Some("500")), 500);
     }
 
     #[test]

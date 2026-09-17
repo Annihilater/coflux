@@ -10,6 +10,7 @@ import type {
 import { IPC, type Bootstrap } from "../shared/ipc";
 import {
   sanitizeBadgeCount,
+  sanitizeClipboardText,
   sanitizeExecutorApiKey,
   sanitizeExecutorInbound,
   sanitizeExecutorModel,
@@ -26,6 +27,8 @@ export type IpcActions = {
   logoutLocal: () => Promise<boolean>;
   notify: (notification: DesktopNotification) => void;
   setBadge: (count: number) => void;
+  /** 终端 OSC 52：渲染层解码好的文本写进系统剪贴板（只写不读） */
+  writeClipboard: (text: string) => void;
   /** 「服务器地址…」原生对话框（plan 110）：与原生菜单项同一个实现 */
   showServerInfo: () => void;
   checkForUpdates: () => void;
@@ -82,6 +85,12 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
     if (!isTrusted(event)) return;
     const count = sanitizeBadgeCount(payload);
     if (count !== null) actions.setBadge(count);
+  });
+
+  ipcMain.on(IPC.clipboardWrite, (event, payload: unknown) => {
+    if (!isTrusted(event)) return;
+    const text = sanitizeClipboardText(payload);
+    if (text !== null) actions.writeClipboard(text);
   });
 
   ipcMain.on(IPC.showServerInfo, (event) => {

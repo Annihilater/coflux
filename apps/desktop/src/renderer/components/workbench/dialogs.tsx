@@ -11,6 +11,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
 import { SHORTCUT_MODIFIERS } from "@/components/workbench/shortcut-modifier";
+import { desktop } from "@/config";
 
 /** 底栏按钮里的键位提示（Cursor 式）：按钮内、紧跟文字的弱化小字，不是键帽方块。
  * 纯装饰——真正的键位行为由 Dialog 的 Esc 处理、表单的 submit 或动作按钮的焦点承担——读屏忽略。 */
@@ -276,7 +277,7 @@ export type ConfirmAction = {
  * 修饰键顺序遵循 macOS 菜单惯例：⌃⌥⇧⌘。 */
 function shortcutRows(): { keys: string[]; description: string }[] {
   const mod = SHORTCUT_MODIFIERS;
-  return [
+  const rows = [
     { keys: [...mod, "T"], description: "新建终端" },
     { keys: [...mod, "W"], description: "关闭当前终端" },
     { keys: [...mod, "1-9"], description: "切换到第 N 个终端" },
@@ -285,6 +286,11 @@ function shortcutRows(): { keys: string[]; description: string }[] {
     { keys: [...mod, "N"], description: "新建工作区" },
     { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
   ];
+  // 这一条不是快捷键而是鼠标手势，且只在 macOS 成立：xterm 的 shouldForceSelection 在别的平台
+  // 读的是 shiftKey、完全无视 macOptionClickForcesSelection，不能对非 macOS 用户许诺 ⌥。
+  // （SHORTCUT_MODIFIERS 是全表共用的硬编码 ["⌘"]，不能拿它做平台分支。）
+  if (desktop.platform === "darwin") rows.push({ keys: ["⌥", "拖拽"], description: "在全屏 TUI 里选中文本（再 ⌘C 复制）" });
+  return rows;
 }
 
 function KeyCap({ label }: { label: string }) {

@@ -1,5 +1,6 @@
 //! 账号客户端：短命令连接公共操作层；结束命令不会停止任何本机或远端终端。
 use crate::args::ParsedArgs;
+use crate::handle;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
@@ -118,6 +119,38 @@ fn required<'a>(args: &'a ParsedArgs, key: &str) -> Result<&'a str, String> {
 }
 fn id(args: &ParsedArgs) -> Result<&str, String> {
     args.positional(2).ok_or_else(|| "缺少目标 ID".into())
+}
+
+/// A path that will be resolved on the **target device**: absolute, or a `~` prefix. Same rule as
+/// `device exec --cwd`; expanding it here would resolve the caller's home on the wrong machine.
+fn device_path(path: &str) -> bool {
+    path.starts_with('/') || path == "~" || path.starts_with("~/")
+}
+
+/// `project import <path>` 的路径位；措辞要说的是「路径」，不是 `id()` 的「目标 ID」。
+fn import_path(args: &ParsedArgs) -> Result<&str, String> {
+    let path = args
+        .positional(2)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("缺少要导入的路径（导入当前目录写 coflux project import \"$PWD\"）")?;
+    if !device_path(path) {
+        return Err("路径要绝对路径或 ~ 开头（它在目标设备上解析）；导入当前目录写 coflux project import \"$PWD\"".into());
+    }
+    Ok(path)
+}
+
+/// `--device` 缺省回落到 daemon 注入的 COFLUX_DEVICE_ID；两处都空就报错，绝不替用户猜设备。
+fn device_target(args: &ParsedArgs) -> Result<String, String> {
+    if let Some(value) = args.string("device").map(str::trim).filter(|v| !v.is_empty()) {
+        return Ok(value.to_string());
+    }
+    let from_env = std::env::var("COFLUX_DEVICE_ID").unwrap_or_default();
+    let from_env = from_env.trim();
+    if from_env.is_empty() {
+        return Err("缺少设备：请加 --device <id>（coflux device list 可以看到）".into());
+    }
+    Ok(from_env.to_string())
 }
 
 /// `device exec` 自身失败（够不到设备、参数错、超时）用的退出码，ssh 的约定：远端退出码占满
@@ -281,6 +314,11 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
     }
     let sub = args.positional(1).unwrap_or("list");
     let operation = match (command, sub) {
+        // 路径与项目名都原样交给中心：仓库根（`git rev-parse --show-toplevel`）与 `~` 展开
+        // 是目标设备的事，CLI 只校验路径形状，避免把本机的 HOME 解析到别的机器上。
+        ("project", "import") => {
+            json!({"op":"project.import","daemonId":device_target(args)?,"path":import_path(args)?,"name":args.string("name")})
+        }
         ("workspace", "new") => {
             json!({"op":"workspace.new","projectId":required(args,"project")?,"branch":required(args,"branch")?,"createNew":!args.flag("existing-branch"),"name":args.string("name")})
         }
@@ -311,8 +349,9 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         }
         _ => return Err("未知账号命令".into()),
     };
+    // `project.import` 与 snapshot 一样按设备寻址，所以 `--device` 对它是入参而非筛选参数。
     if operation["op"] != "snapshot"
-        && (args.string("device").is_some()
+        && ((args.string("device").is_some() && operation["op"] != "project.import")
             || (args.string("workspace").is_some() && operation["op"] != "terminal.new"))
     {
         return Err("目标 ID 已确定作用范围，请不要附加设备或工作区筛选参数".into());
@@ -333,17 +372,33 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             "ports" => "ports",
             _ => unreachable!(),
         };
+        // 这两个筛选是**客户端字符串比较**，不经中心解析：标识不在这里认，就会一个都匹配不上、
+        // 打印一个空列表还不报错。类型给错（拿工作区标识填 --device）同样先说清楚再说。
+        if let Some(target) = args.string("device") {
+            handle::check_filter("device", handle::HandleKind::Device, target)?;
+        }
+        if let Some(target) = args.string("workspace") {
+            handle::check_filter("workspace", handle::HandleKind::Workspace, target)?;
+        }
         let items = value[field].as_array().ok_or("账号快照无效")?;
         value = Value::Array(
             items
                 .iter()
                 .filter(|item| {
-                    args.string("device")
-                        .map_or(true, |target| item["daemonId"] == target)
-                        && args.string("workspace").map_or(true, |target| {
-                            item["workspaceId"] == target
-                                || (command == "workspace" && item["id"] == target)
-                        })
+                    args.string("device").map_or(true, |target| {
+                        handle::matches(target, item["daemonId"].as_str(), handle::HandleKind::Device)
+                    }) && args.string("workspace").map_or(true, |target| {
+                        handle::matches(
+                            target,
+                            item["workspaceId"].as_str(),
+                            handle::HandleKind::Workspace,
+                        ) || (command == "workspace"
+                            && handle::matches(
+                                target,
+                                item["id"].as_str(),
+                                handle::HandleKind::Workspace,
+                            ))
+                    })
                 })
                 .cloned()
                 .collect(),

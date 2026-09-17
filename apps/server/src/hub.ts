@@ -147,6 +147,7 @@ const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_TITLE_BYTES = 256;
 const MAX_BRANCH_BYTES = 255;
 const MAX_WORKSPACE_NAME_BYTES = 256;
+const MAX_PROJECT_NAME_BYTES = 256;
 /** read_terminal 经 daemon 读取的字节上限（与 checkpoint 同级）。 */
 const MAX_TERMINAL_READ_BYTES = 256 * 1024;
 
@@ -277,6 +278,18 @@ class StaleDaemonConnectionError extends Error {}
 
 /** 操作层（plan 091，账号接口 消费）的统一结果：错误一律是可读文案，不抛。 */
 export type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** `project.import` 的账号接口结果：项目 + 它的主工作区 + 这次是不是命中了已有项目。
+ * `alreadyImported` 是推导出来的（收敛回来的项目 id 不是本次生成的候选 id），不是协议字段。 */
+export interface ProjectImportOutcome {
+  projectId: ProjectId;
+  name: string;
+  repoPath: string;
+  defaultBranch: string;
+  workspaceId: WorkspaceId;
+  path: string;
+  alreadyImported: boolean;
+}
 
 /** 用户名 + 密码凭证校验的结果（WS clientAuth 与页面登录共用，plan 107）：busy = scrypt 并发已满。 */
 export type CredentialCheck =
@@ -3799,6 +3812,79 @@ export class Hub {
     const waiting = this.operationCompletions.wait(operationId, daemonId, OPERATION_WAIT_MS, { case: "timeout" });
     if (!waiting) return { case: "failed", message: "中心等待中的操作过多，请稍后重试" };
     return await waiting;
+  }
+
+  /** 把设备上的一个目录导入成项目（与桌面导入向导同一条 prepared `project.import`，只是发起方是中心）。
+   *
+   * path 属于**目标设备**：`~` 展开与 `git rev-parse --show-toplevel` 都由 worker 做，中心既不
+   * 展开也不规范化。仓库根的去重在收敛事务里（一台设备上一个仓库根只有一个项目），所以这里
+   * 只需拿收敛回来的项目 id 与本次候选 id 比一下，就知道是不是命中了已有项目。 */
+  async importProjectForAccount(
+    accountId: AccountId,
+    input: { daemonId: DaemonId; path: string; name?: string },
+  ): Promise<OperationOutcome<ProjectImportOutcome>> {
+    const path = input.path.trim();
+    if (!path) return { ok: false, error: "缺少要导入的路径" };
+    const explicitName = (input.name ?? "").trim();
+    if (explicitName && !validBoundedText(explicitName, MAX_PROJECT_NAME_BYTES)) {
+      return { ok: false, error: "项目名称过长或含控制字符" };
+    }
+    const daemon = this.requireOnlineDaemon(input.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
+    if (!daemon.ok) return daemon;
+
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const operationId = randomUUID();
+    const frame = this.preparedOperations.createFrame(operationId, {
+      case: "projectValidate",
+      value: { requestId: operationId, operationId, path },
+    });
+    const prepared = await this.preparedOperations.prepareServer({
+      operationId,
+      accountId,
+      daemonId: input.daemonId,
+      kind: "project.import",
+      // 与桌面入口同款 targetId：调用方原样的 path，不是仓库根（中心在 daemon 回话前无从知道）。
+      targetId: `${input.daemonId}:${path}`,
+      targetVersion: null,
+      frame,
+      metadata: JSON.stringify({
+        projectId,
+        workspaceId,
+        ...(explicitName ? { explicitName } : {}),
+        initiator: SERVER_INITIATOR,
+      }),
+      expiresAt: Date.now() + config.preparedOperationTtlMs,
+    });
+    if (prepared.case === "rejected") return { ok: false, error: prepared.message };
+    const outcome = await this.waitOperation(prepared.operation.operationId, input.daemonId);
+    if (outcome.case === "timeout") {
+      const late = await this.store.getProject(projectId);
+      if (late && late.accountId === accountId) return { ok: true, value: await this.describeImportedProject(late, projectId) };
+      return { ok: false, error: `项目导入已提交但 ${OPERATION_WAIT_MS / 1000} 秒内未完成；稍后用 coflux project list 查看（projectId: ${projectId}）` };
+    }
+    if (outcome.case === "failed") return { ok: false, error: `导入项目失败：${outcome.message}` };
+    const project = outcome.effect.project;
+    if (!project) return { ok: false, error: "项目导入已完成但记录不可读，稍后用 coflux project list 查看" };
+    return { ok: true, value: await this.describeImportedProject(project, projectId, outcome.effect.workspace) };
+  }
+
+  /** 把收敛结果摊平成账号接口的一行 JSON；主工作区优先取 effect 里的那条，否则回读一次。 */
+  private async describeImportedProject(
+    project: Project,
+    candidateProjectId: ProjectId,
+    workspace?: Workspace,
+  ): Promise<ProjectImportOutcome> {
+    const main = workspace ?? (await this.store.listWorkspacesByProject(project.id)).find((entry) => entry.isMain);
+    return {
+      projectId: project.id,
+      name: project.name,
+      repoPath: project.repoPath,
+      defaultBranch: project.defaultBranch,
+      workspaceId: main?.id ?? "",
+      path: main?.path ?? project.repoPath,
+      alreadyImported: project.id !== candidateProjectId,
+    };
   }
 
   /** 在某项目下建 worktree 工作区（与 web workspaceCreate 同一条 prepared `worktree.add`，只是发起方是中心）。 */
