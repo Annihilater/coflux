@@ -12,6 +12,12 @@ export type MainWindowOptions = {
   isQuitting: () => boolean;
   /** 窗口大小/位置记忆文件（userData/window-state.json，plan 106） */
   windowStatePath: string;
+  /**
+   * Dev-only instance label (plan 20260916-desktop-preview-parallel). Set, it prefixes the window
+   * title so parallel previews are told apart in Mission Control and the Dock's window menu.
+   * Absent — every packaged run — the title is whatever the renderer set, exactly as before.
+   */
+  instanceLabel?: string;
   /** bounds 写盘失败只记日志 */
   onStateError?: (error: unknown) => void;
 };
@@ -59,6 +65,17 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
       spellcheck: false,
     },
   });
+
+  // The renderer rewrites `document.title` on every selection change, so a title set once at
+  // creation is gone within a second of use: intercept the update and re-apply the label instead.
+  const label = options.instanceLabel;
+  if (label) {
+    window.setTitle(label);
+    window.webContents.on("page-title-updated", (event, title) => {
+      event.preventDefault();
+      window.setTitle(`${label} · ${title}`);
+    });
+  }
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalIfHttp(url);

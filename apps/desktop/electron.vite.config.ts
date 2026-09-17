@@ -20,6 +20,26 @@ function resolveBuildId(command: "build" | "serve"): string {
   }
 }
 
+/** Default HMR port; parallel previews get theirs from scripts/dev.mjs. */
+const DEFAULT_RENDERER_PORT = 5274;
+
+/**
+ * Renderer HMR port (plan 20260916-desktop-preview-parallel). This is a labelled input only: which
+ * worktree is running and which port it owns is decided in scripts/dev.mjs, never here. Absent
+ * variable means the default port, i.e. today's behaviour for builds and for a hand-started
+ * electron-vite. An invalid value fails loudly — falling back to the default would resurface as
+ * another instance's port conflict, which is harder to read than an error.
+ */
+function resolveRendererPort(): number {
+  const raw = process.env.COFLUX_DESKTOP_RENDERER_PORT;
+  if (!raw) return DEFAULT_RENDERER_PORT;
+  const port = Number.parseInt(raw, 10);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error(`COFLUX_DESKTOP_RENDERER_PORT is not a valid port: ${raw}`);
+  }
+  return port;
+}
+
 /**
  * electron-vite 的 renderer 预设会在生产构建把 base 强制成 "./"（为 file:// 加载准备）。本项目经
  * standard scheme `coflux-app://app/` 从根提供渲染层，base 必须保持 "/"：public 资源的绝对路径、
@@ -90,7 +110,10 @@ export default defineConfig(({ command }) => {
       },
       server: {
         // 桌面 dev 直连中心 8787（地址由主进程给出），不走 vite 代理。
-        port: 5274,
+        // strictPort stays on: the usual reason the port is taken is that this worktree's own
+        // instance is already up, and moving to the next free port would start a dev server whose
+        // Electron then dies on the single-instance lock — a page that loads, with no window.
+        port: resolveRendererPort(),
         strictPort: true,
       },
     },

@@ -7,7 +7,7 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev.mjs",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "node --import tsx --test src/main/*.test.ts src/renderer/*.test.ts src/renderer/components/settings/*.test.ts src/renderer/components/workbench/*.test.ts test/*.test.ts",
