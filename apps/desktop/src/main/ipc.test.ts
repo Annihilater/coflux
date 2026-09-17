@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sanitizeBadgeCount, sanitizeNotification, sanitizeSessionToken } from "./ipc-sanitize";
+import { sanitizeBadgeCount, sanitizeClipboardText, sanitizeNotification, sanitizeSessionToken } from "./ipc-sanitize";
 
 test("通知载荷：三个字符串字段齐全才接受，超长截断", () => {
   assert.deepEqual(sanitizeNotification({ workspaceId: "ws", title: "t", body: "b" }), { workspaceId: "ws", title: "t", body: "b" });
@@ -37,6 +37,17 @@ test("会话 token：非空、不超长、无空白/控制字符的字符串才�
   assert.equal(sanitizeSessionToken(null), null);
 });
 
+
+test("OSC 52 剪贴板文本：内容原样放行，空与超长丢弃不截断", () => {
+  const tricky = "中文 emoji 🎉 trailing space \n\ttab";
+  assert.equal(sanitizeClipboardText(tricky), tricky);
+  assert.equal(sanitizeClipboardText("x".repeat(768 * 1024)), "x".repeat(768 * 1024));
+  assert.equal(sanitizeClipboardText("x".repeat(768 * 1024 + 1)), null);
+  assert.equal(sanitizeClipboardText(""), null);
+  assert.equal(sanitizeClipboardText(42), null);
+  assert.equal(sanitizeClipboardText(null), null);
+  assert.equal(sanitizeClipboardText({ text: "x" }), null);
+});
 
 test("inbox notification routing preserves IDs and rejects malformed targets", () => {
   const value = { workspaceId: "workspace", taskId: "terminal", notificationId: "notification", title: "Review", body: "Please review" };

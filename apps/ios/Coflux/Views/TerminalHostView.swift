@@ -232,8 +232,10 @@ struct TerminalHostView: UIViewRepresentable {
                 UIPasteboard.general.string = text
             }
         }
+        /// OSC 52 的读方向永远不答：那是远端机器上跑的程序在要你的剪贴板内容，
+        /// 而剪贴板里常常是密码、token 之类的东西。写方向（clipboardCopy）保持不变。
         func clipboardRead(source: TerminalView) -> Data? {
-            UIPasteboard.general.string?.data(using: .utf8)
+            nil
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}

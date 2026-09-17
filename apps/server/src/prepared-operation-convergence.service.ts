@@ -102,34 +102,49 @@ const converge = async (
         if (!projectId || !workspaceId || !value.repoPath || !value.branch) {
           throw new OperationConvergenceError("project.import report 缺少收敛字段");
         }
-        const suggestedName = value.suggestedName?.trim();
-        const explicitName = metadataString(metadata, "explicitName");
+        // One repository root on one device has exactly one project. Both entry points (the desktop
+        // wizard and the account CLI) land here, and the device parent row is already locked by
+        // claimActiveDevice, so a plain read inside this transaction serialises concurrent imports.
+        // A candidate that is being deleted is not a hit — handing it back would return a project
+        // that is in the middle of disappearing, so the import creates a new one instead.
+        const candidate = (await tx.listProjectsByDaemon(operation.daemonId)).find(
+          (entry) => entry.repoPath === value.repoPath && entry.accountId === operation.accountId,
+        );
+        const reused = candidate ? await tx.claimActiveProject(candidate.id) : undefined;
         const ts = Date.now();
-        const project = create(ProjectSchema, {
-          id: projectId,
-          accountId: operation.accountId,
-          daemonId: operation.daemonId,
-          name: explicitName ?? (suggestedName || basename(value.repoPath)),
-          repoPath: value.repoPath,
-          // 优先 worker 探测的仓库真实默认分支；探测不到才回退导入时所在分支。
-          defaultBranch: value.defaultBranch?.trim() || value.branch,
-          createdAt: ts,
-        });
-        const workspace = create(WorkspaceSchema, {
+        let project = reused;
+        if (!project) {
+          const suggestedName = value.suggestedName?.trim();
+          const explicitName = metadataString(metadata, "explicitName");
+          project = create(ProjectSchema, {
+            id: projectId,
+            accountId: operation.accountId,
+            daemonId: operation.daemonId,
+            name: explicitName ?? (suggestedName || basename(value.repoPath)),
+            repoPath: value.repoPath,
+            // 优先 worker 探测的仓库真实默认分支；探测不到才回退导入时所在分支。
+            defaultBranch: value.defaultBranch?.trim() || value.branch,
+            createdAt: ts,
+          });
+          await tx.createProject(project);
+        }
+        // 复用命中时主工作区照常进 effect：client store 按 id upsert，广播是幂等的，
+        // 也让 daemon 的工作区清单推送保持在同一条路径上。
+        const existingMain = reused
+          ? (await tx.listWorkspacesByProject(reused.id)).find((entry) => entry.isMain)
+          : undefined;
+        effect.project = project;
+        effect.workspace = existingMain ?? await tx.createWorkspace(create(WorkspaceSchema, {
           id: workspaceId,
           accountId: operation.accountId,
           daemonId: operation.daemonId,
-          projectId,
+          projectId: project.id,
           name: value.branch,
           path: value.repoPath,
           branch: value.branch,
           isMain: true,
           createdAt: ts,
-        });
-        await tx.createProject(project);
-        await tx.createWorkspace(workspace);
-        effect.project = project;
-        effect.workspace = workspace;
+        }));
       } else if (operation.kind === "worktree.add" && payload.case === "worktreeAdded") {
         const value = payload.value;
         const projectId = metadataString(metadata, "projectId");

@@ -9,6 +9,7 @@ mod account;
 mod args;
 mod commands;
 mod gateway;
+mod handle;
 mod integration;
 mod text;
 
@@ -30,6 +31,14 @@ const HELP: &str = "账号命令（JSON 输出）：
                           任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
                           --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
                           用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
+  coflux project import <path> [--device <id>] [--name <名称>]
+                          把设备上的一个 git 仓库目录变成项目（路径在仓库里就导入仓库根），并
+                          建好它的主工作区；打印一行 JSON：projectId / name / repoPath /
+                          defaultBranch / workspaceId / path / alreadyImported。<path> 必填，
+                          只接受绝对路径或 ~ 开头的路径（它在目标设备上解析）——导入当前目录写
+                          coflux project import \"$PWD\"。--device 缺省取 COFLUX_DEVICE_ID。
+                          同一个仓库根导入第二次不会多出一个项目：返回已有的那个，
+                          alreadyImported=true
   coflux workspace new --project <id> --branch <分支> [--existing-branch]
   coflux workspace rename <id> --name <名称> | workspace remove <id>
   coflux terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
@@ -90,6 +99,11 @@ coflux —— 账号与终端操作
                           该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
                           （不执行 git worktree remove）
 
+实体标识：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
+coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收标识（大小写不敏感），返回实体的地方都带一个
+ref 字段给出它的标识。前缀在范围内撞车时会让你改用完整 ID；标识类型与命令要的不一致会直接报错，
+不会去动旁边那个实体。
+
 agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
 供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。";
 
@@ -133,7 +147,7 @@ mod tests {
 
     #[test]
     fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>"] {
+        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>", "coflux project import <path>", "coflux:<kind>:<ID 前 8 位>", "coflux:workspace:3f2a1b7c"] {
             assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
         }
     }
