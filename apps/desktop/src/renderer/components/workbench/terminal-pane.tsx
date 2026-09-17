@@ -6,7 +6,9 @@ import "@xterm/xterm/css/xterm.css";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { FsWriteResult } from "@coflux/client";
 
+import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+import { desktop } from "@/config";
 
 /** 控制权状态：detached 下输入锁定是安全语义（他端已接管），不是体验细节。
  * idle = RUNNING 但本端未申请控制权（旁观 / 后台面板），仅用于 Tab 图标呈现为中性态，
@@ -191,6 +193,15 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     const terminal = new Terminal({
       allowProposedApi: false,
+      // 全屏 TUI（claude / grok 等开了 alternate screen + DECSET 1000/1002/1003）握着鼠标上报时，
+      // xterm 默认把 mousedown/drag 全转给应用，本地选区根本不成立 —— 于是没东西可 ⌘C。
+      // 每个终端都留的那道口子就是修饰键强制本地选区：macOS 上是 ⌥（iTerm2 / Terminal.app 同款），
+      // xterm 有这条路但默认关着。打开它，⌥+拖拽在任何抓鼠标的程序里都能划出选区。
+      macOptionClickForcesSelection: true,
+      // 上一条的直接后果：xterm 默认 ⌥+单击会往应用灌一串方向键把光标挪过去（VS Code 留着它，
+      // 因为那里的用户在 shell 提示符前）。我们的用户在 agent TUI 里，同一个手势变成一串噪声输入，
+      // 而 ⌥ 现在又是选区手势——必须关掉。
+      altClickMovesCursor: false,
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
@@ -291,6 +302,21 @@ export function TerminalPane(props: TerminalPaneProps) {
     terminal.onResize(({ cols, rows }) => {
       const { active, controlState, sessionId, sendResize } = liveRef.current;
       if (active && controlState === "owned" && sessionId) sendResize(sessionId, cols, rows);
+    });
+
+    // OSC 52：远端程序（claude / tmux / vim…）把一段文本塞进本机剪贴板。xterm 6.0.0 自己没有
+    // 52 号 handler，载荷怎么解、什么时候写、查询怎么答都由这里决定（见 osc52-clipboard.ts）。
+    // 门控与 onData 同一条（active && owned）：好几个面板同时在出字，剪贴板却是全局唯一的，
+    // 后台 tab 或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
+    // ——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
+    // 无论写入、丢弃还是查询都返回 true：查询绝不回一个字节，也不让序列落到别的 handler 手里。
+    terminal.parser.registerOscHandler(52, (data) => {
+      const parsed = parseOsc52Payload(data);
+      if (parsed.kind === "write") {
+        const { active, controlState } = liveRef.current;
+        if (active && controlState === "owned") desktop.writeClipboard(parsed.text);
+      }
+      return true;
     });
 
     // 剪贴板贴图（plan 014）：capture 阶段挂在 host（xterm textarea 的祖先）上，
