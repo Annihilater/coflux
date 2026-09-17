@@ -139,6 +139,38 @@ fn coalesce_pty_output(
     Some(batch)
 }
 
+/// 本 PTY 从属端的设备路径（macOS `/dev/ttysNNN`、Linux `/dev/pts/N`）。plan 20260916 拿它做
+/// `SSH_TTY` 的值：PTY 里的程序可能真的去 stat/open `$SSH_TTY`，固定占位串能骗过真值判断却会
+/// 坑死任何真用这条路径的程序，所以取不到就不注入（返回 `None`），绝不编造。
+///
+/// macOS 没有 `ptsname_r`，而 `ptsname` 返回的是进程级静态缓冲区的指针——session 不止一个入口
+/// 在创建，多线程下不安全；因此这里走 `TIOCPTYGNAME` ioctl，由调用方提供缓冲区。Linux 用
+/// `ptsname_r`，同样是调用方给缓冲区。fd 是向 master 借的：只读，不关，不留过 master 的生命周期。
+fn pty_device_path(master: &(dyn MasterPty + Send)) -> Option<String> {
+    let fd = master.as_raw_fd()?;
+    // PTY 设备名远短于此；两个接口都保证写入不超过缓冲区并以 NUL 结尾。
+    let mut buffer = [0 as libc::c_char; 128];
+    #[cfg(target_os = "macos")]
+    // SAFETY: fd 借自调用期间仍存活的 master；TIOCPTYGNAME 只把设备名写进调用方提供的
+    // 128 字节缓冲区（内核侧长度即 128），不触碰其他内存。
+    let named =
+        unsafe { libc::ioctl(fd, libc::TIOCPTYGNAME as libc::c_ulong, buffer.as_mut_ptr()) } == 0;
+    #[cfg(not(target_os = "macos"))]
+    // SAFETY: 同上；ptsname_r 只写入调用方缓冲区，且被显式告知其长度。
+    let named = unsafe { libc::ptsname_r(fd, buffer.as_mut_ptr(), buffer.len()) } == 0;
+    if !named {
+        return None;
+    }
+    // SAFETY: 上面成功返回即意味着 buffer 里是一个 NUL 结尾的 C 字符串。
+    let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+        .to_str()
+        .ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
 /// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
@@ -991,6 +1023,18 @@ impl Sessions {
         command.env("COFLUX_TASK_ID", &task_id);
         command.env("COFLUX_SESSION_ID", &session_id);
         command.env_remove("COFLUX_MCP_URL");
+        // plan 20260916：coflux 终端随时可能正被另一台设备观看，所以对 PTY 里的程序而言"输出渲染
+        // 在别的机器上"是无条件成立的事实。agent CLI（grok、Claude Code）正是靠 SSH 环境变量决定
+        // 剪贴板走本机 pbcopy 还是 OSC 52——没有它就会写进 PTY 宿主机的剪贴板，看终端的人什么都拿
+        // 不到。只注入 SSH_TTY 一个：它的值是本 session 真实存在的设备路径（程序可能去 stat/open），
+        // 而 SSH_CONNECTION / SSH_CLIENT 得编造 IP:port，daemon 并不知道观看端的地址。与上面几段同
+        // 理必须写在拷贝 std::env 之后：supervisor 自己从 SSH 会话启动时继承来的 SSH_TTY 描述的是
+        // 另一个终端，这里的覆盖是刻意的；继承来的 SSH_CONNECTION / SSH_CLIENT 则原样留着不动。
+        match pty_device_path(&*pair.master) {
+            Some(device) => command.env("SSH_TTY", device),
+            // 取不到就不注入——宁可少一个变量，也不能给出一条 stat 不到的路径。
+            None => logln!("[supervisor] 取不到 PTY 设备路径，{session_id} 不注入 SSH_TTY"),
+        }
         // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
         // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
         // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
@@ -2437,6 +2481,73 @@ mod tests {
         assert_eq!(delivered, reads.concat(), "字节流逐字不变");
         assert_eq!(state.output_seq(), reads.concat().len() as u64);
         assert!(state.pending_gaps().is_empty(), "序号连续 → 不抬 gap");
+    }
+
+    /// plan 20260916：`SSH_TTY` 的值必须是一条**真实存在、且属于本 session** 的设备路径——
+    /// 光断言"非空"会放过任何占位串。所以这里开一个真 PTY，取到路径后先确认它是存在的字符
+    /// 设备，再往这条路径写一串探针字节：只有当这条路径就是本 pair 的从属端时，本 pair 的
+    /// master 才读得到它们。
+    #[test]
+    fn pty_device_path_names_an_existing_char_device_of_this_session() {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+        const PROBE: &[u8] = b"coflux-ssh-tty-probe";
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty 应成功");
+        let path = pty_device_path(&*pair.master).expect("必须取得真实设备路径，占位串不可接受");
+        assert!(path.starts_with("/dev/"), "PTY 设备路径应在 /dev 下：{path}");
+        let metadata = std::fs::metadata(&path).expect("SSH_TTY 指向的路径必须真实存在");
+        assert!(
+            metadata.file_type().is_char_device(),
+            "{path} 应是字符设备而不是普通文件"
+        );
+
+        // reader 线程有界收敛：读到探针即回传；读不到就让主线程的 recv_timeout 判失败，
+        // 不把整个用例挂死在一次阻塞 read 上。
+        let mut reader = pair.master.try_clone_reader().expect("clone_reader 应成功");
+        let (sender, receiver) = sync_channel::<Vec<u8>>(1);
+        thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut buffer = [0u8; 256];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        seen.extend_from_slice(&buffer[..read]);
+                        if seen.windows(PROBE.len()).any(|window| window == PROBE) {
+                            let _ = sender.send(std::mem::take(&mut seen));
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // O_NOCTTY：只是把字节写进这台设备，绝不让它成为测试进程的控制终端。
+        let mut slave = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&path)
+            .expect("本 session 的从属端设备应可打开");
+        slave.write_all(PROBE).expect("写从属端应成功");
+        slave.write_all(b"\n").expect("写从属端应成功");
+        slave.flush().expect("flush 从属端应成功");
+
+        let seen = receiver.recv_timeout(Duration::from_secs(5)).expect(
+            "本 pair 的 master 应读到写进该设备的字节——读不到即说明这条路径不属于本 session",
+        );
+        assert!(
+            seen.windows(PROBE.len()).any(|window| window == PROBE),
+            "master 读到的应包含探针字节：{:?}",
+            String::from_utf8_lossy(&seen)
+        );
     }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {

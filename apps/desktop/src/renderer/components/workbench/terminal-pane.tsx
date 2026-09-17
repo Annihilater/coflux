@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -21,7 +20,9 @@ import { findFileReferences, readTerminalLine } from "@/components/workbench/ter
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
+import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
+import { desktop } from "@/config";
 
 /** 控制权状态与输入门控的真相源在 terminal-control-state.ts（纯值语义，可无 DOM 单测）；
  * 这里原样再导出，调用方（terminal-attach.ts 等）的 import 路径不变。 */
@@ -201,6 +202,15 @@ export function TerminalPane(props: TerminalPaneProps) {
       // addon-unicode11 走的是标记为 (EXPERIMENTAL) 的 terminal.unicode.register，
       // allowProposedApi 为 false 时它在 activate 阶段直接抛错（不是降级渲染），必须放行。
       allowProposedApi: true,
+      // 全屏 TUI（claude / grok 等开了 alternate screen + DECSET 1000/1002/1003）握着鼠标上报时，
+      // xterm 默认把 mousedown/drag 全转给应用，本地选区根本不成立 —— 于是没东西可 ⌘C。
+      // 每个终端都留的那道口子就是修饰键强制本地选区：macOS 上是 ⌥（iTerm2 / Terminal.app 同款），
+      // xterm 有这条路但默认关着。打开它，⌥+拖拽在任何抓鼠标的程序里都能划出选区。
+      macOptionClickForcesSelection: true,
+      // 上一条的直接后果：xterm 默认 ⌥+单击会往应用灌一串方向键把光标挪过去（VS Code 留着它，
+      // 因为那里的用户在 shell 提示符前）。我们的用户在 agent TUI 里，同一个手势变成一串噪声输入，
+      // 而 ⌥ 现在又是选区手势——必须关掉。
+      altClickMovesCursor: false,
       convertEol: false,
       // 下面四项与 rescaleOverlappingGlyphs 一起对齐 Cursor 的默认观感（plan 20260916）：
       // 不闪的块状光标、行高 1、对比度下限 4.5。fontFamily 不动——这串在 macOS 上实际解析到的
@@ -243,14 +253,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     // 这里是 11，Unicode 12-17 新增的字符两边宽度仍不一致，gap 恢复时表现为折行位置对不上。
     terminal.loadAddon(new Unicode11Addon());
     terminal.unicode.activeVersion = "11";
-    // ⌘F 查找（命中高亮 + 计数）与 OSC 52 剪贴板。
-    // OSC 52 的「读」走 navigator.clipboard.readText()，需要主进程放行 clipboard-read
-    // （见 main/index.ts 的 allowedPermissions），不放行时不报错、只是什么都不发生。
+    // ⌘F 查找（命中高亮 + 计数）。OSC 52 不用 @xterm/addon-clipboard：addon 会答复查询，
+    // 而本项目的不变量是「查询绝不回一个字节」，写入也要过面板门控并走主进程 Electron clipboard
+    // （plan 20260914 的决策）。52 号 handler 在下面用 registerOscHandler 自己注册。
     const searchAddon = new SearchAddon();
     terminal.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
     searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => setSearchResults({ index: resultIndex, count: resultCount }));
-    terminal.loadAddon(new ClipboardAddon());
 
     // 输出中的 URL：⌘（或 Ctrl）+点击在系统浏览器打开，普通点击只聚焦终端（plan 109）。
     // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
@@ -518,6 +527,21 @@ export function TerminalPane(props: TerminalPaneProps) {
     terminal.onResize(({ cols, rows }) => {
       const { active, controlState, sessionId, sendResize } = liveRef.current;
       if (active && canSendTerminalResize(controlState) && sessionId) sendResize(sessionId, cols, rows);
+    });
+
+    // OSC 52：远端程序（claude / tmux / vim…）把一段文本塞进本机剪贴板。xterm 6.0.0 自己没有
+    // 52 号 handler，载荷怎么解、什么时候写、查询怎么答都由这里决定（见 osc52-clipboard.ts）。
+    // 门控与 onData 同一条（active && owned）：好几个面板同时在出字，剪贴板却是全局唯一的，
+    // 后台 tab 或被别端接管的面板没资格改用户正在别处用的剪贴板。写入走主进程 Electron clipboard
+    // ——OSC 52 背后没有用户手势，navigator.clipboard 在窗口失焦时必被拒。
+    // 无论写入、丢弃还是查询都返回 true：查询绝不回一个字节，也不让序列落到别的 handler 手里。
+    terminal.parser.registerOscHandler(52, (data) => {
+      const parsed = parseOsc52Payload(data);
+      if (parsed.kind === "write") {
+        const { active, controlState } = liveRef.current;
+        if (active && controlState === "owned") desktop.writeClipboard(parsed.text);
+      }
+      return true;
     });
 
     // 剪贴板贴图（plan 014）：capture 阶段挂在 host（xterm textarea 的祖先）上，

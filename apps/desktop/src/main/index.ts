@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
+import { app, clipboard, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
@@ -326,6 +326,8 @@ if (!app.requestSingleInstanceLock()) {
           });
         },
         setBadge: setDockBadge,
+        // 终端 OSC 52：文本已在渲染层解码并过门控，这里只负责落进系统剪贴板。
+        writeClipboard: (text) => clipboard.writeText(text),
         // 侧栏账号菜单的「服务器地址…」（plan 110）：与原生菜单项走同一个对话框
         showServerInfo: () => void showServerInfo(serverUrl),
         checkForUpdates: updater.checkForUpdates,

@@ -6,6 +6,9 @@ const target = { terminalId: id };
 const operations = z.discriminatedUnion("op", [
   z.object({ op: z.literal("snapshot") }).strict(),
   z.object({ op: z.literal("logout") }).strict(),
+  // `project.import`: turn a folder on a device into a project. `path` belongs to the *target
+  // device* — the centre never expands `~` or resolves the repository root itself, the daemon does.
+  z.object({ op: z.literal("project.import"), daemonId: id, path: z.string().min(1).max(4096), name: z.string().max(1024).optional() }).strict(),
   z.object({ op: z.literal("workspace.new"), projectId: id, branch: z.string().min(1).max(1024), createNew: z.boolean().default(true), name: z.string().max(1024).optional() }).strict(),
   z.object({ op: z.literal("workspace.rename"), workspaceId: id, name: z.string().max(1024) }).strict(),
   z.object({ op: z.literal("workspace.remove"), workspaceId: id }).strict(),

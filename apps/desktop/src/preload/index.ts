@@ -68,6 +68,9 @@ const bridge: DesktopBridge = {
   setBadge(count: number) {
     ipcRenderer.send(IPC.setBadge, Number(count));
   },
+  writeClipboard(text: string) {
+    ipcRenderer.send(IPC.clipboardWrite, String(text));
+  },
   showServerInfo() {
     ipcRenderer.send(IPC.showServerInfo);
   },
