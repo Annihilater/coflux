@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { Theme, defineTheme } from "@astryxdesign/core/theme";
 import { LayerProvider } from "@astryxdesign/core/Layer";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
+import { loadFonts } from "@xterm/addon-web-fonts";
 
 import { App } from "./App";
 import { LEGACY_TOKEN_KEY, desktop } from "./config";
@@ -74,6 +75,25 @@ const cofluxTheme = defineTheme({
 // 再挂 React——createCofluxClient 创建时 token 必须已就绪。冷启动遮罩盖住这段等待。
 async function boot(): Promise<void> {
   const initialToken = await loadSessionToken(desktop, localStorage, LEGACY_TOKEN_KEY);
+
+  // 自带的 Maple Mono CN（index.css 里的 @font-face，该文件在本文件第一行 import 时就已注册进
+  // document.fonts）必须在 React 挂载前落地：xterm 在 new Terminal() 的同步代码里一次性量好字形
+  // 宽度（DOM 渲染器）/ 建好字形图集（WebGL 渲染器）并永久缓存，字体还没就位时量到的是兜底字体的
+  // 度量，之后 refresh() 也修不回来（addon 的 README 专门警告过这类事后补救）。
+  //
+  // 等待只能放在这里，绝不能挪进 TerminalPane：那个挂载 effect 现在是同步的，同一 commit 里紧跟着
+  // 跑的 [props.sessionId] effect 靠它已经赋好 terminalRef/controllerRef。把它改成 async，那两个 ref
+  // 在第二个 effect 检查时还是 null，而后者只依赖 props.sessionId、不会再跑第二遍 —— 于是每个带着
+  // 已有会话挂载的 RUNNING 任务（冷启动 / ⌘R / 切工作区都是这种）都拿到一个永久空白的终端，
+  // 不报错，typecheck 与单测还全绿（plan 20260918 的 Landmines）。
+  //
+  // 失败必须放行：loadFonts 在族名没注册进 document.fonts 时 reject，而且 reject 的是一个裸字符串、
+  // 不是 Error（读 .message 只会拿到 undefined）。渲染成兜底字体只是观感回退，起不来才是事故。
+  try {
+    await loadFonts(["Maple Mono CN"]);
+  } catch {
+    // 字体没加载上：CSS / xterm 字体栈里排在后面的系统等宽自会顶上。
+  }
 
   // 不启用 StrictMode：WS 单连接、xterm 实例、consumer 注册均为命令式资源，
   // StrictMode 双挂载的排错成本没有回报（decided while planning，plan 011）。
