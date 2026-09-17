@@ -26,8 +26,10 @@ async function withServer(token: string, run: (base: string) => Promise<void>): 
   }
 }
 
-const verify = (url: string, body: unknown) =>
-  fetch(url, { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) });
+const verify = (url: string, body: unknown, headers: Record<string, string> = {}) =>
+  fetch(url, { method: "POST", headers, body: typeof body === "string" ? body : JSON.stringify(body) });
+
+const basic = (user: string, secret: string) => ({ Authorization: `Basic ${Buffer.from(`${user}:${secret}`).toString("base64")}` });
 
 test("带正确密钥的路径才回答，注册过的公钥被放行", async () => {
   await withServer(TOKEN, async (base) => {
@@ -37,6 +39,21 @@ test("带正确密钥的路径才回答，注册过的公钥被放行", async ()
 
     const unknown = await verify(`${base}/derp-verify/${TOKEN}`, { NodePublic: `nodekey:${"b".repeat(64)}` });
     assert.deepEqual(await unknown.json(), { Allow: false }, "没注册的公钥不放行");
+  });
+});
+
+test("Basic 凭据里的密钥同样放行——用户名部分无所谓", async () => {
+  // derper 只能拿到一个 URL，`https://derp:<token>@host/derp-verify` 会被 Go 的 http 客户端
+  // 自动转成 Authorization 头。这条路径让密钥不出现在任何反代的访问日志里。
+  await withServer(TOKEN, async (base) => {
+    for (const user of ["derp", "", "whatever"]) {
+      const response = await verify(`${base}/derp-verify`, { NodePublic: REGISTERED }, basic(user, TOKEN));
+      assert.deepEqual(await response.json(), { Allow: true }, `用户名 "${user}" 不应影响判定`);
+    }
+    const wrong = await verify(`${base}/derp-verify`, { NodePublic: REGISTERED }, basic("derp", "x".repeat(48)));
+    assert.equal(wrong.status, 403, "Basic 里的密钥错了照样拒绝");
+    const missing = await verify(`${base}/derp-verify`, { NodePublic: REGISTERED });
+    assert.equal(missing.status, 403, "不带凭据的裸路径不放行");
   });
 });
 

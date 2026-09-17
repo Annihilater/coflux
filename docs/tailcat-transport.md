@@ -182,14 +182,22 @@ keys of centrally owned channel grants. A network admission check is never a
 replacement for worker challenge validation.
 
 Set `COFLUX_DERP_ADMISSION_TOKEN` (32 characters or more) whenever DERP runs on
-another host. The listener then answers exactly one route,
-`POST /derp-verify/<token>`, and the unauthenticated `/verify` stops existing;
-publish that route through the reverse proxy already terminating TLS for the
-centre, and configure `-verify-client-url` with the resulting `https://` URL.
-Keep the token out of access logs — both the centre's proxy and any gateway in
-front of it need that path excluded, because the path *is* the credential. Stock
-`derper` offers no other way to authenticate: `-verify-client-url` takes a URL
-and accepts neither a header nor a client certificate.
+another host. The listener then answers exactly one route, `POST /derp-verify`,
+and the unauthenticated `/verify` stops existing. Publish that route through the
+reverse proxy already terminating TLS for the centre, and configure
+`-verify-client-url` with the resulting `https://` URL.
+
+Stock `derper` can only be handed a URL — no header flag, no client certificate —
+so the token travels in one of two shapes, both derived from that URL:
+
+- `https://derp:<token>@host/derp-verify` — Go's HTTP client turns the userinfo
+  into an `Authorization: Basic` header on its own. **Prefer this.** Headers are
+  not in any default access-log format, so the secret stays out of the logs of
+  every proxy on the path. The username half is ignored.
+- `https://host/derp-verify/<token>` — for a caller that strips userinfo. Paths
+  *are* logged by default, so every proxy in front of the centre then needs the
+  route excluded (`log_skip` in Caddy 2.7+; older Caddy has no per-route control
+  and would need a separate site block or a log filter).
 
 Do not reach the listener through an SSH tunnel from the relay host. That was
 the earlier arrangement and it pins the centre's address inside a unit file on a

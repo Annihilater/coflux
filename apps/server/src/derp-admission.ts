@@ -12,7 +12,8 @@ import { createServer, type Server } from "node:http";
  * admission failed closed, and every remote device in the account went dark for hours while the
  * control plane looked perfectly healthy. A name resolved per request survives that; a hard-coded
  * host:port in a systemd unit on another machine does not. */
-const ADMISSION_PREFIX = "/derp-verify/";
+const ADMISSION_PATH = "/derp-verify";
+const ADMISSION_PREFIX = `${ADMISSION_PATH}/`;
 
 /** Constant-time compare that does not leak the secret's length through an early return. */
 function secretMatches(candidate: string, expected: string): boolean {
@@ -23,10 +24,32 @@ function secretMatches(candidate: string, expected: string): boolean {
 }
 
 /**
- * @param token Shared secret placed in the request path by the caller. When empty the listener keeps
- * its loopback-only contract and answers `/verify` unauthenticated — the shape a local fixture and a
- * same-host derper use. A non-empty token switches the route to `/derp-verify/<token>` and nothing
- * else is accepted, so a public deployment has exactly one reachable path and it carries the secret.
+ * The secret can arrive two ways, both of which `derper` can produce from a bare URL:
+ *
+ * - **Basic credentials** — `https://derp:<token>@host/derp-verify`. Go's HTTP client turns a URL's
+ *   userinfo into an `Authorization` header by itself (`net/http`'s `send`), and a header stays out
+ *   of proxy access logs. Preferred wherever it works.
+ * - **The path** — `https://host/derp-verify/<token>`, for a caller that drops userinfo. A proxy
+ *   logs paths by default, so this form requires excluding the route from access logs.
+ *
+ * Only the password half of the credentials is the secret; the username is decoration, so the caller
+ * may use any. Whichever arrives is compared in constant time against the configured token.
+ */
+function presentedSecret(authorization: string, url: string): string {
+  if (/^Basic\s/i.test(authorization)) {
+    const decoded = Buffer.from(authorization.replace(/^Basic\s+/i, ""), "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator >= 0) return decoded.slice(separator + 1);
+  }
+  return url.startsWith(ADMISSION_PREFIX) ? url.slice(ADMISSION_PREFIX.length) : "";
+}
+
+/**
+ * @param token Shared secret the caller presents, as Basic credentials or in the path (see
+ * `presentedSecret`). When empty the listener keeps its loopback-only contract and answers `/verify`
+ * unauthenticated — the shape a local fixture and a same-host derper use. A non-empty token moves the
+ * route to `/derp-verify` and nothing else is accepted, so a published deployment has exactly one
+ * reachable route and it always carries the secret.
  */
 export function startDerpAdmission(admitted: (node: string) => boolean, port: number, token = ""): Server {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid DERP admission port");
@@ -35,10 +58,11 @@ export function startDerpAdmission(admitted: (node: string) => boolean, port: nu
     response.setHeader("Cache-Control", "no-store");
     const reject = () => { if (!response.writableEnded) { response.writeHead(403, { "Content-Type": "application/json" }); response.end('{"Allow":false}'); } };
     const url = request.url ?? "";
-    // Authorised the same way whether or not a proxy is in front: the path is the credential, and an
-    // unauthenticated `/verify` stops existing the moment a token is configured.
+    // Authorised the same way whether or not a proxy is in front, and an unauthenticated `/verify`
+    // stops existing the moment a token is configured.
     const authorised = token
-      ? url.startsWith(ADMISSION_PREFIX) && secretMatches(url.slice(ADMISSION_PREFIX.length), token)
+      ? (url === ADMISSION_PATH || url.startsWith(ADMISSION_PREFIX)) &&
+        secretMatches(presentedSecret(request.headers.authorization ?? "", url), token)
       : url === "/verify";
     if (request.method !== "POST" || !authorised) { reject(); request.resume(); return; }
     let bytes = 0;
