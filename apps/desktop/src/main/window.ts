@@ -1,6 +1,7 @@
 import { BrowserWindow, screen, shell } from "electron";
 
 import { isTrustedRendererUrl } from "./ipc-trust";
+import type { RendererNavigation } from "./renderer-reset";
 import { DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, readWindowBounds, resolveWindowBounds, writeWindowBounds } from "./window-state";
 
 export type MainWindowOptions = {
@@ -18,6 +19,11 @@ export type MainWindowOptions = {
    * Absent — every packaged run — the title is whatever the renderer set, exactly as before.
    */
   instanceLabel?: string;
+  /**
+   * 页面完成一次导航（⌘R、devtools 重载、渲染进程崩溃恢复，以及首次 loadURL）。
+   * 主进程里那份「属于渲染层」的状态在这里归零——见 renderer-reset.ts。
+   */
+  onNavigated?: (navigation: RendererNavigation) => void;
   /** bounds 写盘失败只记日志 */
   onStateError?: (error: unknown) => void;
 };
@@ -89,6 +95,14 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
   });
 
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+
+  // 挂在 did-navigate 上：它只在主 frame 的跨文档导航**提交之后**触发（页内导航走
+  // did-navigate-in-page），被上面 will-navigate 拦下的外链导航根本不会走到这里。两个标记
+  // 显式传给纯函数，判定与测试都留在 renderer-reset.ts。注册必须早于 loadURL，首次加载也要收到。
+  const onNavigated = options.onNavigated;
+  if (onNavigated) {
+    window.webContents.on("did-navigate", (_event, url) => onNavigated({ url, isMainFrame: true, isSameDocument: false }));
+  }
 
   window.once("ready-to-show", () => window.show());
 
