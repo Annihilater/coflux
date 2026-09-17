@@ -12,6 +12,7 @@ export type MenuActions = {
  * 原生菜单（plan 103）。⌘T/⌘W/⌘N/⌘[ ]/⌘/ 这些由页面处理的键：菜单项展示键位但 **不注册**
  * accelerator（registerAccelerator: false）——键落到页面，由 use-global-shortcuts 按纯 ⌘
  * 前缀处理；点菜单项才走 sendCommand。关窗改成 ⇧⌘W，把 ⌘W 让给「关闭终端」。
+ * ⌘R「重新载入」是唯一的例外：它是 webContents 层的动作，页面没有什么可代劳的，直接用原生 role。
  * 编辑菜单的 role 是剪贴板快捷键在 Electron/macOS 上生效的前提，不能省。
  */
 export function buildAppMenu(actions: MenuActions): Menu {
@@ -22,9 +23,10 @@ export function buildAppMenu(actions: MenuActions): Menu {
     click: () => actions.sendCommand(command),
   });
 
-  const devItems: MenuItemConstructorOptions[] = app.isPackaged
-    ? []
-    : [{ type: "separator" }, { role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }];
+  // 「重新载入」已经是常驻项（见下面的「视图」），dev 构建只额外补强制重载与 devtools：
+  // 这里再放一个 reload，dev 里就会出现两个同键位的「重新载入」。分隔符也归常驻项那边统一给，
+  // 免得打包版少一条、dev 版多一条。
+  const devItems: MenuItemConstructorOptions[] = app.isPackaged ? [] : [{ role: "forceReload" }, { role: "toggleDevTools" }];
 
   const template: MenuItemConstructorOptions[] = [
     {
@@ -71,6 +73,10 @@ export function buildAppMenu(actions: MenuActions): Menu {
       submenu: [
         pageShortcut("上一个终端", "CmdOrCtrl+[", "previous-tab"),
         pageShortcut("下一个终端", "CmdOrCtrl+]", "next-tab"),
+        { type: "separator" },
+        // 打包版也有 ⌘R：界面卡住时不必退出应用（退出会连带断掉中心连接与本机 device 通道）。
+        // role 自带 accelerator 与可用态；主进程注册的 accelerator 优先于页面，终端抢不走它。
+        { role: "reload", label: "重新载入" },
         ...devItems,
         { type: "separator" },
         { role: "resetZoom" },
