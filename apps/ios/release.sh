@@ -41,7 +41,16 @@ if ! xcodebuild -exportArchive \
   exit 1
 fi
 
-echo "==> done: build $BUILD_NUMBER 已上传，ASC 处理完（约 10-30 分钟）即出现在 TestFlight"
+echo "==> 上传完成：build $BUILD_NUMBER"
+
+# TestFlight distribution runs against the App Store Connect API and needs an issuer id the
+# upload path does not; a failure here leaves the uploaded build intact and is rerunnable.
+if ! node ./testflight-distribute.mjs --build "$BUILD_NUMBER"; then
+  echo "" >&2
+  echo "build $BUILD_NUMBER 已上传成功，只是 TestFlight 分发这一步失败。" >&2
+  echo "修好上面的原因后单独重跑：node apps/ios/testflight-distribute.mjs --build $BUILD_NUMBER" >&2
+  exit 1
+fi
 # dSYM 不随包上传（见 ExportOptions.plist 的 uploadSymbols 说明）：归档目录保留在这里，
 # 需要符号化崩溃日志时从它手动上传。
 echo "    dSYM: $ARCHIVE_PATH/dSYMs（归档保留在 $WORK_DIR）"
