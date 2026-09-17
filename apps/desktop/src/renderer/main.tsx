@@ -15,9 +15,9 @@ import "./index.css";
 const cofluxTheme = defineTheme({
   name: "coflux",
   extends: neutralTheme,
-  // 字阶与字体族：theme-neutral 是 14px + Figtree，本项目正文是 13px + Inter（--coflux-text-*，
-  // 与 Tailwind 字阶同一份真相源，见 index.css）。两套并存的话，Astryx 组件的字会整体比手写的
-  // 部分大一号——菜单、列表、设置页哪儿都对不上。
+  // 字阶与字体族：theme-neutral 是 14px + Figtree，本项目正文是 13px + 平台系统字体，代码走自带的
+  // Maple Mono CN（--coflux-text-* / --coflux-font-*，与 Tailwind 字阶同一份真相源，见 index.css）。
+  // 两套并存的话，Astryx 组件的字会整体比手写的部分大一号——菜单、列表、设置页哪儿都对不上。
   //
   // 必须写在这里、而不是在 CSS 里覆盖：主题 token 由 Theme 运行时注入成
   // `@layer astryx-theme { @scope ([data-astryx-theme="coflux"]) … }`，位置在 index.css 之后，
