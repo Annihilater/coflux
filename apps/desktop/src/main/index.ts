@@ -167,8 +167,9 @@ if (!app.requestSingleInstanceLock()) {
 
     // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
     // 只放行全屏与剪贴板读写。其余（摄像头/麦克风/地理位置/...）一律拒绝。
-    // clipboard-read 是终端右键「粘贴」与 OSC 52 读取剪贴板必需的（两者都走
-    // navigator.clipboard.readText()）；不放行的话没有报错，只是静默什么都不发生。
+    // clipboard-read 是终端右键「粘贴」必需的（走 navigator.clipboard.readText()）；
+    // 不放行的话没有报错，只是静默什么都不发生。OSC 52 不在此列：52 号序列由渲染层自己的
+    // handler 消费，写入走主进程 Electron clipboard，查询一个字节都不回。
     const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write", "clipboard-read"]);
     session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(allowedPermissions.has(permission)));
     session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));

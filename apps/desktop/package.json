@@ -37,7 +37,6 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^5.2.0",
-    "@xterm/addon-clipboard": "0.3.0-beta.303",
     "@xterm/addon-fit": "0.12.0-beta.301",
     "@xterm/addon-search": "0.17.0-beta.301",
     "@xterm/addon-unicode11": "0.10.0-beta.301",
