@@ -695,8 +695,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
         token = "";
         options.tokenStorage.clear();
         clearOfflineCatalog();
+        // Show the server's own reason. This branch is reached by an expired session token, a
+        // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
+        // a hard-coded "wrong username or password" misnamed every one of them — the desktop's
+        // dev profile lands here on every start after its token expires.
+        const reason = (payload.value.message ?? "").trim();
         store.setState({
-          loginError: "登录失败：用户名或密码错误",
+          loginError: reason || "登录失败：请重新登录",
           loginName: "",
           authState: "auth-failed",
         });

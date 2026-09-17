@@ -3374,7 +3374,14 @@ export class Hub {
     }
 
     if (!accountId) {
-      return void reject("认证失败");
+      // The reason is split by the path that failed, because the client shows this sentence verbatim.
+      // A stale session token is not a wrong password, and saying so sends the user to retype
+      // credentials that were never the problem. Naming an expired session leaks nothing: whoever
+      // sent the token already holds it. The password path keeps the login page's single
+      // non-distinguishing sentence, so a wrong username and a wrong password stay indistinguishable.
+      const byToken = typeof msg.clientToken === "string" && msg.clientToken.length > 0;
+      const byPassword = typeof msg.username === "string" && typeof msg.password === "string";
+      return void reject(byToken ? "会话已过期，请重新登录" : byPassword ? "用户名或密码错误" : "认证失败");
     }
 
     // 构建版本准入（plan 033）：认证成功后、进入 subscribed 前拦截失配/缺失版本的客户端，

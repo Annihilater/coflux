@@ -469,7 +469,7 @@ public final class CofluxClient {
             pendingTaskRemovals.removeAll()
             for taskID in removals { removeTask(taskID: taskID) }
 
-        case .authError:
+        case .authError(let value):
             clearAttachIndicators()
             resetPendingTaskRemovals()
             accountID = nil
@@ -485,7 +485,11 @@ public final class CofluxClient {
             controlAuthenticated = false
             deviceRouter.setControlOnline(false)
             syncState = .notSubscribed
-            loginError = "登录失败：账号或密码错误，或会话已过期"
+            // Show the server's own reason verbatim: this branch is reached by an expired session
+            // token, a rate-limited address and an obsolete bundle as much as by wrong credentials,
+            // and one sentence covering all of them names the cause wrong most of the time.
+            let reason = value.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            loginError = reason.isEmpty ? "登录失败：请重新登录" : reason
             authState = .authFailed
             closeCurrentConnection()
 
