@@ -1,9 +1,15 @@
 //! PTY 会话生命周期（活在 supervisor）。每个 session 用独立 mutex 串行化 authority、VT、
 //! sequence 与 attach；可能阻塞的 PTY stdin 由独立有界 writer 执行，不进入该临界区。
 //! worker/中心只是可丢失并重建的 transport。
+//!
+//! plan 20260918-ptyd-terminal-custody：PTY 本身归 `coflux-ptyd`。supervisor 手里没有任何 PTY
+//! 文件描述符——它经 ptyd 协议 open/spawn，按输出字节偏移订阅输出，把输入交给 ptyd 写，resize
+//! 交给 ptyd 做 TIOCSWINSZ，并且每产出半个 ring 的输出就把规范 snapshot + 未编码状态打成
+//! checkpoint 交给 ptyd 存。supervisor 被替换时走 leave-sessions 退出（shell 不动），新
+//! supervisor 启动时 [`Sessions::recover`] 从 ptyd 枚举 session、喂 blob、回放 ring、按偏移套
+//! resize 日志，然后才起 worker。
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -13,6 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use coflux_protocol::logln;
+use coflux_protocol::ptyd::{PtydResizeEntry, PtydSessionInfo, PTYD_BLOB_CAPACITY, PTYD_MAX_READ_BYTES, PTYD_RING_CAPACITY};
 use coflux_protocol::wire::{
     device_envelope, DeviceEnvelope, DeviceError, DeviceExitAck, DeviceOperationAck, DevicePtyGap,
     DevicePtyInput, DevicePtyInputAck, DevicePtyOutput, DevicePtyResize, DeviceSessionAttach,
@@ -25,10 +32,10 @@ use coflux_protocol::{
     DataFrame, SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
     MAX_FRAME_ID_BYTES, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
 };
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use coflux_ptyd::{InputChannel, PtydClient, PtydError, SubscriptionEvent};
 use rand_core::{OsRng, RngCore};
 
-use crate::sessiond::{ControlError, InputAdmission, SequencedDecision, SessionState};
+use crate::sessiond::{Checkpoint, ControlError, InputAdmission, SequencedDecision, SessionState, TerminalState};
 use crate::shell_integration;
 
 /// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
@@ -76,28 +83,42 @@ fn terminal_env_overrides(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'sta
     overrides
 }
 
-/// 只做阻塞 read 的线程，把 PTY 原始分片交给合帧线程（plan 20260916-terminal-cursor-parity M2）。
+/// 把 ptyd 订阅流转成分片队列 + 退出码（plan 20260916-terminal-cursor-parity M2 的读线程形状）。
 ///
-/// read 侧必须独立成一条线程，合帧才可能有**时间**上界：`recv_timeout` 能在窗口耗尽时返回，
-/// 阻塞的 `read` 不能。同一条线程里合帧，只会把 burst 尾巴上的几百字节压到下一次读为止——
-/// 安静的终端上那可能是几秒甚至几分钟。
-fn spawn_pty_chunk_reader(mut reader: Box<dyn Read + Send>) -> Receiver<Vec<u8>> {
+/// 读侧必须独立成一条线程，合帧才可能有**时间**上界：`recv_timeout` 能在窗口耗尽时返回，
+/// 阻塞的 socket 读不能。队列满了转发线程就停在 `send` 上，ptyd 那头随之停止读 PTY——与过去
+/// 有界 chunk 队列的背压语义完全一致。
+fn spawn_subscription_forwarder(
+    session_id: String,
+    events: Receiver<SubscriptionEvent>,
+    expected_offset: u64,
+) -> (Receiver<Vec<u8>>, Arc<Mutex<Option<i32>>>) {
     let (sender, receiver) = sync_channel::<Vec<u8>>(PTY_CHUNK_QUEUE_RECORDS);
+    let exit: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+    let exit_slot = Arc::clone(&exit);
     thread::spawn(move || {
-        let mut buffer = [0u8; 8192];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                // 接收端消失（session 收尾）即停止读；sender drop 让合帧侧看到 EOF。
-                Ok(length) => {
-                    if sender.send(buffer[..length].to_vec()).is_err() {
+        let mut next = expected_offset;
+        for event in events {
+            match event {
+                SubscriptionEvent::Output { from_offset, data } => {
+                    if from_offset != next {
+                        logln!(
+                            "[supervisor] ptyd 输出偏移不连续 session={session_id} expected={next} got={from_offset}"
+                        );
+                    }
+                    next = from_offset.saturating_add(data.len() as u64);
+                    if sender.send(data).is_err() {
                         break;
                     }
+                }
+                SubscriptionEvent::Exited { exit_code, .. } => {
+                    *exit_slot.lock().unwrap() = Some(exit_code);
+                    break;
                 }
             }
         }
     });
-    receiver
+    (receiver, exit)
 }
 
 /// 把 PTY 的连续小读合并成一帧。返回 `None` 表示读侧已经结束（EOF / 读错误）且队列已排空，
@@ -139,38 +160,6 @@ fn coalesce_pty_output(
     Some(batch)
 }
 
-/// 本 PTY 从属端的设备路径（macOS `/dev/ttysNNN`、Linux `/dev/pts/N`）。plan 20260916 拿它做
-/// `SSH_TTY` 的值：PTY 里的程序可能真的去 stat/open `$SSH_TTY`，固定占位串能骗过真值判断却会
-/// 坑死任何真用这条路径的程序，所以取不到就不注入（返回 `None`），绝不编造。
-///
-/// macOS 没有 `ptsname_r`，而 `ptsname` 返回的是进程级静态缓冲区的指针——session 不止一个入口
-/// 在创建，多线程下不安全；因此这里走 `TIOCPTYGNAME` ioctl，由调用方提供缓冲区。Linux 用
-/// `ptsname_r`，同样是调用方给缓冲区。fd 是向 master 借的：只读，不关，不留过 master 的生命周期。
-fn pty_device_path(master: &(dyn MasterPty + Send)) -> Option<String> {
-    let fd = master.as_raw_fd()?;
-    // PTY 设备名远短于此；两个接口都保证写入不超过缓冲区并以 NUL 结尾。
-    let mut buffer = [0 as libc::c_char; 128];
-    #[cfg(target_os = "macos")]
-    // SAFETY: fd 借自调用期间仍存活的 master；TIOCPTYGNAME 只把设备名写进调用方提供的
-    // 128 字节缓冲区（内核侧长度即 128），不触碰其他内存。
-    let named =
-        unsafe { libc::ioctl(fd, libc::TIOCPTYGNAME as libc::c_ulong, buffer.as_mut_ptr()) } == 0;
-    #[cfg(not(target_os = "macos"))]
-    // SAFETY: 同上；ptsname_r 只写入调用方缓冲区，且被显式告知其长度。
-    let named = unsafe { libc::ptsname_r(fd, buffer.as_mut_ptr(), buffer.len()) } == 0;
-    if !named {
-        return None;
-    }
-    // SAFETY: 上面成功返回即意味着 buffer 里是一个 NUL 结尾的 C 字符串。
-    let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
-        .to_str()
-        .ok()?;
-    if path.is_empty() {
-        return None;
-    }
-    Some(path.to_string())
-}
-
 const OPERATION_LEDGER_LIMIT: usize = 4096;
 /// create/stop ledger 除条数外还必须按实际持有的字符串容量计费；典型记录仅数百字节，4 MiB
 /// 足以保留远多于正常重试窗口的结果，同时阻止大 cwd/error 等字段把 4096 条放大成无界内存。
@@ -178,8 +167,9 @@ const OPERATION_LEDGER_BYTES: usize = 4 * 1024 * 1024;
 /// HashMap control bytes、装载率余量与 VecDeque spare capacity 无法由稳定 API 精确取得；除
 /// `size_of` 可见的 key/value/String header 外，每条再收一段保守容器余量。
 const OPERATION_LEDGER_CONTAINER_SLOP: usize = 64;
-/// 每个 session 都持一个 PTY 子进程、两条 OS thread（阻塞 read + 合帧/投递）与终端历史；实际资源上限必须远低于
+/// 每个 session 都持一个 PTY 子进程（在 ptyd 里）、两条 OS thread（订阅转发 + 合帧/投递）与终端历史；实际资源上限必须远低于
 /// IPC 理论容量。128 个并发活终端已覆盖正常机群使用，同时把快照大小严格压在 record 上限内。
+/// 与 ptyd 的 `PTYD_MAX_LIVE_SESSIONS` 同值。
 const MAX_LIVE_SESSIONS: usize = 128;
 const WORKER_QUEUE_RECORDS: usize = 512;
 const WORKER_QUEUE_BYTES: usize = MAX_DEVICE_FRAME_BYTES + 2 * 1024 * 1024;
@@ -196,9 +186,13 @@ const OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(5);
 /// 合帧的**字节**上界。没有它，一条持续 8 KB/次的 `yes` 会在窗口内无限累积，合出来的巨帧
 /// 比它取代的那些小帧更糟（客户端一次性 apply、relay 一次性搬运）。8 次读封顶。
 const OUTPUT_COALESCE_MAX_BYTES: usize = 64 * 1024;
-/// read 线程与合帧线程之间的分片队列。满了就让 read 线程阻塞在 send 上——这与合帧前
+/// 订阅转发线程与合帧线程之间的分片队列。满了就让转发线程阻塞在 send 上——这与合帧前
 /// 「单线程正在处理、暂时不读」的背压语义完全一致，最多 512 KB 在途。
 const PTY_CHUNK_QUEUE_RECORDS: usize = 64;
+/// 每产出这么多字节就向 ptyd 写一次 checkpoint：半个 ring。ptyd 绝不覆盖偏移 ≥ 上次 checkpoint
+/// 的字节，所以 ring 永远覆盖 `[X, now]`，回放从不落在环绕边界上；预算是半个 ring 的输出，
+/// 期间 PTY 顶多被内核缓冲挡住（与今天的有界队列背压同一行为）。
+const CHECKPOINT_INTERVAL_BYTES: u64 = PTYD_RING_CAPACITY / 2;
 /// catalog 分页只在 request.max_page_bytes 非零时启用；旧 worker 仍拿单帧完整快照。
 const CATALOG_PAGE_MIN_BYTES: usize = 64 * 1024;
 const CATALOG_PAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -236,6 +230,20 @@ pub struct SessionContext {
     /// 中心 MCP 地址（`<COFLUX_PUBLIC_URL>/mcp`）
     pub mcp_url: String,
 }
+
+/// supervisor 存在 ptyd `open` 标签里的 session 元数据：ptyd 不解释，新 supervisor 启动时原样拿回。
+/// 与 checkpoint 一样由 supervisor 版本化；解析不了就退化成空 task id 的 session，不中止恢复。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SessionLabel {
+    v: u32,
+    task_id: String,
+    cwd: String,
+    started_at: f64,
+    #[serde(default)]
+    mark_secret: String,
+}
+
+const SESSION_LABEL_VERSION: u32 = 1;
 
 const EXIT_TOMBSTONE_LIMIT: usize = 4096;
 const EXIT_TOMBSTONE_BYTES: usize = 4 * 1024 * 1024;
@@ -325,6 +333,7 @@ impl Outbound {
         }));
         let this = Arc::clone(self);
         thread::spawn(move || {
+            use std::io::Write;
             for record in receiver {
                 let length = record.len();
                 if !this.is_current(generation) || stream.write_all(&record).is_err() {
@@ -601,15 +610,16 @@ impl OperationLedger {
     }
 }
 
+/// supervisor 手里的 session：没有任何 PTY 描述符——那些都在 ptyd。
 struct Session {
-    master: Box<dyn MasterPty + Send>,
     input: InputQueue,
-    child: Box<dyn Child + Send + Sync>,
     task_id: String,
     cwd: String,
     pid: i32,
     started_at: f64,
     state: SessionState,
+    /// 上一次交给 ptyd 的 checkpoint 所描述的 output_seq。
+    last_checkpoint_seq: u64,
 }
 
 struct QueuedInput {
@@ -676,10 +686,57 @@ impl InputQueue {
     }
 }
 
+/// 一次输入写入的失败：`written` 是已经进入 PTY 的前缀长度（ptyd 报告）。
 #[derive(Debug)]
 struct PtyWriteFailure {
     written: usize,
     error: std::io::Error,
+}
+
+/// 输入写入的目的地。生产上是 ptyd 的专用输入连接；单测注入失败模式。
+/// 成功即代表 ptyd 已把整条 payload 写进 PTY 并推进了它那边的 `(session, client)` 游标。
+trait InputSink: Send {
+    fn write(
+        &mut self,
+        session_id: &str,
+        client_instance_id: &str,
+        input_seq: u64,
+        data: &[u8],
+    ) -> Result<(), PtyWriteFailure>;
+}
+
+struct PtydInputSink(InputChannel);
+
+impl InputSink for PtydInputSink {
+    fn write(
+        &mut self,
+        session_id: &str,
+        client_instance_id: &str,
+        input_seq: u64,
+        data: &[u8],
+    ) -> Result<(), PtyWriteFailure> {
+        match self.0.write(session_id, client_instance_id, input_seq, data) {
+            Ok(_) => Ok(()),
+            // slave 端已经没了：与过去 master 上的 EIO 同义，是收尾窗口不是故障。errno 必须保留
+            // （`is_teardown_write_failure` 靠它），ptyd 的说明文字进日志。
+            Err(PtydError::Remote { code, message }) if code == "pty_closed" => {
+                logln!("[supervisor] ptyd 报告 PTY 已关闭 session={session_id} seq={input_seq}: {message}");
+                Err(PtyWriteFailure {
+                    written: 0,
+                    error: std::io::Error::from_raw_os_error(libc::EIO),
+                })
+            }
+            Err(PtydError::Remote { code, message }) if code == "pty_write_partial" => Err(PtyWriteFailure {
+                // ptyd 只在前缀已进 PTY 时报 partial；具体字节数在 message 里，这里只需要"非零"。
+                written: 1,
+                error: std::io::Error::other(message),
+            }),
+            Err(error) => Err(PtyWriteFailure {
+                written: 0,
+                error: std::io::Error::other(error.to_string()),
+            }),
+        }
+    }
 }
 
 struct InputBudgetGuard<'a> {
@@ -693,32 +750,6 @@ impl Drop for InputBudgetGuard<'_> {
         self.pending_records.fetch_sub(1, Ordering::AcqRel);
         self.pending_bytes.fetch_sub(self.length, Ordering::AcqRel);
     }
-}
-
-/// 不使用 `write_all`，因为错误里没有“已经写了多少”的信息。显式维护 offset 后，partial
-/// failure 可以封死该 reservation 并终止 session，而不是让 client 从 byte 0 全量重投。
-fn write_pty_input(writer: &mut dyn Write, data: &[u8]) -> Result<(), PtyWriteFailure> {
-    let mut written = 0;
-    while written < data.len() {
-        match writer.write(&data[written..]) {
-            Ok(0) => {
-                return Err(PtyWriteFailure {
-                    written,
-                    error: std::io::Error::new(ErrorKind::WriteZero, "PTY writer 未推进"),
-                });
-            }
-            Ok(length) if length <= data.len() - written => written += length,
-            Ok(_) => {
-                return Err(PtyWriteFailure {
-                    written,
-                    error: std::io::Error::new(ErrorKind::InvalidData, "PTY writer 返回越界长度"),
-                });
-            }
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(error) => return Err(PtyWriteFailure { written, error }),
-        }
-    }
-    Ok(())
 }
 
 /// PTY master 上的 `EIO` 只有一个含义：slave 端已经没有任何打开的 fd——shell 没了。关闭终端
@@ -737,6 +768,7 @@ type SessionHandle = Arc<Mutex<Session>>;
 pub struct Sessions {
     map: Mutex<HashMap<String, SessionHandle>>,
     outbound: Arc<Outbound>,
+    ptyd: Arc<PtydClient>,
     shell: String,
     home: String,
     history_line_limit: usize,
@@ -753,6 +785,7 @@ pub struct Sessions {
 impl Sessions {
     pub fn new(
         outbound: Arc<Outbound>,
+        ptyd: Arc<PtydClient>,
         shell: String,
         home: String,
         history_line_limit: usize,
@@ -762,6 +795,7 @@ impl Sessions {
         Arc::new(Self {
             map: Mutex::new(HashMap::new()),
             outbound,
+            ptyd,
             shell,
             home,
             history_line_limit,
@@ -948,6 +982,24 @@ impl Sessions {
         self.send_ctrl_or_disconnect(&message, "legacy session.create 回执");
     }
 
+    /// 把一个 ptyd 里已经存在（open 过、可能 spawn 过）但 supervisor 不打算保留的 session 收掉：
+    /// kill 后等它退出再 remove。best effort，在独立线程里做，不阻塞调用方。
+    fn discard_ptyd_session(&self, session_id: String) {
+        let ptyd = Arc::clone(&self.ptyd);
+        thread::spawn(move || {
+            let _ = ptyd.kill(&session_id);
+            for _ in 0..200 {
+                match ptyd.remove(&session_id) {
+                    Ok(()) => return,
+                    Err(PtydError::Remote { code, .. }) if code == "session_running" => {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+    }
+
     fn create_session(
         self: &Arc<Self>,
         session_id: String,
@@ -973,15 +1025,6 @@ impl Sessions {
                 return Err("duplicate session id".into());
             }
         }
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|error| format!("openpty: {error}"))?;
         let shell = if shell.is_empty() {
             self.shell.clone()
         } else {
@@ -992,99 +1035,99 @@ impl Sessions {
         } else {
             cwd
         };
-        let mut command = CommandBuilder::new(&shell);
-        command.cwd(&cwd);
-        for (key, value) in std::env::vars() {
-            command.env(key, value);
-        }
-        command.env("TERM", "xterm-256color");
-        // plan 20260916-terminal-cursor-parity M1：locale / COLORTERM / TERM_PROGRAM。与下面两段
-        // 同理，必须写在拷贝 std::env 之后，否则被 supervisor 自身环境覆盖回去。
+        // 环境是**覆盖语义**的 map：先拷贝 supervisor 自身的环境，再逐条写入覆盖项——写在拷贝之前
+        // 的任何一项都会被 supervisor 自身的同名变量盖回去（PATH / COFLUX_* / locale 都是）。
+        let mut env: BTreeMap<String, String> = std::env::vars().collect();
+        env.insert("TERM".into(), "xterm-256color".into());
+        // plan 20260916-terminal-cursor-parity M1：locale / COLORTERM / TERM_PROGRAM。
         for (key, value) in terminal_env_overrides(|key| std::env::var(key).ok()) {
-            command.env(key, value);
+            env.insert(key.to_string(), value);
         }
-        command.env("COFLUX_HOME", &self.home);
+        env.insert("COFLUX_HOME".into(), self.home.clone());
         // plan 112：`<COFLUX_HOME>/bin` 前置进 PATH 首段——agent 与 Claude 插件 hook 在 coflux 终端里零安装
-        // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。必须写在拷贝
-        // std::env 之后，否则被 supervisor 自身的 PATH 覆盖回去。所有平台都做。
-        command.env(
-            "PATH",
+        // 命中 app 内置的 Rust 版 coflux（用户自己的终端不受影响，不改用户 shell 配置）。所有平台都做。
+        env.insert(
+            "PATH".into(),
             prepend_path_segment(
                 &format!("{}/bin", self.home),
                 std::env::var("PATH").ok().as_deref(),
             ),
         );
-        // plan 092：会话归属 id 以 COFLUX_* 注入，必须写在拷贝 std::env 之后（覆盖语义，supervisor 自身
-        // 环境里的同名变量不能盖掉它）。六个变量总是存在：中心没下发的为空串，session/task id 本地必有。
+        // plan 092：会话归属 id 以 COFLUX_* 注入。六个变量总是存在：中心没下发的为空串，session/task id 本地必有。
         // 变量名是 agent 面向的契约（写进 SKILL.md），只能加不能改。
-        command.env("COFLUX_DEVICE_ID", &context.daemon_id);
-        command.env("COFLUX_PROJECT_ID", &context.project_id);
-        command.env("COFLUX_WORKSPACE_ID", &context.workspace_id);
-        command.env("COFLUX_TASK_ID", &task_id);
-        command.env("COFLUX_SESSION_ID", &session_id);
-        command.env_remove("COFLUX_MCP_URL");
-        // plan 20260916：coflux 终端随时可能正被另一台设备观看，所以对 PTY 里的程序而言"输出渲染
-        // 在别的机器上"是无条件成立的事实。agent CLI（grok、Claude Code）正是靠 SSH 环境变量决定
-        // 剪贴板走本机 pbcopy 还是 OSC 52——没有它就会写进 PTY 宿主机的剪贴板，看终端的人什么都拿
-        // 不到。只注入 SSH_TTY 一个：它的值是本 session 真实存在的设备路径（程序可能去 stat/open），
-        // 而 SSH_CONNECTION / SSH_CLIENT 得编造 IP:port，daemon 并不知道观看端的地址。与上面几段同
-        // 理必须写在拷贝 std::env 之后：supervisor 自己从 SSH 会话启动时继承来的 SSH_TTY 描述的是
-        // 另一个终端，这里的覆盖是刻意的；继承来的 SSH_CONNECTION / SSH_CLIENT 则原样留着不动。
-        match pty_device_path(&*pair.master) {
-            Some(device) => command.env("SSH_TTY", device),
-            // 取不到就不注入——宁可少一个变量，也不能给出一条 stat 不到的路径。
-            None => logln!("[supervisor] 取不到 PTY 设备路径，{session_id} 不注入 SSH_TTY"),
-        }
+        env.insert("COFLUX_DEVICE_ID".into(), context.daemon_id.clone());
+        env.insert("COFLUX_PROJECT_ID".into(), context.project_id.clone());
+        env.insert("COFLUX_WORKSPACE_ID".into(), context.workspace_id.clone());
+        env.insert("COFLUX_TASK_ID".into(), task_id.clone());
+        env.insert("COFLUX_SESSION_ID".into(), session_id.clone());
+        env.remove("COFLUX_MCP_URL");
         // plan 115：shell 集成——按 shell 的 basename 分派，给 shell 塞一段我们自己的 rc，由它在用户 rc
         // 全部跑完之后定义 claude 函数，把 COFLUX_CLAUDE_PLUGIN_DIR 翻译成 `claude --plugin-dir <dir>`。
-        // ZDOTDIR / XDG_DATA_DIRS 是覆盖语义，与上面两段同理必须写在拷贝 std::env 之后（用户原来的
-        // ZDOTDIR 由 plan() 从 supervisor 自身环境里读出来，交给 rc 转发）。认不出的 shell（如 /bin/sh
-        // 或黑盒用例里的包装脚本）不注入，行为与今天逐字相同。
+        // 认不出的 shell（如 /bin/sh 或黑盒用例里的包装脚本）不注入，行为与今天逐字相同。
         // Shell-integration marks (interactive-only terminal model): only an instrumented shell gets
         // the per-session secret; sessiond accepts OSC 133 marks solely when they present it.
+        let mut argv = vec![shell.clone()];
         let mut mark_secret = String::new();
         if let Some(injection) =
             shell_integration::plan(&shell, &self.home, |key| std::env::var(key).ok())
         {
             for (key, value) in injection.envs {
-                command.env(key, value);
+                env.insert(key, value);
             }
-            command.args(injection.args);
+            argv.extend(injection.args);
             let mut raw = [0u8; 16];
             OsRng.fill_bytes(&mut raw);
             mark_secret = hex::encode(raw);
-            command.env(TERMINAL_SECRET_ENV, &mark_secret);
+            env.insert(TERMINAL_SECRET_ENV.into(), mark_secret.clone());
         }
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| format!("spawn: {error}"))?;
-        drop(pair.slave);
-        let reader = match pair.master.try_clone_reader() {
-            Ok(reader) => reader,
+        let started_at = now_ms();
+        let label = serde_json::to_string(&SessionLabel {
+            v: SESSION_LABEL_VERSION,
+            task_id: task_id.clone(),
+            cwd: cwd.clone(),
+            started_at,
+            mark_secret: mark_secret.clone(),
+        })
+        .unwrap_or_default();
+        // 先 open 拿到从属端设备路径，再 spawn：SSH_TTY 必须是这个 session 真实存在的设备。
+        let tty = self
+            .ptyd
+            .open(&session_id, rows, cols, &label)
+            .map_err(|error| format!("ptyd open: {error}"))?;
+        // plan 20260916：coflux 终端随时可能正被另一台设备观看，所以对 PTY 里的程序而言"输出渲染
+        // 在别的机器上"是无条件成立的事实。agent CLI（grok、Claude Code）正是靠 SSH 环境变量决定
+        // 剪贴板走本机 pbcopy 还是 OSC 52。只注入 SSH_TTY 一个：它的值是本 session 真实存在的设备路径
+        // （程序可能去 stat/open），取不到就不注入——宁可少一个变量，也不能给出一条 stat 不到的路径。
+        if tty.is_empty() {
+            logln!("[supervisor] 取不到 PTY 设备路径，{session_id} 不注入 SSH_TTY");
+        } else {
+            env.insert("SSH_TTY".into(), tty);
+        }
+        let env: Vec<(String, String)> = env.into_iter().collect();
+        let pid = match self.ptyd.spawn(&session_id, argv, env, &cwd) {
+            Ok(pid) => pid,
             Err(error) => {
-                let _ = child.kill();
-                return Err(format!("clone_reader: {error}"));
+                let _ = self.ptyd.remove(&session_id);
+                return Err(format!("spawn: {error}"));
             }
         };
-        let writer = match pair.master.take_writer() {
-            Ok(writer) => writer,
+        let input_channel = match self.ptyd.input_channel() {
+            Ok(channel) => channel,
             Err(error) => {
-                let _ = child.kill();
-                return Err(format!("take_writer: {error}"));
+                self.discard_ptyd_session(session_id.clone());
+                return Err(format!("ptyd input channel: {error}"));
             }
         };
         let (input, input_receiver) = InputQueue::new();
         let input_pending_records = input.pending_records.clone();
         let input_pending_bytes = input.pending_bytes.clone();
-        let pid = child.process_id().map_or(-1, |pid| pid as i32);
         let session = {
-            // spawn 期间另一入口可能抢占 ID/最后名额；插入点再次检查，失败先杀孤儿进程。
+            // spawn 期间另一入口可能抢占 ID/最后名额；插入点再次检查，失败先收掉孤儿进程。
             let mut map = self.map.lock().unwrap();
             let duplicate = map.contains_key(&session_id);
             if map.len() >= MAX_LIVE_SESSIONS || duplicate {
                 drop(map);
-                let _ = child.kill();
+                self.discard_ptyd_session(session_id.clone());
                 return Err(if duplicate {
                     "duplicate session id".into()
                 } else {
@@ -1092,15 +1135,14 @@ impl Sessions {
                 });
             }
             let session = Arc::new(Mutex::new(Session {
-                master: pair.master,
                 input,
-                child,
                 task_id: task_id.clone(),
                 cwd,
                 pid,
-                started_at: now_ms(),
+                started_at,
                 state: SessionState::new(rows, cols, self.history_line_limit)
                     .with_mark_secret(mark_secret),
+                last_checkpoint_seq: 0,
             }));
             map.insert(session_id.clone(), session.clone());
             self.bump_snapshot_epoch();
@@ -1118,12 +1160,12 @@ impl Sessions {
         self.spawn_input_writer(
             session_id.clone(),
             Arc::downgrade(&session),
-            writer,
+            Box::new(PtydInputSink(input_channel)),
             input_receiver,
             input_pending_records,
             input_pending_bytes,
         );
-        self.spawn_reader(session_id, session, reader);
+        self.spawn_reader(session_id, session, 0);
         Ok(pid)
     }
 
@@ -1131,7 +1173,7 @@ impl Sessions {
         self: &Arc<Self>,
         session_id: String,
         session: Weak<Mutex<Session>>,
-        mut writer: Box<dyn Write + Send>,
+        mut sink: Box<dyn InputSink>,
         receiver: Receiver<QueuedInput>,
         pending_records: Arc<AtomicUsize>,
         pending_bytes: Arc<AtomicUsize>,
@@ -1147,7 +1189,12 @@ impl Sessions {
                     pending_bytes: &pending_bytes,
                     length,
                 };
-                let result = write_pty_input(writer.as_mut(), &input.data);
+                let result = sink.write(
+                    &session_id,
+                    &input.client_instance_id,
+                    input.input_seq,
+                    &input.data,
+                );
 
                 let Some(session) = session.upgrade() else {
                     break;
@@ -1183,7 +1230,10 @@ impl Sessions {
                                     "pty_input_state_failed",
                                     error.message,
                                 );
-                                let _ = locked.child.kill();
+                                drop(locked);
+                                if let Some(sessions) = sessions.upgrade() {
+                                    let _ = sessions.ptyd.kill(&session_id);
+                                }
                                 break;
                             }
                         }
@@ -1198,7 +1248,9 @@ impl Sessions {
                         );
                         // EIO 只证明 slave fd 没了，不证明进程已退出；照旧 kill，否则可能留下
                         // 一个活着却永远收不到输入的终端。
-                        let _ = session.lock().unwrap().child.kill();
+                        if let Some(sessions) = sessions.upgrade() {
+                            let _ = sessions.ptyd.kill(&session_id);
+                        }
                         // 不调用 fail_input：它会存下 input_failure，使该 session 之后的每一条
                         // input 都带回同一个错误码；也不回滚 reservation（cancel 只弹队尾，且会
                         // 把下一条 input 变成 input_seq_gap）。reservation 随 session 一起析构。
@@ -1214,8 +1266,8 @@ impl Sessions {
                             format!("PTY input 写入失败，session 已终止：{}", failure.error)
                         } else {
                             format!(
-                                "PTY input 仅写入 {}/{} 字节，session 已终止以防重放前缀：{}",
-                                failure.written, length, failure.error
+                                "PTY input 未完整写入（{} 字节），session 已终止以防重放前缀：{}",
+                                length, failure.error
                             )
                         };
                         logln!(
@@ -1227,24 +1279,24 @@ impl Sessions {
                         );
                         let target = {
                             let mut locked = session.lock().unwrap();
-                            let target = locked.state.fail_input(
+                            locked.state.fail_input(
                                 &input.client_instance_id,
                                 input.input_seq,
                                 code,
                                 message.clone(),
-                            );
-                            // PTY byte stream 已不能证明完整性；kill 也会唤醒通常阻塞在
-                            // master write 的 writer，并让 reader 走统一 exit/tombstone 路径。
-                            let _ = locked.child.kill();
-                            target
+                            )
                         };
-                        if let (Ok(target), Some(sessions)) = (target, sessions.upgrade()) {
-                            sessions.send_device_error(
-                                &target.channel_id,
-                                Some(target.request_id),
-                                code,
-                                message,
-                            );
+                        // PTY byte stream 已不能证明完整性；kill 让 ptyd 的读线程走统一 exit/tombstone 路径。
+                        if let Some(sessions) = sessions.upgrade() {
+                            let _ = sessions.ptyd.kill(&session_id);
+                            if let Ok(target) = target {
+                                sessions.send_device_error(
+                                    &target.channel_id,
+                                    Some(target.request_id),
+                                    code,
+                                    message,
+                                );
+                            }
                         }
                         break;
                     }
@@ -1253,83 +1305,85 @@ impl Sessions {
         });
     }
 
-    /// 测试专用：起一个真 PTY + 真子进程 + 真 reader 的 session，但 PTY 写端由调用方注入，
-    /// **从不调用 `master.take_writer()`**。这是刻意的：portable_pty 的 `UnixMasterWriter`
-    /// 在 Drop 时会主动往 PTY 里写 `\n` + EOT，谁持有它、谁的线程一结束就等于替子进程按了
-    /// Ctrl-D，子进程随之退出、reader 把 session 摘出 map——收尾路径的观察会被这个副作用
-    /// 污染（"session 是被我们测的分支 kill 掉的"就不再成立）。整条路径上没有 master writer，
-    /// 子进程便只在显式 `kill()` 时死去。
-    ///
-    /// `writer` 为 `Some` 时按与生产完全一致的方式起 writer 线程（只是 writer 被注入）；为
-    /// `None` 时直接丢掉 input 队列的 receiver，等价于 writer 线程已经停止。
+    /// 测试专用：经进程内 ptyd 起一个真 PTY + 真子进程 + 真订阅的 session，但输入写入端由调用方注入。
+    /// `sink` 为 `Some` 时按与生产完全一致的方式起 writer 线程（只是 sink 被注入）；为 `None` 时直接
+    /// 丢掉 input 队列的 receiver，等价于 writer 线程已经停止。子进程只在显式 kill 时死去：这条路径上
+    /// 没有任何会在 Drop 时替它按 Ctrl-D 的东西。
     #[cfg(test)]
     fn create_session_for_test(
         self: &Arc<Self>,
         session_id: &str,
-        writer: Option<Box<dyn Write + Send>>,
+        sink: Option<Box<dyn InputSink>>,
     ) -> SessionHandle {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty 应成功");
-        let mut command = CommandBuilder::new(&self.shell);
-        command.cwd(&self.home);
-        // portable_pty 会先 env_clear 再套用这里设的变量；HOME 显式给出，免得回落到 passwd 库。
-        command.env("HOME", &self.home);
-        command.env("TERM", "xterm-256color");
-        let child = pair.slave.spawn_command(command).expect("spawn 应成功");
-        drop(pair.slave);
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .expect("clone_reader 应成功");
+        let label = serde_json::to_string(&SessionLabel {
+            v: SESSION_LABEL_VERSION,
+            task_id: format!("task-{session_id}"),
+            cwd: self.home.clone(),
+            started_at: now_ms(),
+            mark_secret: String::new(),
+        })
+        .unwrap();
+        self.ptyd.open(session_id, 24, 80, &label).expect("ptyd open 应成功");
+        let env = vec![
+            ("HOME".to_string(), self.home.clone()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ];
+        let pid = self
+            .ptyd
+            .spawn(session_id, vec![self.shell.clone()], env, &self.home)
+            .expect("ptyd spawn 应成功");
         let (input, input_receiver) = InputQueue::new();
         let pending_records = input.pending_records.clone();
         let pending_bytes = input.pending_bytes.clone();
-        let pid = child.process_id().map_or(-1, |pid| pid as i32);
         let session = Arc::new(Mutex::new(Session {
-            master: pair.master,
             input,
-            child,
             task_id: format!("task-{session_id}"),
             cwd: self.home.clone(),
             pid,
             started_at: now_ms(),
             state: SessionState::new(24, 80, self.history_line_limit),
+            last_checkpoint_seq: 0,
         }));
         self.map
             .lock()
             .unwrap()
             .insert(session_id.to_string(), Arc::clone(&session));
         self.bump_snapshot_epoch();
-        match writer {
-            Some(writer) => self.spawn_input_writer(
+        match sink {
+            Some(sink) => self.spawn_input_writer(
                 session_id.to_string(),
                 Arc::downgrade(&session),
-                writer,
+                sink,
                 input_receiver,
                 pending_records,
                 pending_bytes,
             ),
             None => drop(input_receiver),
         }
-        self.spawn_reader(session_id.to_string(), Arc::clone(&session), reader);
+        self.spawn_reader(session_id.to_string(), Arc::clone(&session), 0);
         session
     }
 
+    /// 从 `from_offset` 起订阅 ptyd 的输出并驱动 sessiond；session 退出后发 tombstone 并让 ptyd 释放它。
     fn spawn_reader(
         self: &Arc<Self>,
         session_id: String,
         session: SessionHandle,
-        reader: Box<dyn Read + Send>,
+        from_offset: u64,
     ) {
-        let chunks = spawn_pty_chunk_reader(reader);
         let this = Arc::clone(self);
         thread::spawn(move || {
+            let (chunks, exit) = match this.ptyd.subscribe(&session_id, from_offset) {
+                Ok(events) => spawn_subscription_forwarder(session_id.clone(), events, from_offset),
+                Err(error) => {
+                    logln!("[supervisor] ptyd 订阅失败 session={session_id}: {error}");
+                    // 订阅不上就没法当这个 session 的 authority：收掉它，走统一的退出路径。
+                    this.discard_ptyd_session(session_id.clone());
+                    let (_, receiver) = sync_channel::<Vec<u8>>(1);
+                    (receiver, Arc::new(Mutex::new(None)))
+                }
+            };
             while let Some(batch) =
                 coalesce_pty_output(&chunks, OUTPUT_COALESCE_WINDOW, OUTPUT_COALESCE_MAX_BYTES)
             {
@@ -1378,17 +1432,19 @@ impl Sessions {
                         .delivery_result(&delivery.channel_id, delivery.delta.to_seq, sent);
                 }
                 this.deliver_pending_gaps(&session_id, &mut locked.state);
+
+                // 周期 checkpoint：半个 ring 一次，且只在 parser 可证明处于两条序列之间时。
+                let checkpoint = this.take_checkpoint_if_due(&mut locked);
+                drop(locked);
+                if let Some(checkpoint) = checkpoint {
+                    if let Err(error) = this.ptyd.checkpoint(&session_id, checkpoint.output_seq, &checkpoint.encode()) {
+                        logln!("[supervisor] checkpoint 写入 ptyd 失败 session={session_id}: {error}");
+                    }
+                }
             }
 
-            // reader 可先见 EOF，而子进程仍存活；不能拿 session mutex 阻塞 wait，否则
-            // close/shutdown/resync 都无法取得锁来终止或接管。
-            let code = loop {
-                match session.lock().unwrap().child.try_wait() {
-                    Ok(Some(status)) => break status.exit_code() as i32,
-                    Err(_) => break -1,
-                    Ok(None) => thread::sleep(Duration::from_millis(20)),
-                }
-            };
+            // 订阅流以 Exited 结束时带真实退出码；ptyd 本身断开则记 -1。
+            let code = exit.lock().unwrap().take().unwrap_or(-1);
             let locked = session.lock().unwrap();
             let final_output_seq = locked.state.output_seq();
             let task_id = locked.task_id.clone();
@@ -1436,7 +1492,7 @@ impl Sessions {
                 }
                 this.send_ctrl_or_disconnect(
                     &SupervisorToWorker::SessionExit {
-                        session_id,
+                        session_id: session_id.clone(),
                         exit_code: code,
                         task_id: Some(task_id),
                         pid: Some(pid),
@@ -1444,29 +1500,253 @@ impl Sessions {
                     "自然退出 session.exit",
                 );
             }
+            // 退出事实已进 tombstone：让 ptyd 释放 ring 文件。失败只记日志（ptyd 可能已经不在）。
+            if let Err(error) = this.ptyd.remove(&session_id) {
+                logln!("[supervisor] ptyd remove 失败 session={session_id}: {error}");
+            }
         });
+    }
+
+    /// 到了半个 ring 且 parser 处于安全点就打一份 checkpoint。ptyd 不提供 checkpoint 能力时
+    /// 什么都不做（那台 ptyd 上 ring 回放只能从 0 开始，是旧 ptyd 的既有限制）。
+    fn take_checkpoint_if_due(&self, session: &mut Session) -> Option<Checkpoint> {
+        let seq = session.state.output_seq();
+        if seq.saturating_sub(session.last_checkpoint_seq) < CHECKPOINT_INTERVAL_BYTES {
+            return None;
+        }
+        if !self.ptyd.supports("checkpoint") || !session.state.checkpoint_eligible() {
+            return None;
+        }
+        let checkpoint = session.state.checkpoint(PTYD_BLOB_CAPACITY)?;
+        session.last_checkpoint_seq = seq;
+        Some(checkpoint)
+    }
+
+    /// 启动时从 ptyd 接回上一个 supervisor 留下的 session（plan 20260918-ptyd-terminal-custody）。
+    /// 每个 session 独立恢复：blob 读不了就只回放 ring，ring 也读不了就以当前偏移的空屏接上
+    /// （client 看到一次整屏重绘），已退出的直接进 tombstone；任何一个失败都不影响其它 session，
+    /// 更不是 supervisor 退出的理由。必须在 worker 启动之前完成，否则 resync 会看到还在动的序号。
+    pub fn recover(self: &Arc<Self>) {
+        let infos = match self.ptyd.list() {
+            Ok(infos) => infos,
+            Err(error) => {
+                logln!("[supervisor] 无法从 ptyd 枚举 session：{error}");
+                return;
+            }
+        };
+        let live = infos.iter().filter(|info| info.exit_code.is_none() && info.pid > 0).count();
+        logln!("[supervisor] ptyd 上有 {} 个 session（{live} 个仍在运行），开始恢复", infos.len());
+        for info in infos {
+            let session_id = info.session_id.clone();
+            match self.recover_one(info) {
+                Ok(RecoveredSession::Live { degraded }) => {
+                    logln!(
+                        "[supervisor] session 已恢复 {session_id}{}",
+                        if degraded { "（退化：无可用 checkpoint）" } else { "" }
+                    );
+                }
+                Ok(RecoveredSession::Exited(code)) => {
+                    logln!("[supervisor] session 在 supervisor 缺席期间已退出 {session_id} code={code}");
+                }
+                Err(error) => {
+                    logln!("[supervisor] session 恢复失败 {session_id}：{error}");
+                }
+            }
+        }
+    }
+
+    fn recover_one(self: &Arc<Self>, info: PtydSessionInfo) -> Result<RecoveredSession, String> {
+        let session_id = info.session_id.clone();
+        let label: SessionLabel = serde_json::from_str(&info.label).unwrap_or_default();
+        if label.v != SESSION_LABEL_VERSION && !info.label.is_empty() {
+            logln!("[supervisor] session 标签版本不认识 {session_id} v={}，按空元数据恢复", label.v);
+        }
+        let task_id = label.task_id;
+        let cwd = if label.cwd.is_empty() { self.home.clone() } else { label.cwd };
+        let started_at = if label.started_at > 0.0 { label.started_at } else { info.started_at_ms as f64 };
+
+        // 没 spawn 成功过（上一个 supervisor 在 open 与 spawn 之间死了）或已退出：都是退出事实。
+        if info.pid <= 0 || info.exit_code.is_some() {
+            let code = info.exit_code.unwrap_or(-1);
+            let event_number = self.next_event_id.fetch_add(1, Ordering::Relaxed) + 1;
+            let tombstone = DeviceSessionExitTombstone {
+                event_id: format!("exit-{}-{event_number}", std::process::id()),
+                session_id: session_id.clone(),
+                task_id,
+                exit_code: code,
+                final_output_seq: info.output_offset,
+                exited_at: now_ms(),
+            };
+            self.tombstones.lock().unwrap().push(tombstone);
+            self.bump_snapshot_epoch();
+            if info.pid > 0 {
+                let _ = self.ptyd.remove(&session_id);
+            } else {
+                self.discard_ptyd_session(session_id);
+            }
+            return Ok(RecoveredSession::Exited(code));
+        }
+
+        // 1) blob：有且能解析就从它起；否则从 ring 起点空屏起（退化）。
+        let checkpoint = if self.ptyd.supports("blob") {
+            match self.ptyd.blob(&session_id) {
+                Ok(Some((offset, blob))) => match Checkpoint::decode(&blob) {
+                    Some(checkpoint) if checkpoint.output_seq == offset && offset <= info.output_offset => Some(checkpoint),
+                    Some(_) => {
+                        logln!("[supervisor] checkpoint 偏移与 ptyd 不一致 {session_id}，只回放 ring");
+                        None
+                    }
+                    None => {
+                        logln!("[supervisor] checkpoint blob 无法解析 {session_id}，只回放 ring");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(error) => {
+                    logln!("[supervisor] 读 checkpoint blob 失败 {session_id}：{error}，只回放 ring");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let degraded = checkpoint.is_none();
+        let (mut state, mut cursor) = match checkpoint {
+            Some(checkpoint) => {
+                let offset = checkpoint.output_seq;
+                let terminal = TerminalState::restore(&checkpoint, self.history_line_limit, label.mark_secret.clone());
+                (SessionState::restore(terminal), offset)
+            }
+            None => {
+                let mut state = SessionState::new(info.rows, info.cols, self.history_line_limit)
+                    .with_mark_secret(label.mark_secret.clone());
+                state.set_output_seq(info.ring_start);
+                (state, info.ring_start)
+            }
+        };
+        let last_checkpoint_seq = cursor;
+
+        // 2) resize 日志：偏移 ≥ 起点的条目在回放到该偏移时套用（等于起点的可能已含在 blob 里，
+        //    resize 对相同尺寸是 no-op）。
+        let mut resizes: VecDeque<PtydResizeEntry> = if self.ptyd.supports("resizes") {
+            match self.ptyd.resizes(&session_id) {
+                Ok(entries) => entries.into_iter().filter(|entry| entry.offset >= cursor).collect(),
+                Err(error) => {
+                    logln!("[supervisor] 读 resize 日志失败 {session_id}：{error}");
+                    VecDeque::new()
+                }
+            }
+        } else {
+            VecDeque::new()
+        };
+
+        // 3) 回放 ring 到 list 时的末尾；之后的字节由订阅接上。
+        let target = info.output_offset;
+        let mut replay_ok = true;
+        while cursor < target {
+            while resizes.front().is_some_and(|entry| entry.offset <= cursor) {
+                let entry = resizes.pop_front().unwrap();
+                state.resize(entry.rows, entry.cols);
+            }
+            let stop = resizes.front().map_or(target, |entry| entry.offset.min(target));
+            let want = (stop - cursor).min(u64::from(PTYD_MAX_READ_BYTES)) as u32;
+            match self.ptyd.read(&session_id, cursor, want) {
+                Ok((at, data)) if at == cursor && !data.is_empty() => {
+                    state.feed(&data);
+                    cursor += data.len() as u64;
+                }
+                Ok(_) => {
+                    replay_ok = false;
+                    break;
+                }
+                Err(error) => {
+                    logln!("[supervisor] 回放 ring 失败 {session_id} offset={cursor}：{error}");
+                    replay_ok = false;
+                    break;
+                }
+            }
+        }
+        while let Some(entry) = resizes.pop_front() {
+            state.resize(entry.rows, entry.cols);
+        }
+        if !replay_ok {
+            // ring 读不了：以当前尺寸、当前偏移的空屏接上——client 会看到一次整屏重绘。
+            state = SessionState::new(info.rows, info.cols, self.history_line_limit)
+                .with_mark_secret(label.mark_secret.clone());
+            state.set_output_seq(target);
+            cursor = target;
+        } else if state.rows() != info.rows || state.cols() != info.cols {
+            state.resize(info.rows, info.cols);
+        }
+        let _ = state.take_command_change();
+
+        // 4) 输入游标：ptyd 那边才是"什么真正写进了 PTY"的记录。
+        if self.ptyd.supports("cursors") {
+            match self.ptyd.cursors(&session_id) {
+                Ok(cursors) => {
+                    for cursor_info in cursors {
+                        let data = hex::decode(&cursor_info.data_hex).unwrap_or_default();
+                        state.restore_input_cursor(&cursor_info.client_instance_id, cursor_info.seq, data);
+                    }
+                }
+                Err(error) => logln!("[supervisor] 读输入游标失败 {session_id}：{error}"),
+            }
+        }
+
+        // 5) 挂上 writer 与订阅，登记为存活 session。
+        let input_channel = self
+            .ptyd
+            .input_channel()
+            .map_err(|error| format!("ptyd input channel: {error}"))?;
+        let (input, input_receiver) = InputQueue::new();
+        let pending_records = input.pending_records.clone();
+        let pending_bytes = input.pending_bytes.clone();
+        let session = Arc::new(Mutex::new(Session {
+            input,
+            task_id,
+            cwd,
+            pid: info.pid,
+            started_at,
+            state,
+            last_checkpoint_seq,
+        }));
+        {
+            let mut map = self.map.lock().unwrap();
+            if map.contains_key(&session_id) {
+                return Err("session id 已在恢复表中".into());
+            }
+            map.insert(session_id.clone(), Arc::clone(&session));
+            self.bump_snapshot_epoch();
+        }
+        self.spawn_input_writer(
+            session_id.clone(),
+            Arc::downgrade(&session),
+            Box::new(PtydInputSink(input_channel)),
+            input_receiver,
+            pending_records,
+            pending_bytes,
+        );
+        self.spawn_reader(session_id, session, cursor);
+        Ok(RecoveredSession::Live { degraded })
     }
 
     // 单 session 的内存天然由 COFLUX_HISTORY_LINES 封顶（history 行数 × 列宽），故不再做全局
     // 字节预算：那套 reservation 用保守估算（wrap ×4、cell 40B）虚高约一个数量级，结果是机器
     // 内存充裕却拒绝开新终端 / 拒绝 attach 更宽的客户端。
-    fn resize_locked(&self, session: &mut Session, rows: u16, cols: u16) -> Result<(), String> {
-        session
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+    fn resize_locked(&self, session_id: &str, session: &mut Session, rows: u16, cols: u16) -> Result<(), String> {
+        if session.state.rows() == rows && session.state.cols() == cols {
+            return Ok(());
+        }
+        self.ptyd
+            .resize(session_id, rows, cols)
             .map_err(|error| error.to_string())?;
         session.state.resize(rows, cols);
         Ok(())
     }
 
     pub fn close(&self, session_id: &str) {
-        if let Some(session) = self.get(session_id) {
-            let _ = session.lock().unwrap().child.kill();
+        if self.get(session_id).is_some() {
+            let _ = self.ptyd.kill(session_id);
         }
     }
 
@@ -1774,7 +2054,7 @@ impl Sessions {
                 error.message,
             );
         }
-        if let Err(error) = self.resize_locked(&mut locked, rows, cols) {
+        if let Err(error) = self.resize_locked(&request.session_id, &mut locked, rows, cols) {
             return self.send_device_error(
                 channel_id,
                 Some(request.request_id),
@@ -1782,11 +2062,30 @@ impl Sessions {
                 error,
             );
         }
-        let outcome = match locked.state.attach(
+        // 本地重发缓冲之外、ring 之内的 resume 从 ptyd 取字节（seq 就是偏移 + 1）。
+        let ptyd = Arc::clone(&self.ptyd);
+        let session_id = request.session_id.clone();
+        let mut ring = |from_seq: u64, to_seq: u64| -> Option<Vec<u8>> {
+            let mut out = Vec::new();
+            let mut offset = from_seq.checked_sub(1)?;
+            let end = to_seq;
+            while offset < end {
+                let want = (end - offset).min(u64::from(PTYD_MAX_READ_BYTES)) as u32;
+                let (at, data) = ptyd.read(&session_id, offset, want).ok()?;
+                if at != offset || data.is_empty() {
+                    return None;
+                }
+                offset += data.len() as u64;
+                out.extend_from_slice(&data);
+            }
+            Some(out)
+        };
+        let outcome = match locked.state.attach_with_ring(
             channel_id,
             &request.client_instance_id,
             request.transport_generation,
             request.resume_from_seq,
+            &mut ring,
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -1988,7 +2287,7 @@ impl Sessions {
         ) {
             Ok(SequencedDecision::Duplicate) => {}
             Ok(SequencedDecision::Apply) => {
-                if let Err(error) = self.resize_locked(&mut locked, rows, cols) {
+                if let Err(error) = self.resize_locked(&request.session_id, &mut locked, rows, cols) {
                     return self.send_device_error(
                         channel_id,
                         Some(request.request_id),
@@ -2050,7 +2349,7 @@ impl Sessions {
                 pid: None,
             },
             Some(session) => {
-                let mut locked = session.lock().unwrap();
+                let locked = session.lock().unwrap();
                 match locked
                     .state
                     .authorize_holder(channel_id, request.holder_epoch)
@@ -2064,7 +2363,7 @@ impl Sessions {
                             error.message,
                         );
                     }
-                    Ok(()) => match locked.child.kill() {
+                    Ok(()) => match self.ptyd.kill(&request.session_id) {
                         Ok(()) => DeviceOperationAck {
                             request_id: request.request_id.clone(),
                             operation_id: request.operation_id.clone(),
@@ -2178,12 +2477,18 @@ impl Sessions {
             .collect()
     }
 
+    /// 结束本机全部终端（"停止"，不是"替换 supervisor"）：让 ptyd 杀掉每个 shell。
     pub fn shutdown(&self) {
-        let sessions: Vec<SessionHandle> = self.map.lock().unwrap().values().cloned().collect();
-        for session in sessions {
-            let _ = session.lock().unwrap().child.kill();
+        let ids: Vec<String> = self.map.lock().unwrap().keys().cloned().collect();
+        for session_id in ids {
+            let _ = self.ptyd.kill(&session_id);
         }
     }
+}
+
+enum RecoveredSession {
+    Live { degraded: bool },
+    Exited(i32),
 }
 
 fn clamp_dim(value: u32, fallback: u16) -> u16 {
@@ -2215,6 +2520,7 @@ fn request_id_of(payload: &device_envelope::Payload) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn prepend_path_segment_handles_empty_existing_and_multi_segment_paths() {
@@ -2483,71 +2789,37 @@ mod tests {
         assert!(state.pending_gaps().is_empty(), "序号连续 → 不抬 gap");
     }
 
-    /// plan 20260916：`SSH_TTY` 的值必须是一条**真实存在、且属于本 session** 的设备路径——
-    /// 光断言"非空"会放过任何占位串。所以这里开一个真 PTY，取到路径后先确认它是存在的字符
-    /// 设备，再往这条路径写一串探针字节：只有当这条路径就是本 pair 的从属端时，本 pair 的
-    /// master 才读得到它们。
-    #[test]
-    fn pty_device_path_names_an_existing_char_device_of_this_session() {
-        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    /// 进程内的真 ptyd：每个用例一个临时 COFLUX_HOME，Drop 时结束子进程并删目录。
+    struct TestPtyd {
+        ptyd: coflux_ptyd::Ptyd,
+        home: std::path::PathBuf,
+    }
 
-        const PROBE: &[u8] = b"coflux-ssh-tty-probe";
+    impl Drop for TestPtyd {
+        fn drop(&mut self) {
+            self.ptyd.terminate();
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
 
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty 应成功");
-        let path = pty_device_path(&*pair.master).expect("必须取得真实设备路径，占位串不可接受");
-        assert!(path.starts_with("/dev/"), "PTY 设备路径应在 /dev 下：{path}");
-        let metadata = std::fs::metadata(&path).expect("SSH_TTY 指向的路径必须真实存在");
-        assert!(
-            metadata.file_type().is_char_device(),
-            "{path} 应是字符设备而不是普通文件"
-        );
+    fn test_ptyd() -> (TestPtyd, Arc<coflux_ptyd::PtydClient>) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            % 1_000_000_000;
+        let home = std::env::temp_dir().join(format!("cfs-{}-{nonce}", std::process::id() % 100_000));
+        let ptyd = coflux_ptyd::Ptyd::start(coflux_ptyd::PtydConfig::for_home(&home)).expect("ptyd 应能启动");
+        let client = coflux_ptyd::PtydClient::connect(ptyd.socket_path()).expect("应能连上 ptyd");
+        (TestPtyd { ptyd, home }, client)
+    }
 
-        // reader 线程有界收敛：读到探针即回传；读不到就让主线程的 recv_timeout 判失败，
-        // 不把整个用例挂死在一次阻塞 read 上。
-        let mut reader = pair.master.try_clone_reader().expect("clone_reader 应成功");
-        let (sender, receiver) = sync_channel::<Vec<u8>>(1);
-        thread::spawn(move || {
-            let mut seen = Vec::new();
-            let mut buffer = [0u8; 256];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        seen.extend_from_slice(&buffer[..read]);
-                        if seen.windows(PROBE.len()).any(|window| window == PROBE) {
-                            let _ = sender.send(std::mem::take(&mut seen));
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        // O_NOCTTY：只是把字节写进这台设备，绝不让它成为测试进程的控制终端。
-        let mut slave = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOCTTY)
-            .open(&path)
-            .expect("本 session 的从属端设备应可打开");
-        slave.write_all(PROBE).expect("写从属端应成功");
-        slave.write_all(b"\n").expect("写从属端应成功");
-        slave.flush().expect("flush 从属端应成功");
-
-        let seen = receiver.recv_timeout(Duration::from_secs(5)).expect(
-            "本 pair 的 master 应读到写进该设备的字节——读不到即说明这条路径不属于本 session",
-        );
-        assert!(
-            seen.windows(PROBE.len()).any(|window| window == PROBE),
-            "master 读到的应包含探针字节：{:?}",
-            String::from_utf8_lossy(&seen)
-        );
+    /// 与生产同构的 `Sessions`（真 ptyd、注入的 outbound），home 落在 ptyd 的临时目录里。
+    fn test_sessions(outbound: Arc<Outbound>, shell: &str) -> (Arc<Sessions>, TestPtyd) {
+        let (guard, client) = test_ptyd();
+        let home = guard.home.to_string_lossy().into_owned();
+        let sessions = Sessions::new(outbound, client, shell.into(), home, 0);
+        (sessions, guard)
     }
 
     fn exit_tombstone(index: usize, padding: usize) -> DeviceSessionExitTombstone {
@@ -2592,16 +2864,16 @@ mod tests {
         serde_json::from_slice(&record[4..]).expect("lifecycle control 应是合法 JSON")
     }
 
-    /// 每次 write 都以固定 errno 失败，且一个字节都没写出去（`written == 0`）。
+    /// 每次写都以固定 errno 失败，且一个字节都没写出去（`written == 0`）——模拟 ptyd 报回的
+    /// `pty_closed`（EIO）或真故障（EBADF）。
     struct AlwaysFailingWriter(i32);
 
-    impl Write for AlwaysFailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from_raw_os_error(self.0))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    impl InputSink for AlwaysFailingWriter {
+        fn write(&mut self, _: &str, _: &str, _: u64, _: &[u8]) -> Result<(), PtyWriteFailure> {
+            Err(PtyWriteFailure {
+                written: 0,
+                error: std::io::Error::from_raw_os_error(self.0),
+            })
         }
     }
 
@@ -2689,16 +2961,16 @@ mod tests {
     }
 
     /// 起一个真 PTY session（`/bin/cat` 不主动产出任何输出，且只在被 kill 时退出——见
-    /// `create_session_for_test` 关于 master writer 的说明），并 attach 出 holder epoch。
+    /// `create_session_for_test`），并 attach 出 holder epoch。返回的 `TestPtyd` 必须活到用例结束。
     fn live_session_for_test(
         session_id: &str,
-        writer: Option<Box<dyn Write + Send>>,
-    ) -> (Arc<Sessions>, Receiver<Vec<u8>>, SessionHandle, u64) {
+        sink: Option<Box<dyn InputSink>>,
+    ) -> (Arc<Sessions>, Receiver<Vec<u8>>, SessionHandle, u64, TestPtyd) {
         let outbound = Outbound::with_limits(64, usize::MAX);
         let (sender, receiver) = sync_channel(64);
         outbound.connect_sender(1, sender);
-        let sessions = Sessions::new(outbound, "/bin/cat".into(), "/tmp".into(), 0);
-        let handle = sessions.create_session_for_test(session_id, writer);
+        let (sessions, guard) = test_sessions(outbound, "/bin/cat");
+        let handle = sessions.create_session_for_test(session_id, sink);
         sessions.device_attach(
             "channel-a",
             DeviceSessionAttach {
@@ -2718,7 +2990,7 @@ mod tests {
                 break attached.holder_epoch;
             }
         };
-        (sessions, receiver, handle, holder_epoch)
+        (sessions, receiver, handle, holder_epoch, guard)
     }
 
     fn input_request(
@@ -2925,7 +3197,7 @@ mod tests {
             0,
             "reservation 不能提前成为 ACK"
         );
-        write_pty_input(&mut writer, b"one").unwrap();
+        coflux_ptyd::write_pty_input(&mut writer, b"one").unwrap();
         let first = state.complete_input("client-a", 1).unwrap();
         assert_eq!(first.applied_through_seq, 1);
         assert_eq!(writer, b"one");
@@ -2962,7 +3234,7 @@ mod tests {
             bytes: Vec::new(),
             calls: 0,
         };
-        let failure = write_pty_input(&mut writer, b"three").unwrap_err();
+        let failure = coflux_ptyd::write_pty_input(&mut writer, b"three").unwrap_err();
         assert_eq!(failure.written, 2);
         assert_eq!(writer.bytes, b"th");
         let target = state
@@ -2995,7 +3267,7 @@ mod tests {
     fn teardown_eio_write_is_silent_and_leaves_session_input_admissible() {
         // 关闭终端＝child 被 kill、slave fd 全部关闭；此后任何 master write 都是 EIO。
         // 在路上的这几个字节是 xterm.js 自己的自动回复（focus-out `\x1b[O`），不是用户击键。
-        let (sessions, receiver, handle, epoch) =
+        let (sessions, receiver, handle, epoch, _ptyd) =
             live_session_for_test("teardown-eio", Some(Box::new(AlwaysFailingWriter(libc::EIO))));
         sessions.device_input(
             "channel-a",
@@ -3030,7 +3302,7 @@ mod tests {
     #[test]
     fn non_eio_write_failure_still_reports_and_seals_session_input() {
         // 坏描述符不是收尾，是真故障：必须照旧上报，并封死这个 session 的 input。
-        let (sessions, receiver, handle, epoch) = live_session_for_test(
+        let (sessions, receiver, handle, epoch, _ptyd) = live_session_for_test(
             "write-fatal",
             Some(Box::new(AlwaysFailingWriter(libc::EBADF))),
         );
@@ -3058,7 +3330,7 @@ mod tests {
     fn input_after_writer_stopped_is_silent_and_keeps_admitting() {
         // writer 线程只在 session 终止路径上退出：队列断开按构造就是"这个 session 正在消失"。
         // 这里直接没有 writer 线程（input 队列的 receiver 已丢弃），子进程仍活着。
-        let (sessions, receiver, handle, epoch) = live_session_for_test("writer-stopped", None);
+        let (sessions, receiver, handle, epoch, _ptyd) = live_session_for_test("writer-stopped", None);
 
         for (request_id, seq, data) in [
             ("input-1", 1, b"\x1b[O".as_slice()),
@@ -3089,13 +3361,15 @@ mod tests {
             sessions.get("writer-stopped").is_some(),
             "静默丢弃 input 不得连带终止 session"
         );
-        let _ = handle.lock().unwrap().child.kill();
+        assert!(handle.lock().unwrap().pid > 0);
+        let _ = sessions.ptyd.kill("writer-stopped");
     }
 
     #[test]
     fn input_for_already_exited_session_is_silent() {
-        let (sessions, receiver, handle, epoch) = live_session_for_test("already-exited", None);
-        let _ = handle.lock().unwrap().child.kill();
+        let (sessions, receiver, handle, epoch, _ptyd) = live_session_for_test("already-exited", None);
+        assert!(handle.lock().unwrap().pid > 0);
+        sessions.ptyd.kill("already-exited").expect("ptyd kill 应成功");
         drain_through_session_exit(&receiver, "already-exited");
         assert!(
             sessions.get("already-exited").is_none(),
@@ -3210,7 +3484,7 @@ mod tests {
         let outbound = Outbound::with_limits(32, usize::MAX);
         let (sender, receiver) = sync_channel(32);
         outbound.connect_sender(1, sender);
-        let sessions = Sessions::new(Arc::clone(&outbound), "/bin/cat".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(Arc::clone(&outbound), "/bin/cat");
 
         // duplicate 先赢：Started 在仍持有 session→map 两把锁时入队，exit 只能随后摘 map。
         let first_pid = sessions
@@ -3247,7 +3521,7 @@ mod tests {
             let removed = map.remove("duplicate-first").unwrap();
             assert!(Arc::ptr_eq(&removed, &first));
             let identity = (locked.task_id.clone(), locked.pid);
-            let _ = locked.child.kill();
+            let _ = sessions.ptyd.kill("duplicate-first");
             identity
         };
         assert!(sessions.send_ctrl_or_disconnect(
@@ -3301,7 +3575,7 @@ mod tests {
             assert!(Arc::ptr_eq(&removed, &second));
         }
         let second_task = locked.task_id.clone();
-        let _ = locked.child.kill();
+        let _ = sessions.ptyd.kill("exit-first");
         assert!(sessions.send_ctrl_or_disconnect(
             &SupervisorToWorker::SessionExit {
                 session_id: "exit-first".into(),
@@ -3331,7 +3605,7 @@ mod tests {
         let (sender, _receiver) = sync_channel(1);
         outbound.connect_sender(1, sender);
         assert!(outbound.try_send(vec![1]), "先填满 control record 队列");
-        let sessions = Sessions::new(Arc::clone(&outbound), "/bin/sh".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(Arc::clone(&outbound), "/bin/sh");
 
         assert!(!sessions.send_ctrl_or_disconnect(
             &SupervisorToWorker::SessionExit {
@@ -3376,7 +3650,7 @@ mod tests {
 
     #[test]
     fn sessiond_backpressure_exit_tombstones_survive_until_ack() {
-        let sessions = Sessions::new(Outbound::new(), "/bin/sh".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(Outbound::new(), "/bin/sh");
         for tombstone in [
             DeviceSessionExitTombstone {
                 event_id: "exit-1".into(),
@@ -3417,7 +3691,7 @@ mod tests {
         let outbound = Outbound::new();
         let (sender, receiver) = sync_channel(8);
         outbound.connect_sender(1, sender);
-        let sessions = Sessions::new(outbound, "/bin/sh".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(outbound, "/bin/sh");
         let total = CATALOG_PAGE_MAX_ENTRIES * 2 + 7;
         for index in 0..total {
             sessions
@@ -3473,7 +3747,7 @@ mod tests {
         let outbound = Outbound::new();
         let (sender, receiver) = sync_channel(4);
         outbound.connect_sender(1, sender);
-        let sessions = Sessions::new(outbound, "/bin/sh".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(outbound, "/bin/sh");
         for index in 0..(CATALOG_PAGE_MAX_ENTRIES + 1) {
             sessions
                 .tombstones
@@ -3532,7 +3806,7 @@ mod tests {
         let outbound = Outbound::new();
         let (sender, receiver) = sync_channel(4);
         outbound.connect_sender(1, sender);
-        let sessions = Sessions::new(outbound, "/bin/sh".into(), "/tmp".into(), 0);
+        let (sessions, _ptyd) = test_sessions(outbound, "/bin/sh");
         sessions
             .tombstones
             .lock()
