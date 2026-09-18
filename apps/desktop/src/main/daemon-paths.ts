@@ -8,9 +8,17 @@ import { join } from "node:path";
 
 /** 内置三件在 Contents/Resources 下的子目录名（electron-builder.yml extraResources 的 to） */
 export const DAEMON_RESOURCE_DIR = "daemon";
-/** 内置与落盘的三个二进制文件名 */
-export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport"] as const;
+/** 内置与落盘的五个二进制文件名 */
+export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd"] as const;
 export type DaemonBinaryName = (typeof DAEMON_BINARIES)[number];
+/**
+ * PTY 托管进程（plan 20260918-ptyd-terminal-custody）。它随 daemon 五件一起打包、签名、落盘，但**不**参与
+ * `bundleRuntimeId`：ptyd 的身份单独跟踪（`bundlePtydId`），否则一次只换 supervisor 的更新会清掉「有更新」
+ * 标志而让旧 ptyd 继续跑；ptyd 二进制也不内嵌 release 版本，所以"ptyd 没变"是可判定的。
+ */
+export const PTYD_BINARY: DaemonBinaryName = "coflux-ptyd";
+/** 参与运行时身份哈希的二进制：随普通「更新」一起被替换的那些（全部减去 ptyd）。 */
+export const RUNTIME_BINARIES: readonly DaemonBinaryName[] = DAEMON_BINARIES.filter((name) => name !== PTYD_BINARY);
 /** 与三件同目录的版本戳 sidecar（CI 写 vX.Y.Z；本机 pack 缺失落 dev） */
 export const DAEMON_VERSION_FILE = "VERSION";
 /**

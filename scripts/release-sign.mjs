@@ -3,7 +3,7 @@
 //   1) <name>.sig：对原始二进制的 legacy 签名，供已部署旧 supervisor 滚动兼容；
 //   2) worker/supervisor 各自 domain-separated 的 <name>.release.sig，绑定
 //      component/version/target/sha256/size，供热升级与 cofluxd 安装验真。
-// manifest.json 保留原 worker 字段并新增 supervisor；老 server/supervisor 忽略新增字段。
+// manifest.json 保留原 worker 字段并新增 supervisor / cli / transport / ptyd；老 server/supervisor 忽略新增字段。
 //   用法: WORKER_SIGNING_KEY=<PKCS8 PEM> GITHUB_REPOSITORY=owner/repo node scripts/release-sign.mjs <dir> <version>
 import crypto from "node:crypto";
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
@@ -12,6 +12,7 @@ import {
   assertReleaseVersion,
   supervisorReleaseStatement,
   cliReleaseStatement,
+  ptydReleaseStatement,
   transportReleaseStatement,
   workerReleaseStatement,
 } from "./release-statement.mjs";
@@ -133,6 +134,22 @@ if (
   );
   process.exit(1);
 }
+// The PTY custody process (plan 20260918-ptyd-terminal-custody) is mandatory: a release without it
+// installs a supervisor that refuses to start. Its own signing domain, the exact worker target set.
+// The manifest keeps schemaVersion 2 — `ptyd` is one more optional top-level component to an old
+// cofluxd, which ignores unknown top-level fields.
+const ptydNames = readdirSync(dir).filter((name) => name.startsWith("coflux-ptyd-") && !name.includes("."));
+if (!ptydNames.length) throw new Error("Release is missing the mandatory ptyd component");
+manifest.ptyd = {};
+for (const name of ptydNames) {
+  const target = name.slice("coflux-ptyd-".length), data = readFileSync(join(dir, name));
+  const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
+  const releaseSignature = crypto.sign(null, ptydReleaseStatement({ version, target, sha256, size }), key).toString("hex");
+  writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
+  manifest.ptyd[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+}
+if (Object.keys(manifest.ptyd).sort().join("\n") !== workerTargets.join("\n")) throw new Error("ptyd targets must match worker targets");
+
 writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 writeFileSync(join(dir, "SHA256SUMS"), sums.join("\n") + "\n");
 console.error(

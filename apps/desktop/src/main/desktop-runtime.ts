@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DaemonBundle } from "./daemon-bundle";
-import { DAEMON_BINARIES } from "./daemon-paths";
+import { DAEMON_BINARIES, PTYD_BINARY, RUNTIME_BINARIES } from "./daemon-paths";
 
 export type RuntimeStatus = {
   ok: true;
@@ -81,15 +81,20 @@ export async function stopRuntime(home: string, status: RuntimeStatus): Promise<
   throw new Error("本机终端尚未结束，已取消退出");
 }
 
-/** 运行目录按内容寻址。更新 .app 不会删掉活进程使用的 worker、CLI 或插件文件。 */
+/** 运行目录按内容寻址。更新 .app 不会删掉活进程使用的 worker、CLI 或插件文件。ptyd 不参与：它的身份单独比较。 */
 export function bundleRuntimeId(bundle: DaemonBundle): string {
   const hash = createHash("sha256");
   hash.update(bundle.version ?? "dev");
-  for (const binary of DAEMON_BINARIES) hash.update(readFileSync(join(bundle.dir, binary)));
+  for (const binary of RUNTIME_BINARIES) hash.update(readFileSync(join(bundle.dir, binary)));
   // 插件版本变化也需要新目录，但不强制重启持有旧终端的进程。
   const manifest = join(bundle.dir, "claude-plugin", ".claude-plugin", "plugin.json");
   if (existsSync(manifest)) hash.update(readFileSync(manifest));
   return hash.digest("hex").slice(0, 24);
+}
+
+/** 内置 ptyd 的身份：只由它自己的字节决定，不含版本戳——ptyd 不变则跨任意多次发版都相同。 */
+export function bundlePtydId(bundle: DaemonBundle): string {
+  return createHash("sha256").update(readFileSync(join(bundle.dir, PTYD_BINARY))).digest("hex").slice(0, 24);
 }
 
 export function stageRuntime(home: string, bundle: DaemonBundle, runtimeId: string): string {

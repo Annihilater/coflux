@@ -42,6 +42,8 @@ const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/ori
 const FDA_STATUS = join(HOME, "fda-status"); // supervisor 启动时探测落盘（仅 macOS，见 crates/supervisor/src/fda.rs）
 const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
 const WRK_BIN = join(BIN_DIR, "coflux-worker");
+// PTY 托管进程（plan 20260918-ptyd-terminal-custody）：与 supervisor 平级的独立服务，supervisor 找不到它就拒绝启动。
+const PTYD_BIN = join(BIN_DIR, "coflux-ptyd");
 const CLI_RELEASE_FLOOR = join(HOME, "cofluxd.release-floor");
 const WORKER_RELEASE_FLOOR = join(HOME, "worker.release-floor");
 const IS_MAC = platform() === "darwin";
@@ -254,7 +256,7 @@ async function resolveLatestTag() {
 async function ensureBinaries({ version, binDir, skipIfPresent }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
-    const localArtifacts = ["coflux-supervisor", "coflux-worker", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : []), ...(fs.existsSync(join(binDir, "coflux-transport")) ? ["coflux-transport"] : [])].map((name) => ({
+    const localArtifacts = ["coflux-supervisor", "coflux-worker", "coflux-ptyd", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : []), ...(fs.existsSync(join(binDir, "coflux-transport")) ? ["coflux-transport"] : [])].map((name) => ({
       name,
       path: join(binDir, name),
     }));
@@ -292,7 +294,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     console.log(`✓ 用本地二进制（${binDir}）`);
     return;
   }
-  if (skipIfPresent && !version && fs.existsSync(SUP_BIN) && fs.existsSync(WRK_BIN)) {
+  if (skipIfPresent && !version && fs.existsSync(SUP_BIN) && fs.existsSync(WRK_BIN) && fs.existsSync(PTYD_BIN)) {
     console.log(`✓ 二进制已存在（${BIN_DIR}），跳过下载（用 cofluxd update 升级）`);
     return;
   }
@@ -341,7 +343,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     }
     const publicKey = loadReleasePublicKey();
     const staged = [];
-    for (const component of ["supervisor", "worker", ...(manifest.cli ? ["cli"] : []), ...(manifest.transport ? ["transport"] : [])]) {
+    for (const component of ["supervisor", "worker", ...(manifest.cli ? ["cli"] : []), ...(manifest.transport ? ["transport"] : []), ...(manifest.ptyd ? ["ptyd"] : [])]) {
       const entry = parseReleaseManifestEntry(manifest, component, releaseVersion, target);
       const artifactName = `coflux-${component}-${target}`;
       process.stdout.write(`下载并验签 ${artifactName} … `);
@@ -356,7 +358,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
       fs.chmodSync(source, 0o755);
       staged.push({
         source,
-        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "supervisor" ? SUP_BIN : component === "transport" ? join(BIN_DIR, "coflux-transport") : WRK_BIN,
+        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "supervisor" ? SUP_BIN : component === "transport" ? join(BIN_DIR, "coflux-transport") : component === "ptyd" ? PTYD_BIN : WRK_BIN,
       });
       console.log("✓");
     }
