@@ -19,6 +19,7 @@ import {
 import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
+import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
 import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
@@ -253,6 +254,18 @@ export function TerminalPane(props: TerminalPaneProps) {
         cyan: "#56b6c2",
         white: "#d4d4d4",
       },
+    });
+    // ⌘ 组合键归应用、不归终端（plan 20260918）：判定与全部理由在 terminal-key-ownership.ts，
+    // 这里只照判定让开。让开的方式只有一个——返回 false，xterm 会在 _keyDown 的第一句就 return，
+    // kitty 编码器不跑、事件也没被页面消费掉，于是原样回到浏览器，原生菜单的 accelerator 才匹配得上；
+    // handler 里绝不能对事件做任何拦截动作，那等于把菜单重新饿死。返回值要严格是 false
+    // （xterm 按 === false 判断），落成 undefined 就是「没让开」，bug 照旧。
+    // terminal.reset() 会把 handler 带过内部重建，gap 恢复后不必也不该重挂。
+    terminal.attachCustomKeyEventHandler((event) => {
+      const owner = decideTerminalKeyOwner(event);
+      if (owner === "terminal") return true;
+      if (owner === "select-all") terminal.selectAll();
+      return false;
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
