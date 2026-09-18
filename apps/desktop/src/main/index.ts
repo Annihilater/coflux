@@ -251,7 +251,8 @@ if (!app.requestSingleInstanceLock()) {
       platform: process.platform,
       appPath: resolve(process.execPath, "../../.."),
       confirmStop: async (reason, count) => {
-        const label = reason === "logout" ? "退出登录" : reason === "quit" ? "退出 Coflux" : reason === "restart" ? "重新启动本机终端" : reason === "migrate" ? "切换到 Coflux 应用管理" : "停止本机终端";
+        // `restart` 只在在跑的 supervisor 早于 ptyd（没有 leave）时才走到这里——普通更新不结束终端、不确认。
+        const label = reason === "logout" ? "退出登录" : reason === "quit" ? "退出 Coflux" : reason === "restart" ? "重新启动本机终端" : reason === "migrate" ? "切换到 Coflux 应用管理" : reason === "update-ptyd" ? "更新本机终端组件" : "停止本机终端";
         const result = await dialog.showMessageBox({ type: "warning", message: `${label}？`,
           detail: count === null ? "切换会结束旧版本在这台 Mac 上的全部终端。项目文件不受影响。" : `这将结束本机 ${count} 个正在运行的终端及其中的程序。其他设备上的任务不受影响。`,
           buttons: ["取消", label], defaultId: 0, cancelId: 0,
@@ -369,6 +370,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         daemonEnroll: () => void connectLocal(),
         daemonRestart: () => void daemon.restart(),
+        daemonUpdatePtyd: () => void daemon.updatePtyd(),
         daemonStop: () => void daemon.stop(),
         daemonRemove: () => void daemon.remove(),
         daemonOpenFdaGuide: daemon.openFdaGuide,

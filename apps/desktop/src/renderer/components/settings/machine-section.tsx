@@ -42,6 +42,9 @@ export function MachineSection({ state, runningTerminals, bridge, onOpenOnboardi
       case "update":
         bridge.daemonRestart();
         return;
+      case "update-ptyd":
+        bridge.daemonUpdatePtyd();
+        return;
       case "stop":
         bridge.daemonStop();
         return;
@@ -56,12 +59,12 @@ export function MachineSection({ state, runningTerminals, bridge, onOpenOnboardi
       <SettingsGroup title="状态">
         <SettingsRow
           label={line.label}
-          description={line.detail || "关闭窗口后继续在线；退出 Coflux 会结束本机终端。"}
+          description={line.detail || "关闭窗口后继续在线；更新或重启保留本机终端，退出 Coflux 会结束它们。"}
           control={<StatusDot variant={line.tone} label={line.label} isPulsing={line.pulsing} />}
         />
         <SettingsRow
           label="正在运行的终端"
-          description={state.status === "update-ready" ? "本机终端更新已就绪，可以等当前任务结束后再安装。" : undefined}
+          description={state.status === "update-ready" ? "本机运行组件更新已就绪；安装时终端会短暂停顿，不会结束。" : undefined}
           control={<Text type="body">{state.runningTerminals ?? runningTerminals}</Text>}
         />
         {!state.bundled ? (

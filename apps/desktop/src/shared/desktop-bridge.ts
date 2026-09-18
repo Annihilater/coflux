@@ -32,8 +32,14 @@ export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "s
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
 export type DesktopDaemonState = {
+  /** 本机正在运行的终端数：来自 ptyd（supervisor 缺席时也准确），否则来自 supervisor */
   runningTerminals?: number;
   legacyInstallation?: boolean;
+  /**
+   * 内置的 coflux-ptyd 与在跑的不是同一个二进制（plan 20260918-ptyd-terminal-custody）。这是单独的动作
+   * 「更新终端组件」：它会结束本机终端，所以要确认；普通的 supervisor 更新不受它影响、也不清它。
+   */
+  ptydUpdateReady?: boolean;
   status: DesktopDaemonStatus;
   /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
   bundled: boolean;
@@ -131,8 +137,14 @@ export type DesktopBridge = {
   onDaemonState(listener: (state: DesktopDaemonState) => void): () => void;
   /** 接入这台 Mac：落盘三件 + settings.json + LaunchAgent，然后 launchctl load */
   daemonEnroll(): void;
-  /** 重启服务；内置 supervisor 更新时先换二进制再重启（会结束本机所有终端） */
+  /**
+   * 重启 / 更新 supervisor（plan 20260918-ptyd-terminal-custody）：PTY 在 ptyd 里，本机终端、屏幕与
+   * 回滚都原样保留，不再确认；新版起不来自动回滚到上一版并在状态里报告。只有在跑的 supervisor
+   * 早于 ptyd 时这一次才会结束终端（那时主进程照旧弹确认）。
+   */
   daemonRestart(): void;
+  /** 更新 coflux-ptyd 本身：会结束本机所有终端，主进程弹确认后停掉两者再从内置版本起 */
+  daemonUpdatePtyd(): void;
   daemonStop(): void;
   /** 移除接入：unload 并删 plist 与三个二进制，保留凭证 / 配置 / 日志（cofluxd uninstall 无 --purge 语义） */
   daemonRemove(): void;

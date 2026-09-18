@@ -52,8 +52,8 @@ export function daemonStatusLine(state: DesktopDaemonState): DaemonStatusLine {
       };
     case "update-ready":
       return {
-        label: "有更新待重启",
-        detail: failure || `内置 ${state.bundledVersion ?? ""}，在跑 ${state.runningVersion ?? "未知版本"}`,
+        label: "有更新",
+        detail: failure || `内置 ${state.bundledVersion ?? ""}，在跑 ${state.runningVersion ?? "未知版本"}；更新会保留本机终端`,
         tone: failure ? "error" : "warning",
         pulsing: false,
       };
@@ -64,7 +64,7 @@ export function daemonStatusLine(state: DesktopDaemonState): DaemonStatusLine {
   }
 }
 
-export type DaemonActionId = "enroll" | "authorize" | "start" | "restart" | "update" | "stop" | "remove" | "fda";
+export type DaemonActionId = "enroll" | "authorize" | "start" | "restart" | "update" | "update-ptyd" | "stop" | "remove" | "fda";
 
 export type DaemonAction = {
   id: DaemonActionId;
@@ -74,7 +74,7 @@ export type DaemonAction = {
   confirm?: { title: string; description: string; confirmLabel: string };
 };
 
-/** 「会结束本机 N 个终端」：重启 / 停止 / 换新的后果说明。 */
+/** 「会结束本机 N 个终端」：停止 / 移除 / 更新终端组件的后果说明（supervisor 重启与更新不再结束终端）。 */
 export function terminalsImpact(runningTerminals: number): string {
   return runningTerminals > 0 ? `会结束本机 ${runningTerminals} 个正在运行的终端及其中的程序。` : "本机当前没有正在运行的终端。";
 }
@@ -86,8 +86,10 @@ const REMOVE_CONFIRM = {
 };
 
 /**
- * 面板里的可见动作。busy 期间无动作；FDA 引导只在运行且未授予时出现；
- * 运行中有终端时重启 / 停止要确认，「重启并更新」永远要确认（文案带终端数）。
+ * 面板里的可见动作。busy 期间无动作；FDA 引导只在运行且未授予时出现。
+ *
+ * plan 20260918-ptyd-terminal-custody：PTY 在 ptyd 里，重启 / 更新 supervisor 不结束终端，因此**不确认**；
+ * 停止、移除、以及单独的「更新终端组件」（换 ptyd 本身）才结束终端，照旧确认（文案带终端数）。
  */
 export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals: number): DaemonAction[] {
   if (state.busy) return [];
@@ -100,41 +102,30 @@ export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals
   };
   const remove: DaemonAction = { id: "remove", label: "移除接入", kind: "destructive", confirm: REMOVE_CONFIRM };
   const fda: DaemonAction[] = state.fda === "granted" ? [] : [{ id: "fda", label: "完全磁盘访问…", kind: "secondary" }];
+  // ptyd 自己变了才有的动作：这是唯一会因为更新而结束终端的路径，永远单独列出、永远确认。
+  const updatePtyd: DaemonAction[] = state.ptydUpdateReady
+    ? [{
+        id: "update-ptyd",
+        label: "更新终端组件",
+        kind: "secondary",
+        confirm: {
+          title: "更新本机终端组件？",
+          description: `${impact} 终端组件本身更新时无法保留终端；只有它变了才会出现这个动作。`,
+          confirmLabel: "结束终端并更新",
+        },
+      }]
+    : [];
   switch (state.status) {
     case "not-installed":
       return state.bundled ? [{ id: "enroll", label: "接入这台 Mac", kind: "primary" }] : [];
     case "stopped":
       return [{ id: "start", label: "启动", kind: "primary" }, remove];
     case "pending-auth":
-      return [{ id: "authorize", label: "授权", kind: "primary" }, { id: "restart", label: "重启", kind: "secondary" }, stop, remove];
+      return [{ id: "authorize", label: "授权", kind: "primary" }, { id: "restart", label: "重启", kind: "secondary" }, ...updatePtyd, stop, remove];
     case "running":
-      return [
-        ...fda,
-        {
-          id: "restart",
-          label: "重启",
-          kind: "secondary",
-          ...(runningTerminals > 0 ? { confirm: { title: "重启本机终端？", description: impact, confirmLabel: "重启" } } : {}),
-        },
-        stop,
-        remove,
-      ];
+      return [...fda, { id: "restart", label: "重启", kind: "secondary" }, ...updatePtyd, stop, remove];
     case "update-ready":
-      return [
-        {
-          id: "update",
-          label: "重启并更新",
-          kind: "primary",
-          confirm: {
-            title: `更新本机终端 到 ${state.bundledVersion ?? "内置版本"}？`,
-            description: `${impact} 更新只在你点这里时发生，从不自动重启。`,
-            confirmLabel: "重启并更新",
-          },
-        },
-        ...fda,
-        stop,
-        remove,
-      ];
+      return [{ id: "update", label: "更新", kind: "primary" }, ...fda, ...updatePtyd, stop, remove];
   }
 }
 

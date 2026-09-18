@@ -32,6 +32,35 @@ test("移除接入永远要二次确认，且是破坏性动作", () => {
   assert.equal(remove?.kind, "destructive");
 });
 
+test("supervisor 的重启与更新不再确认（终端留在 ptyd 里）；停止、移除、更新终端组件才确认", () => {
+  // 有 3 个终端在跑：过去重启 / 更新都要确认，现在不确认——终端不会结束。
+  const running = resolveDaemonActions(RUNNING, 3);
+  assert.equal(running.find((action) => action.id === "restart")?.confirm, undefined, "重启不结束终端，不确认");
+  assert.ok(running.find((action) => action.id === "stop")?.confirm, "停止结束终端，仍确认");
+  assert.ok(running.find((action) => action.id === "remove")?.confirm);
+  assert.equal(running.find((action) => action.id === "update-ptyd"), undefined, "ptyd 没变就没有这个动作");
+
+  const updateReady = resolveDaemonActions({ ...RUNNING, status: "update-ready", bundledVersion: "v2.2.0" }, 3);
+  const update = updateReady.find((action) => action.id === "update");
+  assert.ok(update, "有更新时给出更新动作");
+  assert.equal(update?.confirm, undefined, "更新 supervisor 不结束终端，不确认");
+  assert.equal(update?.kind, "primary");
+
+  // ptyd 本身变了：单独的动作，永远确认，文案带终端数并说明会结束终端。
+  const ptydChanged = resolveDaemonActions({ ...RUNNING, ptydUpdateReady: true }, 2);
+  const updatePtyd = ptydChanged.find((action) => action.id === "update-ptyd");
+  assert.ok(updatePtyd?.confirm, "更新终端组件结束终端，必须确认");
+  assert.match(updatePtyd?.confirm?.description ?? "", /会结束本机 2 个正在运行的终端/);
+  assert.equal(ptydChanged.find((action) => action.id === "restart")?.confirm, undefined, "同时不影响 supervisor 重启的无确认");
+  // 也出现在 update-ready 与 pending-auth 里，且不与 supervisor 更新合并成一个动作。
+  const both = resolveDaemonActions({ ...RUNNING, status: "update-ready", ptydUpdateReady: true }, 1);
+  assert.ok(both.find((action) => action.id === "update"));
+  assert.ok(both.find((action) => action.id === "update-ptyd")?.confirm);
+  assert.ok(resolveDaemonActions({ ...PENDING, ptydUpdateReady: true }, 0).find((action) => action.id === "update-ptyd"));
+
+  assert.match(daemonStatusLine({ ...RUNNING, status: "update-ready", bundledVersion: "v2.2.0" }).detail, /保留本机终端/);
+});
+
 test("自动弹引导：只在中心已连上的 authed + 未接入 + 带 daemon + 没点过暂不 + 本次登录未弹过", () => {
   const base = { authState: "authed" as const, connection: "connected" as const, state: NOT_INSTALLED, dismissed: false, alreadyOffered: false };
   assert.equal(shouldOfferOnboarding(base), true);
