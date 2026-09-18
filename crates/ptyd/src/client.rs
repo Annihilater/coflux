@@ -176,6 +176,7 @@ fn round_trip(connection: &mut Connection, id: u64, request: PtydRequest, data: 
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Written {
     pub applied_through_seq: u64,
     pub duplicate: bool,

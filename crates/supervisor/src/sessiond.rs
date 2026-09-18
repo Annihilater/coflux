@@ -965,6 +965,10 @@ pub struct SessionState {
     input_reservations: HashMap<String, VecDeque<PendingInput>>,
     input_failure: Option<ControlError>,
     resize_cursors: HashMap<String, ResizeCursor>,
+    /// 重建时拿不到 ptyd 的输入游标（旧 ptyd 没有 `cursors` op）：第一次见到某个 identity 就以它自报的
+    /// seq 为起点接纳，重复 / 跳号交给 ptyd 那边的游标裁决——否则回来的 client 一律被判 `input_seq_gap`，
+    /// 一个能力缺失就变成了死 ack。
+    cursorless_rebuild: bool,
 }
 
 impl SessionState {
@@ -979,6 +983,7 @@ impl SessionState {
             input_reservations: HashMap::new(),
             input_failure: None,
             resize_cursors: HashMap::new(),
+            cursorless_rebuild: false,
         }
     }
 
@@ -1001,6 +1006,7 @@ impl SessionState {
             input_reservations: HashMap::new(),
             input_failure: None,
             resize_cursors: HashMap::new(),
+            cursorless_rebuild: false,
         }
     }
 
@@ -1009,6 +1015,40 @@ impl SessionState {
     pub fn restore_input_cursor(&mut self, client_instance_id: &str, seq: u64, data: Vec<u8>) {
         self.input_cursors
             .insert(client_instance_id.to_string(), InputCursor { seq, data });
+    }
+
+    /// 重建时没有游标可装（ptyd 不提供 `cursors`）：见 `cursorless_rebuild`。
+    pub fn set_cursorless_rebuild(&mut self) {
+        self.cursorless_rebuild = true;
+    }
+
+    /// ptyd 按它自己的游标拒绝了这条输入（gap / collision / identity 上限）：弹掉队首的 reservation、
+    /// 把错误交回给发它的 transport，session 与后续输入都不受影响（与 `fail_input` 封死 session 不同）。
+    pub fn reject_pending_input(
+        &mut self,
+        client_instance_id: &str,
+        input_seq: u64,
+    ) -> Result<InputFailureTarget, ControlError> {
+        let Some(reservations) = self.input_reservations.get_mut(client_instance_id) else {
+            return Err(ControlError {
+                code: "input_reservation_missing",
+                message: "input reservation 不存在".into(),
+            });
+        };
+        if reservations.front().is_none_or(|pending| pending.seq != input_seq) {
+            return Err(ControlError {
+                code: "input_reservation_missing",
+                message: "input reservation 顺序错误".into(),
+            });
+        }
+        let pending = reservations.pop_front().unwrap();
+        if reservations.is_empty() {
+            self.input_reservations.remove(client_instance_id);
+        }
+        Ok(InputFailureTarget {
+            channel_id: pending.channel_id,
+            request_id: pending.request_id,
+        })
     }
 
     pub fn checkpoint_eligible(&self) -> bool {
@@ -1307,6 +1347,22 @@ impl SessionState {
             .clone();
         if let Some(failure) = &self.input_failure {
             return Err(failure.clone());
+        }
+        if self.cursorless_rebuild
+            && !self.input_cursors.contains_key(&client_instance_id)
+            && !self
+                .input_reservations
+                .get(&client_instance_id)
+                .is_some_and(|reservations| !reservations.is_empty())
+        {
+            // 没有游标可对照：以 client 自报的 seq 为起点接纳；它是否重复 / 跳号由 ptyd 的游标在写入时裁决。
+            self.input_cursors.insert(
+                client_instance_id.clone(),
+                InputCursor {
+                    seq: input_seq.saturating_sub(1),
+                    data: Vec::new(),
+                },
+            );
         }
 
         let applied_through_seq = self
@@ -2976,5 +3032,50 @@ mod tests {
         let pending = state.feed(b"streamed");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].channel_id, "channel-a");
+    }
+
+    /// 旧 ptyd 没有 `cursors`：重建出的 authority 拿不到"什么真正写进了 PTY"的记录。回来的 client 从它
+    /// 上次的 seq 继续（比如 5）必须被接纳，而不是判 `input_seq_gap`——那会把一个能力缺失变成死 ack。
+    #[test]
+    fn cursorless_rebuild_accepts_a_returning_client_at_its_own_sequence_and_ptyd_rejections_are_not_fatal() {
+        let mut state = SessionState::restore(TerminalState::new(3, 12, 4));
+        state.set_cursorless_rebuild();
+        let epoch = state.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        // 上一个 supervisor 已经 ack 过 1..4，client 继续投 5。
+        let admitted = state
+            .admit_input("channel-a", "request-5", epoch, 5, b"five".to_vec())
+            .expect("拿不到游标时以 client 自报的 seq 为起点");
+        assert_eq!(admitted, InputAdmission::Enqueue { client_instance_id: "client-a".into() });
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 4);
+        // 起点一旦确立，之后照常连续：6 可以，8 是 gap。
+        state.complete_input("client-a", 5).unwrap();
+        assert!(matches!(
+            state.admit_input("channel-a", "request-6", epoch, 6, b"six".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        assert_eq!(
+            state.admit_input("channel-a", "request-8", epoch, 8, b"eight".to_vec()).unwrap_err().code,
+            "input_seq_gap"
+        );
+        // ptyd 按它的游标拒绝了 6：弹掉 reservation、把目标交回，session 没有封死，7 之后照常。
+        let target = state.reject_pending_input("client-a", 6).unwrap();
+        assert_eq!((target.channel_id.as_str(), target.request_id.as_str()), ("channel-a", "request-6"));
+        assert!(matches!(
+            state.admit_input("channel-a", "request-6-again", epoch, 6, b"six".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        assert!(state.reject_pending_input("client-a", 9).is_err(), "只能弹队首那一条");
+
+        // 有游标的正常重建不受影响：跳号仍是 gap。
+        let mut strict = SessionState::restore(TerminalState::new(3, 12, 4));
+        strict.restore_input_cursor("client-a", 4, b"four".to_vec());
+        let epoch = strict.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        assert!(matches!(
+            strict.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        let mut fresh = SessionState::restore(TerminalState::new(3, 12, 4));
+        let epoch = fresh.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        assert_eq!(fresh.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap_err().code, "input_seq_gap");
     }
 }

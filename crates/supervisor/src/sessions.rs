@@ -691,6 +691,9 @@ impl InputQueue {
 struct PtyWriteFailure {
     written: usize,
     error: std::io::Error,
+    /// ptyd 按它自己的输入游标拒绝了这一条（`input_seq_gap` / `input_seq_collision` /
+    /// `logical_client_limit`）：什么都没写进 PTY，只是这一条不被接受，session 照常。
+    rejected: Option<String>,
 }
 
 /// 输入写入的目的地。生产上是 ptyd 的专用输入连接；单测注入失败模式。
@@ -724,16 +727,30 @@ impl InputSink for PtydInputSink {
                 Err(PtyWriteFailure {
                     written: 0,
                     error: std::io::Error::from_raw_os_error(libc::EIO),
+                    rejected: None,
                 })
             }
             Err(PtydError::Remote { code, message }) if code == "pty_write_partial" => Err(PtyWriteFailure {
                 // ptyd 只在前缀已进 PTY 时报 partial；具体字节数在 message 里，这里只需要"非零"。
                 written: 1,
                 error: std::io::Error::other(message),
+                rejected: None,
             }),
+            // ptyd 的游标是"什么真正写进了 PTY"的记录；它判 gap / collision / identity 上限时一个字节都没写，
+            // 这条输入退回给 client，session 不封死也不 kill。
+            Err(PtydError::Remote { code, message })
+                if matches!(code.as_str(), "input_seq_gap" | "input_seq_collision" | "logical_client_limit") =>
+            {
+                Err(PtyWriteFailure {
+                    written: 0,
+                    error: std::io::Error::other(message),
+                    rejected: Some(code),
+                })
+            }
             Err(error) => Err(PtyWriteFailure {
                 written: 0,
                 error: std::io::Error::other(error.to_string()),
+                rejected: None,
             }),
         }
     }
@@ -1238,6 +1255,31 @@ impl Sessions {
                             }
                         }
                     }
+                    // ptyd 拒绝了这一条（按它的游标判 gap / collision / identity 上限）：弹掉这条 reservation、
+                    // 把错误码原样交回 client，继续处理后面的输入。这是退化恢复（拿不到 ptyd 游标的旧 ptyd）
+                    // 下的正常路径，不是 session 故障。
+                    Err(failure) if failure.rejected.is_some() => {
+                        let code = failure.rejected.clone().unwrap_or_default();
+                        logln!(
+                            "[supervisor] ptyd 拒绝 input（{code}）session={session_id} seq={}: {}",
+                            input.input_seq,
+                            failure.error
+                        );
+                        let target = session
+                            .lock()
+                            .unwrap()
+                            .state
+                            .reject_pending_input(&input.client_instance_id, input.input_seq);
+                        if let (Ok(target), Some(sessions)) = (target, sessions.upgrade()) {
+                            sessions.send_device_error(
+                                &target.channel_id,
+                                Some(target.request_id),
+                                &code,
+                                failure.error.to_string(),
+                            );
+                        }
+                        continue;
+                    }
                     // 关闭终端的收尾窗口：child 被 kill 后 slave fd 全没了，仍在路上的字节
                     // 必然拿到 EIO。只写一行日志，不向 client 发 device error。
                     Err(failure) if is_teardown_write_failure(&failure) => {
@@ -1682,6 +1724,9 @@ impl Sessions {
         let _ = state.take_command_change();
 
         // 4) 输入游标：ptyd 那边才是"什么真正写进了 PTY"的记录。
+        //    拿不到游标（旧 ptyd 没有 `cursors`、或读失败）就以 client 自报的 seq 为起点接纳，重复 / 跳号
+        //    交给 ptyd 写入时裁决——否则回来的 client 一律被判 `input_seq_gap`，能力缺失就成了死 ack。
+        let mut cursors_restored = false;
         if self.ptyd.supports("cursors") {
             match self.ptyd.cursors(&session_id) {
                 Ok(cursors) => {
@@ -1689,9 +1734,13 @@ impl Sessions {
                         let data = hex::decode(&cursor_info.data_hex).unwrap_or_default();
                         state.restore_input_cursor(&cursor_info.client_instance_id, cursor_info.seq, data);
                     }
+                    cursors_restored = true;
                 }
                 Err(error) => logln!("[supervisor] 读输入游标失败 {session_id}：{error}"),
             }
+        }
+        if !cursors_restored {
+            state.set_cursorless_rebuild();
         }
 
         // 5) 挂上 writer 与订阅，登记为存活 session。
@@ -2874,6 +2923,7 @@ mod tests {
             Err(PtyWriteFailure {
                 written: 0,
                 error: std::io::Error::from_raw_os_error(self.0),
+                rejected: None,
             })
         }
     }
@@ -3517,7 +3567,7 @@ mod tests {
                 if session_id == "duplicate-first" && pid == first_pid
         ));
         let (first_task, first_pid) = {
-            let mut locked = first.lock().unwrap();
+            let locked = first.lock().unwrap();
             let mut map = sessions.map.lock().unwrap();
             let removed = map.remove("duplicate-first").unwrap();
             assert!(Arc::ptr_eq(&removed, &first));
@@ -3559,7 +3609,7 @@ mod tests {
                 if session_id == "exit-first" && pid == second_pid
         ));
         let second = sessions.get("exit-first").unwrap();
-        let mut locked = second.lock().unwrap();
+        let locked = second.lock().unwrap();
         let responder_sessions = Arc::clone(&sessions);
         let responder_candidate = Arc::clone(&second);
         let responder = thread::spawn(move || {

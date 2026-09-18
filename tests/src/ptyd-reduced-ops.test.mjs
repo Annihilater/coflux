@@ -31,20 +31,20 @@ test("ptyd 只宣告 v1 的一部分 op：supervisor 仍能建会话、写输入
   const sessionId = run.task.sessionId;
   await device.attach(sessionId);
   let from = device.mark();
-  await device.input(sessionId, "echo REDUCED_OK\r");
+  await device.input(sessionId, "echo RED''UCED_OK\r");
   await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("REDUCED_OK"), "输入输出照常", 10000, from);
   await device.resize(sessionId, 100, 30);
 
   // 没有 checkpoint op 的 ptyd 上 ring 是普通环：一个 shell 产出超过一环（4 MiB）的输出必须一直流动、
   // 一直活着——绝不能因为"没法忠实重建"而把它冻在一环处。
   from = device.mark();
-  await device.input(sessionId, "yes | head -c 6000000; echo; echo RING_FLOWED\r");
+  await device.input(sessionId, "yes | head -c 6000000; echo; echo RIN''G_FLOWED\r");
   await device.waitFor((m) => m.case === "ptyOutput" && m.sessionId === sessionId && utf8(m.data).includes("RING_FLOWED"), "超过一环的输出持续流动", 120000, from);
   const catalogFlowed = await device.catalog();
   const flowed = catalogFlowed.sessions.find((session) => session.sessionId === sessionId);
   assert.ok(flowed.outputSeq > 4n * 1024n * 1024n, `序号必须越过一环：${flowed.outputSeq}`);
   from = device.mark();
-  await device.input(sessionId, "echo STILL_ALIVE\r");
+  await device.input(sessionId, "echo STI''LL_ALIVE\r");
   await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("STILL_ALIVE"), "穿过一环后 shell 仍在收键", 10000, from);
 
   // 没有 blob / cursors 也能接回：只回放 ring（退化路径），shell 不变。
@@ -59,7 +59,7 @@ test("ptyd 只宣告 v1 的一部分 op：supervisor 仍能建会话、写输入
   assert.equal(after.pid, before.pid);
   await device.attach(sessionId);
   from = device.mark();
-  await device.input(sessionId, "echo REDUCED_AFTER\r");
+  await device.input(sessionId, "echo RED''UCED_AFTER\r");
   await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("REDUCED_AFTER"), "替换后输入输出照常", 10000, from);
   device.close();
 });
