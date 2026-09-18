@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // cofluxd —— coflux daemon 管理 CLI。
-// daemon 是两个 Rust 二进制（supervisor 持 PTY + worker 频繁热升级，零 node 运行时）；
-// 本 CLI 只负责装/起/停/升级（用一下，不常驻）。systemd(Linux user) / launchd(macOS LaunchAgent)。
+// daemon 是三个 Rust 进程（ptyd 持 PTY、长生；supervisor 可随时替换；worker 频繁热升级，零 node 运行时）；
+// 本 CLI 只负责装/起/停/升级（用一下，不常驻）。systemd(Linux user) / launchd(macOS LaunchAgent)，
+// ptyd 与 supervisor 各自一份服务文件：重启 supervisor 不带走 ptyd，终端留在里面。
 import { parseArgs } from "node:util";
 import { homedir, hostname, platform, arch } from "node:os";
 import { join, dirname } from "node:path";
@@ -50,6 +51,11 @@ const IS_MAC = platform() === "darwin";
 const IS_LINUX = platform() === "linux";
 const PLIST = join(homedir(), "Library", "LaunchAgents", "com.coflux.daemon.plist");
 const UNIT = join(homedir(), ".config", "systemd", "user", "coflux-daemon.service");
+// ptyd 是独立的服务（plan 20260918-ptyd-terminal-custody）：launchd 一个 plist 只能跑一个程序，systemd 默认
+// KillMode=control-group 会在 `systemctl restart` 时把整个 cgroup 一起杀——ptyd 必须在 supervisor 的进程组 /
+// cgroup 之外，重启 supervisor 才不会带走它。停止 daemon（down / uninstall）仍然一并停 ptyd。
+const PTYD_PLIST = join(homedir(), "Library", "LaunchAgents", "com.coflux.ptyd.plist");
+const PTYD_UNIT = join(homedir(), ".config", "systemd", "user", "coflux-ptyd.service");
 const DEFAULT_LOCAL_GATEWAY_PORT = 8788; // 与 packages/crates protocol 的 LOCAL_GATEWAY_PORT 保持一致
 
 const die = (m) => { console.error("✗ " + m); process.exit(1); };
@@ -397,6 +403,8 @@ function applyConfig({ serverUrl, deviceName, shell }) {
   return settings;
 }
 
+// launchd：两个 plist。supervisor 的 SIGTERM 是 leave-sessions（终端留在 ptyd 里），launchctl unload/load
+// com.coflux.daemon 只动它；ptyd 在自己的 label 下，KeepAlive 让它崩了也自己回来。
 function plistXml() {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -415,11 +423,32 @@ function plistXml() {
 </plist>
 `;
 }
+function ptydPlistXml() {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.coflux.ptyd</string>
+  <key>ProgramArguments</key>
+  <array><string>${PTYD_BIN}</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>COFLUX_HOME</key><string>${HOME}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${LOG_FILE}</string>
+  <key>StandardErrorPath</key><string>${LOG_FILE}</string>
+</dict>
+</plist>
+`;
+}
+// systemd：ptyd 自己一个 unit，supervisor 的 unit Requires/After 它。`systemctl restart coflux-daemon` 只重启
+// supervisor 的 cgroup；ptyd 的 cgroup 不在其中，终端不受影响。停 ptyd（down）会连带停 supervisor（Requires）。
 function systemdUnit() {
   return `[Unit]
 Description=coflux daemon (supervisor)
-After=network-online.target
+After=network-online.target coflux-ptyd.service
 Wants=network-online.target
+Requires=coflux-ptyd.service
 
 [Service]
 Environment=COFLUX_HOME=${HOME}
@@ -431,26 +460,75 @@ RestartSec=2
 WantedBy=default.target
 `;
 }
+function ptydSystemdUnit() {
+  return `[Unit]
+Description=coflux ptyd (terminal custody)
+
+[Service]
+Environment=COFLUX_HOME=${HOME}
+ExecStart=${PTYD_BIN}
+Restart=always
+RestartSec=2
+KillMode=process
+
+[Install]
+WantedBy=default.target
+`;
+}
+/** 四份服务文件的路径与文本（`cofluxd service-files` 原样打印，黑盒据此断言 ptyd 独立受管）。 */
+function serviceFiles() {
+  return {
+    launchd: { supervisor: { path: PLIST, text: plistXml() }, ptyd: { path: PTYD_PLIST, text: ptydPlistXml() } },
+    systemd: { supervisor: { path: UNIT, text: systemdUnit() }, ptyd: { path: PTYD_UNIT, text: ptydSystemdUnit() } },
+  };
+}
 function installService(start) {
   if (IS_MAC) {
     fs.mkdirSync(dirname(PLIST), { recursive: true });
+    fs.writeFileSync(PTYD_PLIST, ptydPlistXml());
     fs.writeFileSync(PLIST, plistXml());
-    if (start) { run("launchctl", ["unload", PLIST]); run("launchctl", ["load", PLIST]); }
-    console.log(`✓ launchd: ${PLIST}`);
+    if (start) {
+      // ptyd 先起：supervisor 连不上它会退出，KeepAlive 再拉一次也只是浪费。
+      run("launchctl", ["unload", PLIST]);
+      run("launchctl", ["unload", PTYD_PLIST]);
+      run("launchctl", ["load", PTYD_PLIST]);
+      run("launchctl", ["load", PLIST]);
+    }
+    console.log(`✓ launchd: ${PTYD_PLIST}\n✓ launchd: ${PLIST}`);
   } else if (IS_LINUX) {
     fs.mkdirSync(dirname(UNIT), { recursive: true });
+    fs.writeFileSync(PTYD_UNIT, ptydSystemdUnit());
     fs.writeFileSync(UNIT, systemdUnit());
-    if (start) { run("systemctl", ["--user", "daemon-reload"]); run("systemctl", ["--user", "enable", "--now", "coflux-daemon.service"]); }
-    console.log(`✓ systemd: ${UNIT}`);
+    if (start) {
+      run("systemctl", ["--user", "daemon-reload"]);
+      run("systemctl", ["--user", "enable", "--now", "coflux-ptyd.service"]);
+      run("systemctl", ["--user", "enable", "--now", "coflux-daemon.service"]);
+    }
+    console.log(`✓ systemd: ${PTYD_UNIT}\n✓ systemd: ${UNIT}`);
   } else die("仅支持 macOS / Linux");
 }
+/** 只重启 supervisor：终端留在 ptyd 里。ptyd 若还没起（首次升到带 ptyd 的版本）先把它拉起来，已在跑则无事。 */
 function restartService() {
-  if (IS_MAC) { run("launchctl", ["unload", PLIST]); run("launchctl", ["load", PLIST]); }
-  else if (IS_LINUX) run("systemctl", ["--user", "restart", "coflux-daemon.service"]);
+  if (IS_MAC) {
+    run("launchctl", ["load", PTYD_PLIST]);
+    run("launchctl", ["unload", PLIST]);
+    run("launchctl", ["load", PLIST]);
+  } else if (IS_LINUX) {
+    run("systemctl", ["--user", "daemon-reload"]);
+    run("systemctl", ["--user", "enable", "--now", "coflux-ptyd.service"]);
+    run("systemctl", ["--user", "restart", "coflux-daemon.service"]);
+  }
 }
+/** 重启两者（ptyd 自身更新）：会结束本机全部终端。 */
+function restartAllServices() {
+  stopService();
+  if (IS_MAC) { run("launchctl", ["load", PTYD_PLIST]); run("launchctl", ["load", PLIST]); }
+  else if (IS_LINUX) { run("systemctl", ["--user", "start", "coflux-ptyd.service"]); run("systemctl", ["--user", "start", "coflux-daemon.service"]); }
+}
+/** 停止本机 daemon = supervisor + ptyd 一起停（终端结束）。 */
 function stopService() {
-  if (IS_MAC) run("launchctl", ["unload", PLIST]);
-  else if (IS_LINUX) run("systemctl", ["--user", "stop", "coflux-daemon.service"]);
+  if (IS_MAC) { run("launchctl", ["unload", PLIST]); run("launchctl", ["unload", PTYD_PLIST]); }
+  else if (IS_LINUX) { run("systemctl", ["--user", "stop", "coflux-daemon.service"]); run("systemctl", ["--user", "stop", "coflux-ptyd.service"]); }
 }
 
 async function applyAndStart({ serverUrl, deviceName, shell, version, binDir, noStart }) {
@@ -525,22 +603,44 @@ async function cmdUpdate(v) {
   if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
   const version = v.version || "latest";
   const before = fileSha256(SUP_BIN);
+  const ptydBefore = fileSha256(PTYD_BIN);
   await ensureBinaries({ version, binDir: v["bin-dir"] });
-  if (before === fileSha256(SUP_BIN)) {
-    console.log("✓ 已更新：supervisor 无变化——不需要重启，活会话不受影响");
+  const supervisorChanged = before !== fileSha256(SUP_BIN);
+  const ptydChanged = ptydBefore !== fileSha256(PTYD_BIN);
+  if (!supervisorChanged && !ptydChanged) {
+    console.log("✓ 已更新：supervisor / ptyd 无变化——不需要重启，活会话不受影响");
     console.log("  worker 由 server 自动热升级；本次刷新的只是兜底 worker 二进制。");
-  } else {
+    return;
+  }
+  if (supervisorChanged) {
     console.log(`✓ 新 supervisor 已就位（${v["bin-dir"] ? "本地产物" : version}），但尚未生效`);
-    console.log("  ⚠ 运行 `cofluxd restart` 应用——会重启 daemon 并结束本机所有活会话（PTY 随 supervisor 退出）。");
+    console.log("  运行 `cofluxd restart` 应用——终端留在 ptyd 里，屏幕与回滚原样保留，只有几秒停顿。");
+  }
+  if (ptydChanged) {
+    console.log(`✓ 新 ptyd（终端托管进程）已就位${ptydBefore ? "" : "（首次安装）"}，但尚未生效`);
+    console.log("  ⚠ 运行 `cofluxd restart --ptyd` 应用——ptyd 自身更新无法保留终端，会结束本机所有活会话。");
   }
 }
 
-// 唯一会主动中断会话的命令：应用已就位的新 supervisor（或单纯重启 daemon）。
-function cmdRestart() {
+// 应用已就位的新 supervisor（或单纯重启 supervisor）：终端留在 ptyd 里不动。
+// `--ptyd`：连 ptyd 一起重启（ptyd 自身更新时才需要）——这才是会结束本机会话的那条命令。
+function cmdRestart(v) {
   if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
-  console.log("⚠ 正在重启 daemon：本机所有活会话将结束（PTY 随 supervisor 退出）…");
-  restartService();
+  // 服务文件与模板同步（首次升到带 ptyd 的版本时 ptyd 的 plist / unit 还不存在）；只写文件，不在这里启动。
+  installService(false);
+  if (v.ptyd) {
+    console.log("⚠ 正在重启 ptyd 与 supervisor：本机所有活会话将结束…");
+    restartAllServices();
+  } else {
+    console.log("正在重启 supervisor：本机终端留在 ptyd 里，屏幕与回滚原样保留…");
+    restartService();
+  }
   console.log("✓ 已重启（cofluxd status 查看状态）");
+}
+
+/** 隐藏命令：把四份服务文件（launchd × 2、systemd × 2）以 JSON 打到 stdout，供黑盒断言与运维核对。 */
+function cmdServiceFiles() {
+  console.log(JSON.stringify(serviceFiles(), null, 2));
 }
 
 // launchd(macOS) / systemd --user(Linux) 服务活跃态查询，status 与 doctor 共用。
@@ -859,7 +959,9 @@ async function cmdFda() {
 
 function cmdUninstall(v) {
   stopService();
-  try { fs.rmSync(IS_MAC ? PLIST : UNIT); } catch { /* */ }
+  for (const file of IS_MAC ? [PLIST, PTYD_PLIST] : [UNIT, PTYD_UNIT]) {
+    try { fs.rmSync(file); } catch { /* */ }
+  }
   if (IS_LINUX) run("systemctl", ["--user", "daemon-reload"]);
   if (v.purge) { try { fs.rmSync(HOME, { recursive: true, force: true }); } catch { /* */ } console.log("✓ 已卸载并清除 " + HOME); }
   else console.log(`✓ 已卸载服务（保留二进制/配置/凭证于 ${HOME}；--purge 可全清）`);
@@ -871,8 +973,9 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd up [flags]      幂等：首次装+起，已装则按当前 settings.json 重装服务并重启
   cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
   cofluxd doctor          中心网络 + gateway bind/grant/loopback + daemon 状态分层自检
-  cofluxd update          下载新二进制（不重启；supervisor 有变化时提示用 restart 应用）
-  cofluxd restart         重启 daemon 应用新 supervisor（⚠ 结束本机所有活会话）
+  cofluxd update          下载新二进制（不重启；supervisor / ptyd 有变化时提示用 restart 应用）
+  cofluxd restart         重启 supervisor 应用新版本（终端留在 ptyd 里，不结束会话）
+  cofluxd restart --ptyd  连 ptyd 一起重启（⚠ 结束本机所有活会话；仅 ptyd 自身更新时需要）
   cofluxd fda             [仅 macOS] 引导授予完全磁盘访问权限（避免 PTY 因 TCC 弹窗卡住）
   cofluxd logs [-f]       看 daemon 日志
   cofluxd down            停止
@@ -888,12 +991,13 @@ const { values, positionals } = parseArgs({
     server: { type: "string" }, name: { type: "string" }, shell: { type: "string" },
     version: { type: "string" }, "bin-dir": { type: "string" },
     "no-start": { type: "boolean", default: false }, purge: { type: "boolean", default: false },
+    ptyd: { type: "boolean", default: false },
     follow: { type: "boolean", short: "f", default: false }, help: { type: "boolean", short: "h", default: false },
   },
 });
 const cmd = positionals[0] || (fs.existsSync(SETTINGS) ? "status" : "up");
 if (values.help || cmd === "help") { console.log(HELP); process.exit(0); }
-const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall };
+const handlers = { up: cmdUp, update: cmdUpdate, restart: cmdRestart, down: cmdDown, status: cmdStatus, doctor: cmdDoctor, fda: cmdFda, logs: cmdLogs, uninstall: cmdUninstall, "service-files": cmdServiceFiles };
 const handler = handlers[cmd];
 if (!handler) die(`未知命令: ${cmd}\n登录与终端操作请使用 coflux。\n\n${HELP}`);
 await handler(values);
