@@ -557,8 +557,13 @@ In scope:
 - `crates/protocol/src/ptyd.rs` (new module) and `crates/protocol/src/lib.rs`
 - `crates/supervisor/src/sessions.rs`, `sessiond.rs`, `main.rs`, `manager.rs`,
   `runtime_control.rs`
-- `apps/desktop/src/main/` (runtime lifecycle, daemon manager, paths, state),
-  `apps/desktop/src/shared/desktop-bridge.ts`
+- `apps/desktop/src/main/` (runtime lifecycle, daemon manager, paths, state,
+  and `executor-lifecycle.ts` — a new `StopReason` reaches its exhaustive
+  switch), `apps/desktop/src/shared/desktop-bridge.ts`,
+  `apps/desktop/src/shared/ipc.ts` and `apps/desktop/src/preload/index.ts`
+  (a new runtime action needs its IPC channel)
+- `crates/supervisor/Cargo.toml` (the `portable-pty` dependency goes away)
+- `packages/cli/release-trust.mjs` (a fifth signed component to verify)
 - `apps/desktop/src/renderer/components/workbench/daemon-view.ts` and the
   settings surface that renders those actions
 - `apps/desktop/scripts/stage-daemon.mjs`, `apps/desktop/electron-builder.yml`,
@@ -672,3 +677,16 @@ eligibility predicate.
 - The `terminal-data` files are the one place raw terminal output is persisted.
   Any future change that widens their lifetime, loosens their mode, or lets
   them survive a session is a product decision, not a cleanup.
+- **Two known weaknesses, found during the review of this plan's own execution
+  and deliberately left in** — neither breaks a done criterion, both deserve a
+  follow-up:
+  - ptyd's `subscribe` performs a blocking `send` on the connection queue while
+    holding the session lock. Replaying more than the queue's 256 records to a
+    client that is not reading would stall that session's read loop. The
+    triggering shape is narrow today, but ptyd is the process whose whole job
+    is never to freeze, so this should not be left indefinitely.
+  - Recovery on the degraded path (no checkpoint blob, replaying a full 4 MiB
+    ring) measured ~1.3 s for one session, against the ~35 ms per 2 MiB this
+    plan budgeted from raw vt100 throughput. The gap is the per-chunk UDS round
+    trip to read the ring, not parsing. The normal path replays at most half a
+    ring and is unaffected, but ten degraded sessions would be a visible stall.
