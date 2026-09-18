@@ -212,14 +212,22 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 而 ⌥ 现在又是选区手势——必须关掉。
       altClickMovesCursor: false,
       convertEol: false,
-      // 下面四项与 rescaleOverlappingGlyphs 一起对齐 Cursor 的默认观感（plan 20260916）：
-      // 不闪的块状光标、行高 1、对比度下限 4.5。fontFamily 不动——这串在 macOS 上实际解析到的
-      // 就是 Menlo（前三个字体都不存在），与 Cursor 用的是同一个。
+      // 下面两项与 rescaleOverlappingGlyphs、minimumContrastRatio 一起对齐 Cursor 的默认观感
+      // （plan 20260916）：不闪的块状光标、对比度下限 4.5。
       cursorBlink: false,
       cursorStyle: "block",
-      fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-      fontSize: 12, // 等宽字体同 px 视觉大于 UI sans（页面 base 13px），降 1px 找平衡（VS Code 同款配比）
-      lineHeight: 1,
+      // 自带字体（plan 20260918）：Maple Mono CN 的拉丁步进 0.600em、CJK 1.200em 是精确 2:1，
+      // 正好填满 xterm 给一个 CJK 码位分配的两格。旧那串 "SFMono-Regular", Consolas… 在 macOS 上
+      // 一个都没装，实际落到 Menlo（0.602em）+ PingFang SC 兜底（CJK 1.0em）——中文字符坐在比字形
+      // 更宽的格子里，栏位对不齐。字体的等待在 main.tsx 的 boot() 里做过一次（度量缓存是同步且
+      // 永久的，原因见那里的注释）；这里在后面留一串系统等宽，woff2 万一没加载上还能是等宽的样子。
+      fontFamily: '"Maple Mono CN", Menlo, monospace',
+      fontSize: 12, // 用户定的排版：12 × 1.25，与 2.0.2 之前一致；等宽字体同 px 视觉大于 UI sans，降 1px 找平衡
+      // 1.25 是用户定的值，也是这里一直用到 2.0.2 的值；2.1.0 跟着 Cursor 降到 1.0，用起来挤。
+      // 行高 >1 时 box-drawing 的竖线靠 WebglAddon 的 customGlyphs 自绘保持连续（该项是 addon 的
+      // 构造选项、默认开着，所以 WebglAddon 继续不传参构造）；也就是说 onContextLoss 回退到 DOM
+      // 渲染器之后竖线会有缝——这是已接受的代价，不是要去追的缺陷。
+      lineHeight: 1.25,
       // 主题里 brightBlack 这类暗色按作者给的对比度渲染会糊；4.5 = WCAG AA 正文下限，
       // xterm 会按背景色把不达标的前景色提亮到刚好达标，不改主题本身。
       minimumContrastRatio: 4.5,
