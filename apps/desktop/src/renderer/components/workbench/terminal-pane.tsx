@@ -344,9 +344,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     const paintCommand = (entry: CommandEntry) => {
       const element = entry.element;
       if (!element) return;
-      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 host 的 pl-3 内边距，当成 Cursor 那样的行首标记条。
+      // 装饰默认落在第 0 列上，会压住提示符本身；挪进左侧内边距（12px），当成 Cursor 那样的行首标记块。
+      // 不碰 height：.xterm-decoration 是 absolute，包含块是 .xterm-screen（position: relative），
+      // 在这里写 100% 等于「整屏那么高」，几条命令叠起来就是左边一条假滚动条。
+      // xterm 的 BufferDecorationRenderer 在触发 onRender 之前已经把 height 设成了 (options.height || 1) * cell.height，
+      // 放着不动就正好一行，且自动跟随 dpr / 字号变化——这里只负责涂颜色、宽度和偏移。
       element.style.width = "3px";
-      element.style.height = "100%";
       element.style.marginLeft = "-9px";
       element.style.borderRadius = "2px";
       element.style.backgroundColor = COMMAND_COLORS[entry.state];
