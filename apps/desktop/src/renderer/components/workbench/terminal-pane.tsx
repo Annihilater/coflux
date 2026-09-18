@@ -60,6 +60,11 @@ const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可
 // 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
 
+/** 终端纸面色：既喂给 xterm 主题的 background，也在 open() 之后直接刷到 .xterm-viewport 上。
+ * 与 index.css 的 --terminal 同值——xterm 主题只吃 #RRGGBB、读不了 CSS 变量，所以这里留一份常量，
+ * 别把字面量写第二遍。 */
+const TERMINAL_PAPER = "#0a0a0a";
+
 /** ⌘F 查找的高亮：颜色只接受 #RRGGBB，取自上面的终端主题。开着 decorations 才有
  * onDidChangeResults（命中计数），所以它不是纯装饰。 */
 const SEARCH_OPTIONS: ISearchOptions = {
@@ -239,7 +244,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 面对一个「忘了这回事」的终端，协议级模式持久化不在本 plan 范围内。
       vtExtensions: { kittyKeyboard: true },
       theme: {
-        background: "#0a0a0a",
+        background: TERMINAL_PAPER,
         foreground: "#e4e4e4",
         cursor: "#e4e4e4",
         selectionBackground: "#3a3a3a88",
@@ -344,7 +349,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     const paintCommand = (entry: CommandEntry) => {
       const element = entry.element;
       if (!element) return;
-      // 装饰默认落在第 0 列上，会压住提示符本身；挪进左侧内边距（12px），当成 Cursor 那样的行首标记块。
+      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 .xterm 的左内边距（12px），当成 Cursor 那样的行首标记块。
       // 不碰 height：.xterm-decoration 是 absolute，包含块是 .xterm-screen（position: relative），
       // 在这里写 100% 等于「整屏那么高」，几条命令叠起来就是左边一条假滚动条。
       // xterm 的 BufferDecorationRenderer 在触发 onRender 之前已经把 height 设成了 (options.height || 1) * cell.height，
@@ -438,6 +443,15 @@ export function TerminalPane(props: TerminalPaneProps) {
     };
 
     terminal.open(host);
+    // .xterm-viewport 在上游样式表里被硬编码成纯黑（.xterm:not(.allow-transparency) .xterm-viewport { background-color: #000 }），
+    // 而运行时换色只刷 .xterm 和滚动容器、独独跳过 viewport——viewport 又是 absolute inset-0 盖在它俩上面。
+    // 于是渲染出来的行填不满容器的任何一刻（挂载中、fit 防抖窗口里、远端 resize 在途，或行高本来就除不尽容器高度），
+    // 底下都会漏出一条黑带。这里直接把纸面色写成内联样式，让那些余量退化成纸色的呼吸空间，
+    // 结果不再依赖行数算得像素级精确。必须是内联样式而不是 index.css 里的一条规则：
+    // xterm.css 由本文件 import、落在懒加载的 terminal-panes-*.css chunk 里，加载顺序在 index.css 之后，
+    // 两边都不在 @layer 里，而上游选择器是 (0,3,0)——两种自然写法一个输特异性、一个输顺序，且构建不会报警。
+    const viewport = terminal.element?.querySelector<HTMLElement>(".xterm-viewport");
+    if (viewport) viewport.style.backgroundColor = TERMINAL_PAPER;
     // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
     // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
     const imePatch = applyImeCommittedInputPatch((terminal as unknown as { _core?: XtermCoreInternals })._core);
@@ -854,8 +868,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       <ContextMenu label="终端操作" size="sm" menuWidth={220} items={contextMenuItems} onOpenChange={handleContextMenuOpenChange}>
         {/* absolute inset-0 而不是 h-full：铺满的是「最近的定位祖先」——触发区（position: relative）
             与外层容器（absolute inset-0）两者的盒子都正好是整格，谁来当这个祖先都一样大。
-            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。 */}
-        <div ref={hostRef} className={`absolute inset-0 pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。
+            文字周围的内边距不在这里，而在 index.css 的 .xterm 上：FitAddon 量的是本元素的 computed height
+            （border-box，因为 Tailwind preflight 给了 box-sizing: border-box），只减 terminal.element 自己的
+            padding——padding 留在这一层会被当成可用空间多算出一行，末行被面板下沿切掉。 */}
+        <div ref={hostRef} className={`absolute inset-0${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       </ContextMenu>
       {searchOpen ? (
         <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
