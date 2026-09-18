@@ -300,18 +300,51 @@ function spawnApp(rel, env) {
   return child;
 }
 
-// daemon = Rust supervisor + Rust worker（两个二进制，零 node 运行时）。
+// daemon = Rust ptyd（持 PTY，长生）+ Rust supervisor + Rust worker（三个二进制，零 node 运行时）。
 // 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
 const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
 const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
+const PTYD_BIN = process.env.COFLUX_PTYD_BIN || join(ROOT, "target/debug/coflux-ptyd");
 /** Rust 版 agent 命令 `coflux`（plan 112，crates/cli；pretest 一并构建）：与 npm 版同名、供桌面版内置。
  * 黑盒在 coflux 终端里直接执行它，验证与 node 版 `packages/cli/coflux.mjs` 的 stdout 短语/退出码一致。 */
 export const CLI_BIN = process.env.COFLUX_CLI_BIN || join(ROOT, "target/debug/coflux");
-export function spawnDaemon(env) {
+
+async function waitForSocket(path, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`socket ${path} did not appear`);
+    await sleep(25);
+  }
+}
+
+/**
+ * ptyd 与 supervisor 各自一个 detached 进程组（plan 20260918-ptyd-terminal-custody）：替换 / 杀掉 supervisor
+ * 不能带走 ptyd。ptyd 挂在 supervisor 子进程句柄的 `cofluxCompanions` 上，整树 teardown 时一起收——
+ * 一个跑在测试之外的 ptyd 会污染下一次运行。
+ */
+function spawnPtyd(env) {
+  const child = spawn(PTYD_BIN, [], { env, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+  child.cofluxProcessGroupId = child.pid;
+  return child;
+}
+function spawnSupervisor(env, companions) {
   const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
   const child = spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
   child.cofluxProcessGroupId = child.pid;
+  child.cofluxCompanions = companions;
   return child;
+}
+export async function spawnDaemon(env) {
+  const ptyd = spawnPtyd(env);
+  await waitForSocket(join(env.COFLUX_HOME, "ptyd.sock"));
+  return spawnSupervisor(env, [ptyd]);
+}
+function waitForChildExit(child, timeoutMs = 10000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`child ${child.pid} did not exit within ${timeoutMs}ms`)), timeoutMs);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+  });
 }
 function detachedProcessGroupId(child) {
   const groupId = child?.cofluxProcessGroupId ?? child?.pid;
@@ -330,7 +363,18 @@ function processGroupExists(groupId) {
   }
 }
 
+/** 整树 = supervisor 的进程组 + 它的 companions（ptyd）各自的进程组。 */
 function signalProcessTree(child, signal = "SIGKILL") {
+  if (!child) return;
+  const errors = [];
+  for (const tree of [child, ...(child.cofluxCompanions ?? [])]) {
+    try { signalOwnProcessTree(tree, signal); } catch (error) { errors.push(error); }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "failed to signal process trees");
+}
+
+function signalOwnProcessTree(child, signal = "SIGKILL") {
   if (!child) return;
   const groupId = detachedProcessGroupId(child);
   if (groupId) {
@@ -377,11 +421,12 @@ async function waitForProcessTreeExit(child, groupId, timeoutMs = 3000) {
 async function stopProcessTrees(children, { strict = false } = {}) {
   const trees = children
     .filter(Boolean)
+    .flatMap((child) => [child, ...(child.cofluxCompanions ?? [])])
     .map((child) => ({ child, groupId: detachedProcessGroupId(child) }));
   const errors = [];
   for (const tree of trees) {
     try {
-      signalProcessTree(tree.child);
+      signalOwnProcessTree(tree.child);
     } catch (error) {
       if (strict) errors.push(error);
     }
@@ -812,7 +857,7 @@ export async function startStack(opts = {}) {
     await waitHealth(port, 12000, signal);
     await verifyServerIdentity(port, username, password, signal);
     throwIfStackAborted(signal);
-    ref.daemon = spawnDaemon(daemonEnv);
+    ref.daemon = await spawnDaemon(daemonEnv);
     // 空 home，daemon 无 credentials.json → 走浏览器授权（唯一登记路径），这里现场自动确认。
     await authorizeDaemon(port, home, { username, password, signal });
     throwIfStackAborted(signal);
@@ -859,13 +904,36 @@ export async function startStack(opts = {}) {
       await stopProcessTrees([daemonProcess], { strict: strictCleanup });
       if (!strictCleanup) await sleep(100);
     },
-    /** 整树重启 supervisor + worker，并复用原 COFLUX_HOME/设备凭证。活 PTY 与未 ack tombstone
-     * 都只在 supervisor 内存中；该入口用于验证它们同时丢失后的 catalog 自愈。 */
+    /** 整树重启 ptyd + supervisor + worker，并复用原 COFLUX_HOME/设备凭证。活 PTY（在 ptyd）与未 ack
+     * tombstone（在 supervisor）一起丢失；该入口用于验证之后的 catalog 自愈。 */
     async restartDaemon() {
       await stack.stopDaemon();
       throwIfStackAborted(signal, "daemon restart");
-      ref.daemon = spawnDaemon(ref.daemonEnv);
+      ref.daemon = await spawnDaemon(ref.daemonEnv);
     },
+    /** 只替换 supervisor（plan 20260918-ptyd-terminal-custody）：SIGTERM = leave-sessions（worker 随之结束，
+     * shell 留在 ptyd 里），等它退出后用同一份 env 起一个新的 supervisor，ptyd 不动。 */
+    async replaceSupervisor() {
+      const previous = ref.daemon;
+      if (!previous) throw new Error("no daemon to replace");
+      throwIfStackAborted(signal, "supervisor replace");
+      const exited = waitForChildExit(previous);
+      process.kill(previous.pid, "SIGTERM");
+      await exited;
+      ref.daemon = spawnSupervisor(ref.daemonEnv, previous.cofluxCompanions ?? []);
+    },
+    /** 杀掉 supervisor（连同它进程组里的 worker），模拟崩溃；ptyd 不动，然后像看门狗那样把 supervisor 拉起来。 */
+    async killSupervisor() {
+      const previous = ref.daemon;
+      if (!previous) throw new Error("no daemon to kill");
+      throwIfStackAborted(signal, "supervisor kill");
+      const exited = waitForChildExit(previous);
+      process.kill(-previous.pid, "SIGKILL");
+      await exited;
+      ref.daemon = spawnSupervisor(ref.daemonEnv, previous.cofluxCompanions ?? []);
+    },
+    /** 当前 supervisor 子进程的 pid（黑盒据此确认替换后确实是新进程）。 */
+    supervisorPid() { return ref.daemon?.pid; },
     /** 给 server 发 SIGTERM，等其优雅退出，返回退出码（或 'timeout'） */
     gracefulStopServer(ms = 3000) {
       return new Promise((res) => {
