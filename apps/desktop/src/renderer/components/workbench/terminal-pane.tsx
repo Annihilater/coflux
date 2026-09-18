@@ -222,11 +222,12 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 更宽的格子里，栏位对不齐。字体的等待在 main.tsx 的 boot() 里做过一次（度量缓存是同步且
       // 永久的，原因见那里的注释）；这里在后面留一串系统等宽，woff2 万一没加载上还能是等宽的样子。
       fontFamily: '"Maple Mono CN", Menlo, monospace',
-      fontSize: 13, // 与页面正文同阶（--coflux-text-base）：Maple Mono CN 在 13px 上不比 UI sans 显大
-      // 1.2 是 xterm 侧公认舒适的行高。行高 >1 时 box-drawing 的竖线靠 WebglAddon 的 customGlyphs
-      // 自绘保持连续（该项是 addon 的构造选项、默认开着，所以 WebglAddon 继续不传参构造）；也就是说
-      // onContextLoss 回退到 DOM 渲染器之后竖线会有缝——这是已接受的代价，不是要去追的缺陷。
-      lineHeight: 1.2,
+      fontSize: 12, // 用户定的排版：12 × 1.25，与 2.0.2 之前一致；等宽字体同 px 视觉大于 UI sans，降 1px 找平衡
+      // 1.25 是用户定的值，也是这里一直用到 2.0.2 的值；2.1.0 跟着 Cursor 降到 1.0，用起来挤。
+      // 行高 >1 时 box-drawing 的竖线靠 WebglAddon 的 customGlyphs 自绘保持连续（该项是 addon 的
+      // 构造选项、默认开着，所以 WebglAddon 继续不传参构造）；也就是说 onContextLoss 回退到 DOM
+      // 渲染器之后竖线会有缝——这是已接受的代价，不是要去追的缺陷。
+      lineHeight: 1.25,
       // 主题里 brightBlack 这类暗色按作者给的对比度渲染会糊；4.5 = WCAG AA 正文下限，
       // xterm 会按背景色把不达标的前景色提亮到刚好达标，不改主题本身。
       minimumContrastRatio: 4.5,

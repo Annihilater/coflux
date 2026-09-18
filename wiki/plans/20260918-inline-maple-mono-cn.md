@@ -55,7 +55,7 @@ Maple Mono CN is drawn for exactly this: latin 0.600em, CJK 1.200em — an exact
 
 **What is true when this is done**: the desktop app carries its own font and
 renders identically on any machine regardless of what is installed. The terminal
-renders Maple Mono CN at 13px with line height 1.2; Chinese and latin line up on
+renders Maple Mono CN at 12px with line height 1.25; Chinese and latin line up on
 the same grid; TUI box-drawing borders stay continuous; UI code spans use the
 same font as the terminal; UI body text uses the platform's own system font
 (SF Pro for latin, PingFang SC for Chinese on macOS) and no longer claims to be
@@ -135,9 +135,12 @@ or drive Playwright for it; the automated gates below still run.
   anyway: the CSS stack's own fallback then does its job. Rendering in the wrong
   font is a cosmetic regression; an app that does not boot is an outage.
 
-- **Terminal typography: `fontSize: 13`, `lineHeight: 1.2`** (from 12 and 1.0).
-  Based on: the departure check, and on `lineHeight: 1.2` being the documented
-  comfortable default for xterm.js terminals. **`customGlyphs` is not an
+- **Terminal typography: `fontSize: 12`, `lineHeight: 1.25`** *(revised 2026-09-18:
+  the owner set these after reading 2.1.0 on a real machine)*. This is what the
+  terminal used up to 2.0.2; 2.1.0 followed Cursor down to `lineHeight: 1.0` and
+  reads cramped. The plan had proposed 13 / 1.2 — it renders a hair looser still,
+  but the number that matters is the one the owner reads all day, so 12 / 1.25 wins
+  over both the earlier proposal and any editor's default. **`customGlyphs` is not an
   `ITerminalOptions` member on the pinned xterm** *(revised on advisor review)* —
   it has zero hits in `@xterm/xterm@6.1.0-beta.304`'s typings and now lives as a
   `WebglAddon` constructor option, defaulting to `true`. Leave that default alone:
@@ -227,7 +230,7 @@ present under the renderer output directory.
 
 The font load is awaited in `main.tsx`'s `boot()` before React mounts, so that it
 has settled — resolved *or* rejected — before any terminal is constructed. The
-terminal then renders at `fontSize: 13` / `lineHeight: 1.2` with Maple Mono CN
+terminal then renders at `fontSize: 12` / `lineHeight: 1.25` with Maple Mono CN
 leading its family stack (keep a system monospace fallback behind it).
 
 **`TerminalPane`'s mount effect stays synchronous.** Do not make it async, do not
@@ -386,7 +389,7 @@ Playwright for this change.
       rejected — before React mounts; a rejection still boots the app.
 - [ ] `TerminalPane`'s mount effect is still synchronous: it constructs the
       terminal and calls `props.onReady` in the same synchronous run as before.
-- [ ] Terminal renders at `fontSize: 13`, `lineHeight: 1.2`; no other terminal
+- [ ] Terminal renders at `fontSize: 12`, `lineHeight: 1.25`; no other terminal
       option is changed and `WebglAddon` is still constructed with no options.
 - [ ] `Inter` appears nowhere in the code or its comments; the Maple Mono CN
       family string appears only in `index.css` (the `@font-face` rules and
