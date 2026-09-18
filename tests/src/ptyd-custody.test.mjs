@@ -107,10 +107,12 @@ test("替换期间的输出不丢，序号连续：计数器没有洞，resume �
 
   await stack.replaceSupervisor();
   await reconnect(device);
+  // attach 的 replay 紧跟在 sessionAttached 之后，可能在 attach() 返回前就已入日志：起点取在 attach 之前。
+  const resumeFrom = device.mark();
   const resumed = await device.attach(sessionId, { resumeFromSeq: lastSeq });
   assert.equal(resumed.ansiSnapshot?.byteLength ?? 0, 0, "按 seq 续上，不是整屏重绘");
   assert.equal(resumed.snapshotSeq, lastSeq);
-  const chunks = await collectUntil(device, sessionId, device.mark() - 1, "COUNTER_END", 30000);
+  const chunks = await collectUntil(device, sessionId, resumeFrom, "COUNTER_END", 30000);
   // 序号首尾相接，且从 lastSeq + 1 开始。
   let expected = lastSeq + 1n;
   for (const chunk of chunks) {
@@ -184,9 +186,11 @@ test("环绕过的 ring + 有效 checkpoint：超过 4 MiB 输出后替换，仍
   const linesAfter = await screenLines(afterSnapshot.ansiSnapshot, 80, 24);
   assert.deepEqual(linesAfter.slice(-24), linesBefore.slice(-24), "可见屏幕逐行相同");
   assert.ok(linesAfter.some((line) => line.includes("WRAP_DONE")));
+  const resumeFrom = device.mark();
   const resumed = await device.attach(sessionId, { resumeFromSeq: lastSeq });
   assert.equal(resumed.snapshotSeq, lastSeq, "ring 覆盖到的位置可以直接续上");
-  const tail = device.mark();
+  assert.equal(resumed.ansiSnapshot?.byteLength ?? 0, 0, "不退化成整屏重绘");
+  const tail = Math.max(resumeFrom, device.mark());
   await device.input(sessionId, "echo AFTER_WRAP\r");
   await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_WRAP"), "环绕重建后输入仍可达", 10000, tail);
   device.close();
