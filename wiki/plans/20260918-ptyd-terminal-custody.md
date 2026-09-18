@@ -161,11 +161,23 @@ running, their screens intact and their scrollback intact.
   Rejected: replay-only recovery. Based on:
   `crates/supervisor/src/sessiond.rs:342-359`, `:459`.
 
-- **ptyd never overwrites a byte at an offset ≥ the last checkpoint offset X.
-  When the ring would have to overwrite one, ptyd stops reading the PTY — and
-  this holds whether or not a subscriber is attached.** This is what makes the
-  checkpoint guarantee real: the ring must always cover `[X, now]`, so that
-  replay never begins at a wrapped boundary. The supervisor is absent for the
+- **Once a checkpoint exists, ptyd never overwrites a byte at an offset ≥ the
+  last checkpoint offset X; when the ring would have to overwrite one, ptyd
+  stops reading the PTY — and that holds whether or not a subscriber is
+  attached. Before the first checkpoint, and on a ptyd that never advertised
+  the checkpoint op, the ring behaves as an ordinary ring and overwrites its
+  oldest bytes instead of stopping.** The second half is not a detail: with
+  "never overwrite past X" and X defaulting to 0, a session that has no
+  checkpoint would hit a zero write budget after one ring of output and the
+  read loop would park forever — the terminal would freeze permanently rather
+  than lose fidelity, which is strictly worse than the loss it was avoiding.
+  A terminal that keeps working outranks a faithful rebuild: without a
+  checkpoint, recovery replays from the ring start and accepts the modal-state
+  loss described above. *(revised after the first execution round, which
+  implemented the earlier wording faithfully and produced exactly this freeze.)*
+  This is what makes the checkpoint guarantee real: once there is a checkpoint
+  the ring must always cover `[X, now]`, so that replay never begins at a
+  wrapped boundary. The supervisor is absent for the
   whole of a replacement, so a rule phrased only in terms of a lagging
   subscriber would let a busy shell (`yes`, a build) overwrite past X within
   milliseconds and tear a hole between the blob and the ring — reintroducing
@@ -602,6 +614,9 @@ eligibility predicate.
 - [ ] With no subscriber attached and a shell producing output continuously,
       ptyd stops reading rather than overwriting at or past the checkpoint
       offset, and a test asserts it.
+- [ ] On a ptyd that never advertised the checkpoint op, a shell producing more
+      than one ring of output keeps running and its output keeps flowing — the
+      reduced-op black-box case asserts this, not just a short exchange.
 - [ ] A supervisor that fails to start rolls back to the previous directory with
       terminals untouched, the runtime marker reverts, and the panel reports the
       failed update.
