@@ -7,10 +7,13 @@
 //! 改产品决策，不是重构。
 //!
 //! ring 按**输出字节偏移**索引：偏移 `o` 的字节放在 `ring[o % CAP]`。它保留 `[start, end)`，
-//! `start = max(0, end - CAP)`，并且 **永不覆盖偏移 ≥ 最近一次 checkpoint 偏移 X 的字节**：写入
-//! 预算 = `X + CAP - end`，预算耗尽时调用方停止读 PTY（内核 PTY 缓冲填满后 shell 自己暂停，
-//! 与今天 supervisor 有界队列的背压完全一致）。没有 checkpoint 时 X 按 0 计——回放只能从 0 开始，
-//! 那 ring 就必须从 0 起完整保留。
+//! `start = max(0, end - CAP)`。**一旦有了 checkpoint**，就永不覆盖偏移 ≥ 最近一次 checkpoint 偏移 X
+//! 的字节：写入预算 = `X + CAP - end`，预算耗尽时调用方停止读 PTY（内核 PTY 缓冲填满后 shell 自己
+//! 暂停，与今天 supervisor 有界队列的背压完全一致）。**第一次 checkpoint 之前**（以及在从不宣告
+//! checkpoint op 的 ptyd 上）它就是一个普通的环：覆盖最旧的字节，绝不停读——把 X 缺省成 0 会让
+//! 没有 checkpoint 的 session 在写满一环后预算永远为 0、读线程永远停住，终端为了"忠实重建"而
+//! 永久冻结，比它要避免的那点保真度损失糟得多。能用的终端优先于忠实重建；没有 checkpoint 的
+//! 恢复从 ring 起点回放、接受模态状态丢失。
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -169,6 +172,7 @@ impl SessionFile {
         created
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -201,9 +205,11 @@ impl SessionFile {
         &self.resizes
     }
 
-    /// 还能追加多少字节而不覆盖偏移 ≥ X 的内容（X 缺省 0）。
+    /// 还能追加多少字节而不覆盖偏移 ≥ X 的内容。没有 checkpoint 就没有 X：普通环，随便写。
     pub fn write_budget(&self) -> usize {
-        let floor = self.checkpoint.unwrap_or(0);
+        let Some(floor) = self.checkpoint else {
+            return usize::MAX;
+        };
         usize::try_from((floor + PTYD_RING_CAPACITY).saturating_sub(self.end)).unwrap_or(usize::MAX)
     }
 
@@ -342,18 +348,15 @@ mod tests {
     fn ring_reads_by_offset_after_wrapping() {
         let dir = temp_dir("wrap");
         let mut file = SessionFile::create(&dir, "session", 24, 80, "").unwrap();
-        // 没有 checkpoint 时 X=0：ring 只能装满一次。先放一个 checkpoint 让它可以环绕。
+        // 没有 checkpoint：普通环，写多少都不停，最旧的字节被覆盖。
         let chunk: Vec<u8> = (0..=255u8).cycle().take(1024 * 1024).collect();
         file.append(&chunk);
-        file.set_checkpoint(file.end(), b"blob").unwrap();
         let mut total = file.end();
         for round in 0..6u8 {
             let data = vec![b'a' + round; 1024 * 1024];
-            assert!(file.write_budget() >= data.len());
+            assert_eq!(file.write_budget(), usize::MAX, "第一次 checkpoint 之前预算无限");
             file.append(&data);
             total += data.len() as u64;
-            // 每轮都把 checkpoint 推到当前末尾，模拟 supervisor 的半环 checkpoint。
-            file.set_checkpoint(file.end(), b"blob").unwrap();
         }
         assert_eq!(file.end(), total);
         assert_eq!(file.start(), total - PTYD_RING_CAPACITY);
@@ -376,7 +379,29 @@ mod tests {
     fn write_budget_never_crosses_the_checkpoint_offset() {
         let dir = temp_dir("budget");
         let mut file = SessionFile::create(&dir, "session", 24, 80, "").unwrap();
-        assert_eq!(file.write_budget() as u64, PTYD_RING_CAPACITY, "无 checkpoint 时 X=0");
+        assert_eq!(file.write_budget(), usize::MAX, "无 checkpoint 时没有 X：普通环");
+        // 先写超过一环：没有 checkpoint 时照常环绕，起点跟着末尾走。
+        file.append(&vec![0u8; 5 * 1024 * 1024]);
+        assert_eq!(file.start(), 1024 * 1024);
+        assert_eq!(file.write_budget(), usize::MAX);
+        file.set_checkpoint(1024 * 1024 + 1, b"x").unwrap();
+        // 保留 [1 MiB + 1, ...)：还能写 1 byte 就会盖掉那个字节之后……精确到字节。
+        assert_eq!(file.write_budget(), 1);
+        file.append(&[0u8]);
+        assert_eq!(file.write_budget(), 0);
+        assert_eq!(file.start(), 1024 * 1024 + 1);
+        file.set_checkpoint(file.end(), b"y").unwrap();
+        assert_eq!(file.write_budget() as u64, PTYD_RING_CAPACITY);
+        assert_eq!(file.blob().map(|(offset, blob)| (offset, blob.to_vec())), Some((file.end(), b"y".to_vec())));
+        file.unlink();
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_offset_cannot_point_below_the_ring_start() {
+        let dir = temp_dir("floor");
+        let mut file = SessionFile::create(&dir, "session", 24, 80, "").unwrap();
         file.append(&vec![0u8; 3 * 1024 * 1024]);
         file.set_checkpoint(1024 * 1024, b"x").unwrap();
         // 保留 [1 MiB, ...)：还能写 2 MiB，再多就会盖掉偏移 1 MiB 处的字节。
@@ -385,9 +410,7 @@ mod tests {
         assert_eq!(file.write_budget(), 0);
         assert_eq!(file.start(), 1024 * 1024);
         assert!(file.set_checkpoint(1024 * 1024 - 1, b"x").is_err(), "checkpoint 不能指向已淘汰的偏移");
-        file.set_checkpoint(file.end(), b"y").unwrap();
-        assert_eq!(file.write_budget() as u64, PTYD_RING_CAPACITY);
-        assert_eq!(file.blob().map(|(offset, blob)| (offset, blob.to_vec())), Some((file.end(), b"y".to_vec())));
+        assert!(file.set_checkpoint(file.end() + 1, b"x").is_err(), "checkpoint 不能指向尚未产生的偏移");
         file.unlink();
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();

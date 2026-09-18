@@ -136,27 +136,35 @@ fn read_loop_stops_at_the_checkpoint_offset_even_with_no_subscriber() {
     let (ptyd, client, home) = start("stop");
     let session = "yes";
     spawn(&client, session, &["yes"]);
-    // 没有 checkpoint 时 X=0：ring 只能装到 4 MiB，然后 ptyd 必须停止读而不是覆盖偏移 0。
-    wait_until("ring 填到容量", Duration::from_secs(20), || output_offset(&client, session) >= PTYD_RING_CAPACITY);
-    assert_eq!(output_offset(&client, session), PTYD_RING_CAPACITY);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(output_offset(&client, session), PTYD_RING_CAPACITY, "没有 checkpoint 就不许越过偏移 0 继续写");
-    let (at, head) = client.read(session, 0, 8).unwrap();
-    assert_eq!((at, head.as_slice()), (0, &b"y\ny\ny\ny\n"[..]), "偏移 0 的字节仍在");
+    // 第一次 checkpoint 之前是普通环：没有订阅者、没有 checkpoint，`yes` 照样穿过 4 MiB 往前跑，
+    // 最旧的字节被覆盖——绝不因为"没法忠实重建"而把 shell 冻住。
+    wait_until("穿过一环", Duration::from_secs(30), || output_offset(&client, session) > PTYD_RING_CAPACITY + 1024 * 1024);
     let alive = client.list().unwrap().into_iter().find(|info| info.session_id == session).unwrap();
-    assert_eq!(alive.exit_code, None, "shell 只是被内核 PTY 缓冲挡住，没有死");
+    assert_eq!(alive.exit_code, None);
+    assert_eq!(alive.checkpoint_offset, None);
+    assert!(alive.ring_start > 0, "没有 checkpoint 时起点跟着末尾走：{}", alive.ring_start);
+    assert!(client.read(session, 0, 8).is_err(), "偏移 0 已被覆盖淘汰");
 
-    // checkpoint 把 X 推到 2 MiB：预算重新出现，读循环继续，但 ring 起点永不越过 2 MiB。
-    client.checkpoint(session, 2 * 1024 * 1024, b"blob").unwrap();
-    wait_until("checkpoint 后继续读", Duration::from_secs(10), || output_offset(&client, session) > PTYD_RING_CAPACITY);
-    wait_until("再次停在 X + CAP", Duration::from_secs(20), || output_offset(&client, session) >= 6 * 1024 * 1024);
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(output_offset(&client, session), 6 * 1024 * 1024);
+    // 有了 checkpoint 就有了 X：ring 起点永不越过 X，读循环在 X + CAP 处停住而不是覆盖。
+    let x = output_offset(&client, session);
+    client.checkpoint(session, x, b"blob").unwrap();
+    wait_until("停在 X + CAP", Duration::from_secs(30), || output_offset(&client, session) >= x + PTYD_RING_CAPACITY);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(output_offset(&client, session), x + PTYD_RING_CAPACITY, "有 checkpoint 后不许越过 X 继续写");
     let info = client.list().unwrap().into_iter().find(|info| info.session_id == session).unwrap();
-    assert_eq!(info.ring_start, 2 * 1024 * 1024, "ring 起点停在 checkpoint 偏移，不再前进");
-    assert_eq!(info.checkpoint_offset, Some(2 * 1024 * 1024));
+    assert_eq!(info.ring_start, x, "ring 起点停在 checkpoint 偏移，不再前进");
+    assert_eq!(info.checkpoint_offset, Some(x));
+    assert_eq!(info.exit_code, None, "shell 只是被内核 PTY 缓冲挡住，没有死");
+    let (at, head) = client.read(session, x, 8).unwrap();
+    assert_eq!(at, x);
+    assert_eq!(head.len(), 8, "偏移 X 的字节仍在");
     let blob = client.blob(session).unwrap();
-    assert_eq!(blob, Some((2 * 1024 * 1024, b"blob".to_vec())));
+    assert_eq!(blob, Some((x, b"blob".to_vec())));
+
+    // 下一次 checkpoint 把 X 往前推，预算重新出现，读循环继续。
+    let next = x + 2 * 1024 * 1024;
+    client.checkpoint(session, next, b"blob2").unwrap();
+    wait_until("checkpoint 前移后继续读", Duration::from_secs(10), || output_offset(&client, session) > x + PTYD_RING_CAPACITY);
 
     client.kill(session).unwrap();
     wait_exit(&client, session);

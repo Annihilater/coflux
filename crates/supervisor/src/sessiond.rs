@@ -1065,6 +1065,8 @@ impl SessionState {
         pending
     }
 
+    /// 单测便利：没有 ring 的 attach（生产只走 [`SessionState::attach_with_ring`]，本地重发缓冲之外由 ptyd 的 ring 补）。
+    #[cfg(test)]
     pub fn attach(
         &mut self,
         channel_id: &str,

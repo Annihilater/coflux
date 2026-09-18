@@ -335,8 +335,12 @@ function spawnSupervisor(env, companions) {
   return child;
 }
 export async function spawnDaemon(env) {
+  // 上一个 ptyd 被 SIGKILL 时不会清理自己的 socket 文件：不先删掉它，下面的"等 socket 出现"会立刻
+  // 返回，supervisor 连上一个已死的 socket 就退出（restartDaemon 曾因此让整套栈再也起不来）。
+  const socket = join(env.COFLUX_HOME, "ptyd.sock");
+  rmSync(socket, { force: true });
   const ptyd = spawnPtyd(env);
-  await waitForSocket(join(env.COFLUX_HOME, "ptyd.sock"));
+  await waitForSocket(socket);
   return spawnSupervisor(env, [ptyd]);
 }
 function waitForChildExit(child, timeoutMs = 10000) {

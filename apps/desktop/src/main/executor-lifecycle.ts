@@ -53,9 +53,15 @@ export function executorCancelReason(trigger: ExecutorStopTrigger): string | nul
     case "stop":
       return "本机终端已停止，任务被中断";
     // A restart brings the same runtime straight back and the app never goes away. Cancelling here
-    // would destroy work for what the user experiences as a blip.
+    // would destroy work for what the user experiences as a blip. (With ptyd this reason only
+    // reaches here for a pre-ptyd supervisor's one confirmed stop; the ordinary supervisor
+    // replacement never passes through `stopConfirmed` at all.)
     case "restart":
       return null;
+    // Replacing ptyd itself ends every terminal on this machine — the tool processes the run
+    // lives in included — so it cancels like a stop, and says which action did it.
+    case "update-ptyd":
+      return "本机终端组件更新，任务被中断";
     // Taking over a legacy LaunchAgent installation. It stops the *old* daemon, not this app, and
     // no executor run is hosted there.
     case "migrate":

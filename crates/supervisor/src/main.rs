@@ -77,6 +77,24 @@ fn parse_history_line_limit(value: Option<&str>) -> usize {
         .clamp(1, MAX_HISTORY_LINE_LIMIT)
 }
 
+/// 在 `window` 内反复尝试连接 ptyd（socket 尚不存在 / 上一个 ptyd 的残留 socket 拒绝连接都算"还没好"），
+/// 超时返回最后一次错误。这里只是等，绝不启动 ptyd。
+fn connect_ptyd(path: &str, window: Duration) -> Result<Arc<PtydClient>, coflux_ptyd::PtydError> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        match PtydClient::connect(path) {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                let retryable = matches!(&error, coflux_ptyd::PtydError::Io(io) if matches!(io.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+                if !retryable || std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 /// 与 supervisor 二进制同目录的 coflux-worker 路径（cofluxd 把两个二进制装在一起）。
 fn sibling_worker() -> String {
     std::env::current_exe()
@@ -137,7 +155,9 @@ fn main() {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("{home}/{PTYD_SOCK_NAME}"));
-    let ptyd = match PtydClient::connect(&ptyd_sock) {
+    // 服务管理器可能把 ptyd 排在 supervisor 之后几百毫秒才拉起（launchd 两个 label / systemd After=
+    // 只保证顺序不保证就绪），给它一个有界的等待窗口；窗口过了仍连不上才是"没有 ptyd"。
+    let ptyd = match connect_ptyd(&ptyd_sock, Duration::from_secs(10)) {
         Ok(client) => client,
         Err(error) => {
             let message = format!(

@@ -1508,7 +1508,8 @@ impl Sessions {
     }
 
     /// 到了半个 ring 且 parser 处于安全点就打一份 checkpoint。ptyd 不提供 checkpoint 能力时
-    /// 什么都不做（那台 ptyd 上 ring 回放只能从 0 开始，是旧 ptyd 的既有限制）。
+    /// 什么都不做——那台 ptyd 上 ring 就是普通环（覆盖最旧字节、永不停读），恢复只能从 ring 起点回放，
+    /// 接受模态状态丢失；终端照常工作。
     fn take_checkpoint_if_due(&self, session: &mut Session) -> Option<Checkpoint> {
         let seq = session.state.output_seq();
         if seq.saturating_sub(session.last_checkpoint_seq) < CHECKPOINT_INTERVAL_BYTES {

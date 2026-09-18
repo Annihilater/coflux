@@ -708,8 +708,9 @@ impl Inner {
     }
 }
 
-/// 每 session 一条阻塞读线程：读 → 按预算写 ring → 推给订阅者；预算为 0 就**停止读**（不覆盖
-/// 偏移 ≥ checkpoint 的字节），直到 checkpoint 前移或 session 被 kill。订阅者队列满时 `send`
+/// 每 session 一条阻塞读线程：读 → 按预算写 ring → 推给订阅者。有 checkpoint 之后预算为 0 就
+/// **停止读**（不覆盖偏移 ≥ checkpoint 的字节），直到 checkpoint 前移或 session 被 kill；第一次
+/// checkpoint 之前预算无限，环覆盖最旧字节、永不停读（见 `ring.rs` 顶部）。订阅者队列满时 `send`
 /// 阻塞，同样是停止读。EOF/EIO 后 waitpid 拿真实退出码。
 fn read_loop(session: Arc<Session>) {
     let (master, pid) = {

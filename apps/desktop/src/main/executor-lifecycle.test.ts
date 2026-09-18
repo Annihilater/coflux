@@ -10,16 +10,17 @@ const declined = (reason: StopReason): ExecutorStopTrigger => ({ kind: "runtime-
 test("用户确认的退出 / 退出登录 / 停止都取消在跑的任务，并说明是哪个动作", () => {
   // The panel's "stop" and "remove" both go through stopConfirmed("stop"): either one ends the
   // runtime the executor's tool processes live on.
-  for (const reason of ["quit", "logout", "stop"] as const) {
+  // `update-ptyd` replaces the PTY-owning process itself, which ends every terminal on the machine.
+  for (const reason of ["quit", "logout", "stop", "update-ptyd"] as const) {
     const text = executorCancelReason(confirmed(reason));
     assert.equal(typeof text, "string", reason);
     assert.notEqual(text, "", reason);
     assert.ok(text?.includes("任务被中断"), `${reason}: ${text}`);
   }
-  // The three read differently: the CLI prints them verbatim, and one that does not name the action
+  // The four read differently: the CLI prints them verbatim, and one that does not name the action
   // says nothing useful.
-  const texts = new Set((["quit", "logout", "stop"] as const).map((r) => executorCancelReason(confirmed(r))));
-  assert.equal(texts.size, 3);
+  const texts = new Set((["quit", "logout", "stop", "update-ptyd"] as const).map((r) => executorCancelReason(confirmed(r))));
+  assert.equal(texts.size, 4);
 });
 
 test("app 真的在退出时取消，且与运行时停止是两条独立入口", () => {
@@ -31,7 +32,7 @@ test("app 真的在退出时取消，且与运行时停止是两条独立入口"
 
 test("取消退出对话框、重启、迁移、通道断开都不动在跑的任务", () => {
   // The user dismissed the confirmation dialog: nothing was stopped, so nothing may be cancelled.
-  for (const reason of ["quit", "logout", "stop", "restart", "migrate"] as const) {
+  for (const reason of ["quit", "logout", "stop", "restart", "migrate", "update-ptyd"] as const) {
     assert.equal(executorCancelReason(declined(reason)), null, reason);
   }
   // A restart brings the same runtime straight back and the app never left; to the user it is a blip.

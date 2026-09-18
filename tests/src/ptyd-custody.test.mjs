@@ -1,7 +1,9 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Terminal } from "@xterm/headless";
+// @xterm/headless 6 只发布 CJS 的 webpack 包（lib-headless/xterm-headless.js），Node 探测不出具名导出，
+// 只能拿默认导出（= module.exports）再取 Terminal。
+import xtermHeadless from "@xterm/headless";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 import { openNativeDevice, utf8 } from "./device-harness.mjs";
@@ -9,6 +11,7 @@ import { openNativeDevice, utf8 } from "./device-harness.mjs";
 // plan 20260918-ptyd-terminal-custody M6：替换 supervisor 时终端活着、屏幕不变、序号连续、输入恰好一次；
 // 杀掉 supervisor 同样恢复；环绕过的 ring 配合 checkpoint 仍能重建。PTY 全程在 ptyd 里，supervisor 只是客户端。
 const PORT = 8830;
+const { Terminal } = xtermHeadless;
 let stack;
 const repos = [];
 
