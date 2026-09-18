@@ -318,6 +318,17 @@ Out of scope:
   "a page-consumed key starves the menu accelerator" is wrong and the fix needs
   rethinking rather than adjusting. Nothing in the plan depends on running this
   first — it is the tie-breaker if the walkthrough surprises someone.
+- **Known narrow side effect of yielding on `keyup` too** (found in review, not
+  worth special-casing): a short-circuited `_keyUp` also skips its trailing
+  `this._keyPressHandled = false` (shipped sources
+  `CoreBrowserTerminal.ts:951-971`). Reaching it takes an unusual sequence —
+  hold a letter down, press ⌘ while it is still down, then release the letter —
+  and the flag is reset by the next ordinary key release, but while it is stale
+  the IME committed-input patch (`terminal-ime-patch.ts`) falls through to
+  upstream's path for one input event. Fixing it would mean reading
+  `event.type` in the handler, which is the alternative the "modifiers only"
+  decision rejected for a much likelier failure. If CJK input ever drops a
+  character right after a ⌘ chord, start here.
 - **This is an xterm-upgrade tripwire.** The fix depends on
   `attachCustomKeyEventHandler` running first in `_keyDown` and on a `false`
   return suppressing the kitty encoder. The next time the xterm beta cohort
