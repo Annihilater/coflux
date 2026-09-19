@@ -443,6 +443,18 @@ that part is verified by code review, not by hand.
   the terminal pane's top-right corner is probably not inside a window drag region
   (the existing ⌘F box needs no `no-drag`). It was labelled as inference, and if
   it turns out wrong the design guidelines already cover the fix.
+- **Known cosmetic inconsistency, left as built.** The session-id character check
+  is slightly stricter downstream than upstream: the worker
+  (`crates/worker/src/hook.rs`, `sanitize_agent_session_id`) accepts an id whose
+  first byte is `-` or `_`, while the server (`apps/server/src/hub.ts`,
+  `validAgentSessionId`) and the desktop (`terminal-transcript.ts`,
+  `isUsableAgentSessionId`) both require the first character to be alphanumeric.
+  The comment on the server helper claims parity with the worker; it is in fact
+  narrower. This is safe — the stricter side is downstream, so nothing the worker
+  rejects can slip through, and the effect of the gap is only that such an id
+  silently yields no button. It is also unreachable in practice (Claude ships a
+  UUID, Codex a ULID-ish string). Tighten the worker's first-byte rule, or fix the
+  comment, whenever that file is next touched.
 - The transcript formats belong to Claude Code and Codex and will change without
   notice. The parser is deliberately renderer-side and allow-list driven so that a
   vendor change is a single front-end patch; resist any later proposal to move
