@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { ExecutorJobTable, type ExecutorAssignment, type ExecutorEffect, type ExecutorOutcome } from "./executor-jobs";
 import { buildSandboxProfile } from "./executor-sandbox";
 import { collectWorkspaceFacts, type GitRunner } from "./executor-workspace";
-import type { ExecutorRunnerOutbound, ExecutorRunnerStart } from "./executor-runner-protocol";
+import type { ExecutorRunnerCustomProvider, ExecutorRunnerOutbound, ExecutorRunnerStart } from "./executor-runner-protocol";
 
 /** Wall-clock cap for a task; past it the run is aborted. The executor is for handing over one
  * well-bounded piece of work, not for running indefinitely. */
@@ -42,6 +42,8 @@ export type ExecutorConfigSnapshot = {
   modelId: string;
   /** Read only at the moment a runner is spawned; never cached, never logged. */
   apiKey: string;
+  /** Custom endpoint definitions, so the runner's own runtime can register them too. */
+  customProviders: ExecutorRunnerCustomProvider[];
   systemPrompt: string;
   shell: string;
 };
@@ -188,6 +190,7 @@ export class ExecutorManager {
         shell: config.shell,
         systemPrompt: config.systemPrompt,
         model: { provider: config.provider, id: config.modelId },
+        customProviders: config.customProviders,
         apiKey: config.apiKey,
         timeoutMs: DEFAULT_TIMEOUT_MS,
       };

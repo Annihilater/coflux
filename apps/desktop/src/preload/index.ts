@@ -4,9 +4,13 @@ import type {
   DesktopBridge,
   DesktopCommand,
   DesktopDaemonState,
+  DesktopExecutorCatalog,
   DesktopExecutorInbound,
   DesktopExecutorOutbound,
+  DesktopExecutorSaveInput,
+  DesktopExecutorSaveResult,
   DesktopExecutorSettings,
+  DesktopExecutorTestResult,
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
@@ -134,17 +138,37 @@ const bridge: DesktopBridge = {
   onExecutorSettings(listener) {
     return subscribe<DesktopExecutorSettings>(IPC.executorSettings, listener);
   },
-  setExecutorModel(provider: string, modelId: string) {
-    ipcRenderer.send(IPC.executorSetModel, { provider: String(provider), modelId: String(modelId) });
+  getExecutorCatalog() {
+    return ipcRenderer.invoke(IPC.executorGetCatalog) as Promise<DesktopExecutorCatalog>;
   },
-  setExecutorApiKey(apiKey: string) {
-    ipcRenderer.send(IPC.executorSetApiKey, String(apiKey));
+  saveExecutorSettings(input: DesktopExecutorSaveInput) {
+    // Rebuilt field by field rather than forwarded: the renderer's object may carry anything, and
+    // the main process re-validates anyway. `apiKey` is kept undefined when absent — an absent key
+    // means "leave the stored one alone", an empty one means "clear it".
+    return ipcRenderer.invoke(IPC.executorSave, {
+      provider: String(input.provider),
+      modelId: String(input.modelId),
+      ...(input.apiKey === undefined ? {} : { apiKey: String(input.apiKey) }),
+      customProviders: input.customProviders.map((provider) => ({
+        id: String(provider.id),
+        name: String(provider.name),
+        baseUrl: String(provider.baseUrl),
+        api: String(provider.api),
+        models: provider.models.map((model) => ({ id: String(model.id), name: String(model.name) })),
+        authHeader: provider.authHeader === true,
+        keyless: provider.keyless === true,
+        ...(provider.apiKey === undefined ? {} : { apiKey: String(provider.apiKey) }),
+      })),
+    }) as Promise<DesktopExecutorSaveResult>;
+  },
+  testExecutorConnection() {
+    return ipcRenderer.invoke(IPC.executorTest) as Promise<DesktopExecutorTestResult>;
   },
   sendExecutorInbound(message: DesktopExecutorInbound) {
     ipcRenderer.send(IPC.executorInbound, message);
   },
-  setExecutorChannel(daemonId: string) {
-    ipcRenderer.send(IPC.executorChannel, String(daemonId));
+  setExecutorChannel(daemonId: string, generation: number) {
+    ipcRenderer.send(IPC.executorChannel, { daemonId: String(daemonId), generation: Number(generation) });
   },
   onExecutorOutbound(listener) {
     return subscribe<DesktopExecutorOutbound>(IPC.executorOutbound, listener);

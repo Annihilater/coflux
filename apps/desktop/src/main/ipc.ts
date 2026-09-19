@@ -2,8 +2,12 @@ import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
 import type {
   DesktopDaemonState,
+  DesktopExecutorCatalog,
   DesktopExecutorInbound,
+  DesktopExecutorSaveInput,
+  DesktopExecutorSaveResult,
   DesktopExecutorSettings,
+  DesktopExecutorTestResult,
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
@@ -11,9 +15,9 @@ import { IPC, type Bootstrap } from "../shared/ipc";
 import {
   sanitizeBadgeCount,
   sanitizeClipboardText,
-  sanitizeExecutorApiKey,
+  sanitizeExecutorChannel,
   sanitizeExecutorInbound,
-  sanitizeExecutorModel,
+  sanitizeExecutorSave,
   sanitizeNotification,
   sanitizeSessionToken,
 } from "./ipc-sanitize";
@@ -46,13 +50,15 @@ export type IpcActions = {
   daemonRemove: () => void;
   daemonOpenFdaGuide: () => void;
   daemonDismissError: () => void;
-  /** executor（plan 116）：渲染层只当信使，作业表与凭证都在主进程 */
+  /** executor（plan 116 / 20260918）：渲染层只当信使与设置面，作业表与凭据都在主进程。
+   * 凭据是单向的——保存时可以往里送，任何一条回程都不含凭据。 */
   getExecutorSettings: () => DesktopExecutorSettings;
-  setExecutorModel: (provider: string, modelId: string) => void;
-  setExecutorApiKey: (apiKey: string) => void;
+  getExecutorCatalog: () => Promise<DesktopExecutorCatalog>;
+  saveExecutorSettings: (input: DesktopExecutorSaveInput) => Promise<DesktopExecutorSaveResult>;
+  testExecutorConnection: () => Promise<DesktopExecutorTestResult>;
   executorInbound: (message: DesktopExecutorInbound) => void;
-  /** 空串 = 本机 daemon 的 device 通道断了 */
-  executorChannel: (daemonId: string) => void;
+  /** daemonId 空串 = 本机 daemon 的 device 通道断了；generation 标识这一次连接 */
+  executorChannel: (daemonId: string, generation: number) => void;
 };
 
 /** 每条 IPC 都先校验发送方 frame 来源；不可信一律忽略。 */
@@ -149,16 +155,21 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
     return actions.getExecutorSettings();
   });
 
-  ipcMain.on(IPC.executorSetModel, (event, payload: unknown) => {
-    if (!isTrusted(event)) return;
-    const model = sanitizeExecutorModel(payload);
-    if (model) actions.setExecutorModel(model.provider, model.modelId);
+  ipcMain.handle(IPC.executorGetCatalog, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.getExecutorCatalog();
   });
 
-  ipcMain.on(IPC.executorSetApiKey, (event, payload: unknown) => {
-    if (!isTrusted(event)) return;
-    const key = sanitizeExecutorApiKey(payload);
-    if (key !== null) actions.setExecutorApiKey(key);
+  ipcMain.handle(IPC.executorSave, (event, payload: unknown) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    const input = sanitizeExecutorSave(payload);
+    if (!input) return Promise.resolve({ ok: false, error: "保存请求的形状不对，已忽略" } satisfies DesktopExecutorSaveResult);
+    return actions.saveExecutorSettings(input);
+  });
+
+  ipcMain.handle(IPC.executorTest, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.testExecutorConnection();
   });
 
   ipcMain.on(IPC.executorInbound, (event, payload: unknown) => {
@@ -169,6 +180,7 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
 
   ipcMain.on(IPC.executorChannel, (event, payload: unknown) => {
     if (!isTrusted(event)) return;
-    if (typeof payload === "string" && payload.length <= 128) actions.executorChannel(payload);
+    const channel = sanitizeExecutorChannel(payload);
+    if (channel) actions.executorChannel(channel.daemonId, channel.generation);
   });
 }

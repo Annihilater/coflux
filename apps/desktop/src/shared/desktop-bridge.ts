@@ -140,31 +140,103 @@ export type DesktopBridge = {
   daemonOpenFdaGuide(): void;
   daemonDismissError(): void;
   /**
-   * executor（plan 116）。渲染层是**信使**不是决策者：作业表、写锁、runner 与凭证全在主进程，
-   * 它只负责把本机 daemon 的 device 通道两头接上，外加一个设置面。
-   * `getExecutorSettings` 永远不含 API key——只有 `hasApiKey` 这个布尔。
+   * executor（plan 116；配置改由账号持有见 plan 20260918）。渲染层是**信使与设置面**，不是决策者：
+   * 作业表、写锁、runner、模型运行时与凭据全在主进程。
+   *
+   * **凭据是单向的**：渲染层可以把用户刚输入的 key 交给主进程，但永远拿不回任何形式的凭据——
+   * `getExecutorSettings` 只有「哪些 provider 配过」，没有值，也没有密文。配置本身来自本机 daemon
+   * 写下的缓存文件，主进程直接读，不经这里。
    */
   getExecutorSettings(): Promise<DesktopExecutorSettings>;
   onExecutorSettings(listener: (settings: DesktopExecutorSettings) => void): () => void;
-  setExecutorModel(provider: string, modelId: string): void;
-  /** 空串 = 清除 */
-  setExecutorApiKey(apiKey: string): void;
+  /** 内置 provider + 用户自定义端点，以及可跨 provider 搜索的模型清单。 */
+  getExecutorCatalog(): Promise<DesktopExecutorCatalog>;
+  /** 保存：主进程先本机校验，再写中心，再等本机 daemon 把它取回来。 */
+  saveExecutorSettings(input: DesktopExecutorSaveInput): Promise<DesktopExecutorSaveResult>;
+  /** 真发一次最小请求确认联通；会花钱，所以只在用户显式点击时调。 */
+  testExecutorConnection(): Promise<DesktopExecutorTestResult>;
   /** device 通道收到 executor 帧时转进主进程 */
   sendExecutorInbound(message: DesktopExecutorInbound): void;
-  /** 本机 daemon 的 device 通道通了 / 断了；daemonId 为空串表示断开 */
-  setExecutorChannel(daemonId: string): void;
+  /**
+   * 本机 daemon 的 device 通道通了 / 断了；daemonId 为空串表示断开。
+   * `generation` 标识**这一次连接**：同一个 daemon 断开重连会换一个号，主进程据此重新报到——
+   * 只比 daemonId 的话，重连后 daemon 早已忘掉 host，agent 那头会看到「本机 Coflux.app 没在跑」。
+   */
+  setExecutorChannel(daemonId: string, generation: number): void;
   /** 主进程要往 device 通道发的帧 */
   onExecutorOutbound(listener: (message: DesktopExecutorOutbound) => void): () => void;
 };
 
-/** 渲染层可见的 executor 配置——刻意没有 apiKey 字段。 */
+/** 一个自定义端点的定义。**不含凭据**——它单独走 `apiKey` 字段，且只往主进程去。 */
+export type DesktopExecutorCustomProvider = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  api: string;
+  models: { id: string; name: string }[];
+  /** pi 的兼容开关：是否额外带 Authorization 头。 */
+  authHeader: boolean;
+  /** Ollama 这类本机 keyless 服务：不需要 key。 */
+  keyless: boolean;
+};
+
+/** 渲染层可见的 executor 配置——刻意没有任何凭据字段。 */
 export type DesktopExecutorSettings = {
   provider: string;
   modelId: string;
   hasApiKey: boolean;
   ready: boolean;
   reason: string;
+  /** false = 本机 daemon 还没把账号里的配置写下来（没在跑，或版本过旧）。 */
+  present: boolean;
+  /** 中心解不开已存密文时的可读原因。非空 ≠ 没配过。 */
+  credentialError: string;
+  customProviders: DesktopExecutorCustomProvider[];
+  /** 已有凭据的 provider id；只有 id。 */
+  credentialProviders: string[];
+  revision: number;
 };
+
+export type DesktopExecutorProviderOption = { id: string; name: string; custom: boolean; keyless: boolean };
+
+export type DesktopExecutorModelOption = {
+  provider: string;
+  providerName: string;
+  id: string;
+  name: string;
+  /** null = 未知。自定义端点手填的模型带的是占位元数据，不能当真实规格展示。 */
+  contextWindow: number | null;
+  /** 每百万 token 的输入/输出价格；未知同上。 */
+  cost: { input: number; output: number } | null;
+};
+
+export type DesktopExecutorCatalog = {
+  /** false = 模型运行时起不来，`error` 说明原因，设置页只能只读。 */
+  ready: boolean;
+  error: string;
+  providers: DesktopExecutorProviderOption[];
+  models: DesktopExecutorModelOption[];
+};
+
+export type DesktopExecutorSaveInput = {
+  provider: string;
+  modelId: string;
+  /** undefined = 不改动已存的 key；空串 = 清除。 */
+  apiKey?: string;
+  customProviders: (DesktopExecutorCustomProvider & { apiKey?: string })[];
+};
+
+export type DesktopExecutorSaveResult = {
+  ok: boolean;
+  /** 失败原因，按 provider 不存在 / 模型不存在 / 凭据没过 / 中心拒绝 / 离线分开说。 */
+  error?: string;
+  /** 成功时的一句「已校验」——不花钱的那部分校验通过了。 */
+  validated?: string;
+  /** 保存成功但下发没到位（daemon 太旧或不在线），或中心读不出旧密文。 */
+  warning?: string;
+};
+
+export type DesktopExecutorTestResult = { ok: boolean; error?: string; tokens?: number; ms?: number };
 
 export type DesktopExecutorInbound =
   | { kind: "assign"; runId: string; prompt: string; write: boolean; workspaceId: string; workspaceRoot: string; submittedAt: number }

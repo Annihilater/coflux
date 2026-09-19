@@ -36,11 +36,15 @@ export const IPC = {
    * 作业表与写锁的真相在主进程，渲染层不持有任何 run 状态。
    */
   executorGetSettings: "desktop:executor-get-settings",
-  executorSetModel: "desktop:executor-set-model",
-  executorSetApiKey: "desktop:executor-set-api-key",
+  /** 内置 provider + 自定义端点 + 可搜索的模型清单（来自主进程常驻的 ModelRuntime） */
+  executorGetCatalog: "desktop:executor-get-catalog",
+  /** 保存：本机校验 → 写中心 → 等本机 daemon 取回。凭据只朝主进程走，回程一个字节都没有 */
+  executorSave: "desktop:executor-save",
+  /** 「测试连接」：真发一次最小请求 */
+  executorTest: "desktop:executor-test",
   /** 渲染层 → 主进程：device 通道收到的 assign / cancel / registered / ack */
   executorInbound: "desktop:executor-inbound",
-  /** 渲染层 → 主进程：本机 daemon 的 device 通道可用 / 断开 */
+  /** 渲染层 → 主进程：本机 daemon 的 device 通道可用 / 断开，附本次连接的 generation */
   executorChannel: "desktop:executor-channel",
   /** 主进程 → 渲染层 */
   focusNotification: "desktop:focus-notification",

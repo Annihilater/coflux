@@ -146,6 +146,42 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
   };
 }
 
+/** The only credential shape this version stores. Matches pi's `ApiKeyCredential`; the `oauth`
+ * branch of its `Credential` union is next version's problem. Concrete rather than `unknown` on
+ * purpose: `CredentialStore.modify` is checked against pi's own signature, and a widened return
+ * type makes the store fail to satisfy it. */
+type MemoryCredential = { type: "api_key"; key: string };
+
+/**
+ * An in-memory `CredentialStore` for pi. `ModelRuntime.create` otherwise defaults to a file at
+ * `authPath`; handing it this makes "no credential reaches a disk from here" structural rather than
+ * a property of the code path currently taken. Persistence belongs to the daemon's cache file, and
+ * a second copy beside that 0600 plaintext would buy nothing.
+ */
+function memoryCredentialStore() {
+  const entries = new Map<string, MemoryCredential>();
+  return {
+    async read(providerId: string): Promise<MemoryCredential | undefined> {
+      return entries.get(providerId);
+    },
+    async list(): Promise<readonly { providerId: string; type: "api_key" }[]> {
+      return [...entries.keys()].map((providerId) => ({ providerId, type: "api_key" as const }));
+    },
+    async modify(
+      providerId: string,
+      fn: (current: MemoryCredential | undefined) => Promise<MemoryCredential | undefined>,
+    ): Promise<MemoryCredential | undefined> {
+      const next = await fn(entries.get(providerId));
+      if (next) entries.set(providerId, next);
+      else entries.delete(providerId);
+      return next;
+    },
+    async delete(providerId: string): Promise<void> {
+      entries.delete(providerId);
+    },
+  };
+}
+
 /** The files this task changed; the guard extension records them as it lets write/edit through. */
 const changedFiles = new Set<string>();
 
@@ -198,22 +234,55 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
    *     invisibly and without consent;
    *   - custom providers from the user's `models.json` would be loaded too, making the executor's set
    *     of models unpredictable.
-   * The cost: OpenAI-compatible endpoints with a custom base URL are unavailable in v1, and the model
-   * set is limited to what pi ships with.
+   * Custom endpoints are still available — they arrive in the start message and are registered at
+   * runtime below, so coflux's own configuration defines them rather than the user's `models.json`.
    */
   const runtime = await pi.ModelRuntime.create({
     allowModelNetwork: false,
+    // An in-memory credential store, not the default file at authPath: persistence is the daemon
+    // cache file's job, and a second copy beside it would buy nothing. `setRuntimeApiKey` is already
+    // a memory overlay, so this only makes "nothing is written" structural rather than incidental.
+    credentials: memoryCredentialStore(),
     authPath: `${agentDir}/auth.json`,
     modelsPath: `${agentDir}/models.json`,
     modelsStorePath: `${agentDir}/models-store.json`,
   });
+
+  /**
+   * Custom endpoints have to be registered **here too**. This runtime is a different object in a
+   * different process from the one the settings page browses; without this, an endpoint the user can
+   * select would fail at dispatch with "model unavailable".
+   *
+   * `registerProvider` receives no `apiKey` and no `headers`: pi resolves both as config values, so
+   * a value starting with `!` is executed as a shell command and `$` reads an environment variable.
+   * The configuration is account-shared, so that path is a way to run commands on every machine on
+   * the account. The credential goes in below, through `setRuntimeApiKey`, which returns it verbatim.
+   */
+  for (const provider of start.customProviders) {
+    runtime.registerProvider(provider.id, {
+      name: provider.name || provider.id,
+      baseUrl: provider.baseUrl,
+      api: provider.api,
+      authHeader: provider.authHeader,
+      models: provider.models.map((entry) => ({
+        id: entry.id,
+        name: entry.name || entry.id,
+        reasoning: false,
+        input: ["text"] as ("text" | "image")[],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      })),
+    });
+  }
+
   // Must be awaited: it is asynchronous and runs through an internal credential operation queue.
   // Without the await the first request can go out before the key is in place.
-  await runtime.setRuntimeApiKey(start.model.provider, start.apiKey);
+  if (start.apiKey) await runtime.setRuntimeApiKey(start.model.provider, start.apiKey);
 
   const model = runtime.getModel(start.model.provider, start.model.id);
   if (!model) {
-    throw new Error(`桌面配置里的模型不可用：${start.model.provider}/${start.model.id}`);
+    throw new Error(`账号配置里的模型不可用：${start.model.provider}/${start.model.id}`);
   }
 
   const guardExtension = {

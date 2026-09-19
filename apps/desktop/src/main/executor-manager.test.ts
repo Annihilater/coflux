@@ -25,6 +25,7 @@ const CONFIG: ExecutorConfigSnapshot = {
   provider: "anthropic",
   modelId: "claude-x",
   apiKey: "sk-secret",
+  customProviders: [],
   systemPrompt: "you are coflux executor",
   shell: "/bin/zsh",
 };
