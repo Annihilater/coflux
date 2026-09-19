@@ -23,6 +23,10 @@ struct ObservedInner {
     hook_states: HashMap<String, &'static str>,
     hook_messages: HashMap<String, String>,
     hook_progress: HashMap<String, String>,
+    /// The agent's own session id per coflux session (plan 20260919). It lives like
+    /// `hook_progress`, not like `hook_messages`: it identifies the session, so it must survive
+    /// every turn-state change and only disappear when the presence entry itself does.
+    hook_agent_sessions: HashMap<String, String>,
 }
 
 /// 一份待发送观测值，同时持有对应类型的 scan lane。调用方必须在 enqueue 完成并按结果
@@ -102,6 +106,17 @@ impl ObservedState {
         let mut inner = self.inner.lock().unwrap();
         inner.hook_states.insert(session_id.clone(), "question");
         inner.hook_messages.insert(session_id, message);
+    }
+
+    /// Record the agent's own session id. Independent of turn state: an event that carries only
+    /// an id (`SessionStart`) records it without touching state, and a state-bearing event that
+    /// carries none leaves the previously recorded id alone.
+    pub(crate) fn apply_agent_session_id(&self, session_id: String, agent_session_id: String) {
+        self.inner
+            .lock()
+            .unwrap()
+            .hook_agent_sessions
+            .insert(session_id, agent_session_id);
     }
 
     /// progress 是独立信道：不改变 state/message，只保留最新一条。
@@ -277,6 +292,9 @@ fn merge_annotations(
         inner
             .hook_progress
             .retain(|session_id, _| present.contains(session_id.as_str()));
+        inner
+            .hook_agent_sessions
+            .retain(|session_id, _| present.contains(session_id.as_str()));
     }
 
     for entry in &mut sessions {
@@ -288,6 +306,9 @@ fn merge_annotations(
         }
         if let Some(progress) = inner.hook_progress.get(&entry.session_id) {
             entry.progress = progress.clone();
+        }
+        if let Some(agent_session_id) = inner.hook_agent_sessions.get(&entry.session_id) {
+            entry.agent_session_id = agent_session_id.clone();
         }
     }
     sessions
@@ -316,6 +337,7 @@ mod tests {
             state: String::new(),
             message: String::new(),
             progress: String::new(),
+            agent_session_id: String::new(),
         }]
     }
 
@@ -375,6 +397,40 @@ mod tests {
         assert!(returned.sessions[0].state.is_empty());
         assert!(returned.sessions[0].message.is_empty());
         assert!(returned.sessions[0].progress.is_empty());
+    }
+
+    /// The agent session id lives like `progress`, not like `message`: a turn-state change must
+    /// not evaporate it (a Claude session keeps the same transcript across every Stop /
+    /// UserPromptSubmit), while the presence entry disappearing takes it with it.
+    #[test]
+    fn agent_session_id_跨_hook_事件存活且随条目剪枝() {
+        let observed = ObservedState::new();
+        observed.apply_agent_session_id("s1".into(), "6fd5b5f9-959b".into());
+
+        let first = observed
+            .commit_agents(agents("s1"), false)
+            .expect("新增 agent session id 应上报");
+        assert_eq!(first.sessions[0].agent_session_id, "6fd5b5f9-959b");
+
+        observed.apply_hook_state("s1".into(), "active");
+        let second = observed
+            .commit_agents(agents("s1"), false)
+            .expect("hook 变化应上报");
+        assert_eq!(second.sessions[0].state, "active");
+        assert_eq!(second.sessions[0].agent_session_id, "6fd5b5f9-959b");
+
+        // `/clear` 换了新会话：只有 id 变了，state 不动——比较必须看得见这一次变化。
+        observed.apply_agent_session_id("s1".into(), "aaaabbbb-cccc".into());
+        let third = observed
+            .commit_agents(agents("s1"), false)
+            .expect("只有 id 变也应上报");
+        assert_eq!(third.sessions[0].agent_session_id, "aaaabbbb-cccc");
+
+        assert!(observed.commit_agents(Vec::new(), false).is_some());
+        let returned = observed
+            .commit_agents(agents("s1"), false)
+            .expect("agent 再出现应上报");
+        assert!(returned.sessions[0].agent_session_id.is_empty());
     }
 
     #[tokio::test]

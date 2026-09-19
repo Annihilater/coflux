@@ -17,6 +17,8 @@ import {
   type TerminalControlState,
 } from "@/components/workbench/terminal-control-state";
 import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
+import { TerminalPaper } from "@/components/workbench/terminal-paper";
+import type { TranscriptAgent, TranscriptExec } from "@/components/workbench/terminal-transcript";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
@@ -53,6 +55,12 @@ type TerminalPaneProps = {
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   onOutput: (taskId: string, sessionId: string) => void;
+  /** 会话纸面（plan 20260919）：这个终端里跑着的 agent，null = 没有 agent，不出按钮。 */
+  transcriptAgent: TranscriptAgent | null;
+  /** agent 自己的会话标识，已校验过形状；null = 旧 worker / 还没上报，同样不出按钮。 */
+  agentSessionId: string | null;
+  /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
+  execInWorkspace: TranscriptExec;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -164,6 +172,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const commandsRef = useRef<TerminalCommandNavigation | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [paperOpen, setPaperOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
   // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
@@ -804,8 +813,10 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里
   // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  // 纸面展开时整个终端被盖住：⌘F 查找与命令导航此刻都作用在一个看不见的终端上，
+  // 而查找框还会和纸面的按钮抢同一个角，所以整条一并让开。
   useEffect(() => {
-    if (!props.active) return;
+    if (!props.active || paperOpen) return;
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (event.code === "KeyF") {
@@ -823,6 +834,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [props.active, paperOpen]);
+
+  // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
+  useEffect(() => {
+    if (!props.active) setPaperOpen(false);
   }, [props.active]);
 
   // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
@@ -936,6 +952,20 @@ export function TerminalPane(props: TerminalPaneProps) {
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
           松开上传
         </div>
+      ) : null}
+      {/* 会话纸面（plan 20260919）：有 agent 且拿到了它自己的会话标识才出现。排在最后 =
+          文档顺序最晚，与顶栏拖拽区的合成规则（见 drag-region.ts）同向，不会被后来的区域填回去。 */}
+      {props.transcriptAgent && props.agentSessionId ? (
+        <TerminalPaper
+          agent={props.transcriptAgent}
+          agentSessionId={props.agentSessionId}
+          workspaceId={props.workspaceId}
+          exec={props.execInWorkspace}
+          open={paperOpen}
+          onOpenChange={setPaperOpen}
+          buttonHidden={searchOpen}
+          onRestoreFocus={() => terminalRef.current?.focus()}
+        />
       ) : null}
     </div>
   );

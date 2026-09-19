@@ -115,6 +115,8 @@ const MAX_AGENT_NAME_BYTES = 64;
 const MAX_RETIRED_RESYNC_OWNERS = 16;
 /** notify 留言的字节兜底（worker 已按字符钳过，这里防伪造/畸形上报） */
 const MAX_AGENT_MESSAGE_BYTES = 1024;
+/** agent 自己的会话标识上限（plan 20260919）：与 worker 侧 MAX_AGENT_SESSION_ID_BYTES 同值。 */
+const MAX_AGENT_SESSION_ID_BYTES = 128;
 /** daemon 宣告的能力名（plan 091）：条数/单条字节上限，超限整条握手拒绝（同其它握手字段）。 */
 const MAX_CAPABILITY_ENTRIES = 32;
 const MAX_CAPABILITY_BYTES = 64;
@@ -177,6 +179,9 @@ interface SessionAgentData {
   message: string;
   /** `coflux progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，纯展示 */
   progress: string;
+  /** agent 自己的会话标识（plan 20260919）：客户端据此定位 transcript 文件。空 = 旧 worker 或
+   * 未上报。中心只做保守形状校验后原样转发，不解释、不落库。 */
+  agentSessionId: string;
 }
 
 interface DaemonResyncAuthority {
@@ -1760,7 +1765,9 @@ export class Hub {
       if (!matchesKnownSession) continue;
       const message = Buffer.byteLength(entry.message) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.message;
       const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress });
+      // 形状不对就当没有（第二道防线；第一道是「id 永远作为独立 argv 传递」，见 plan 20260919）。
+      const agentSessionId = validAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : "";
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId });
     }
     const previous = this.sessionAgents.get(daemonId);
     const unchanged =
@@ -1773,7 +1780,9 @@ export class Hub {
           p.agent === valid[i]!.agent &&
           p.state === valid[i]!.state &&
           p.message === valid[i]!.message &&
-          p.progress === valid[i]!.progress,
+          p.progress === valid[i]!.progress &&
+          // 漏掉这条，Claude `/clear`（state 不变、只换 session）就永远不会重播。
+          p.agentSessionId === valid[i]!.agentSessionId,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
@@ -4424,6 +4433,13 @@ function parseOperationMetadata(value: string): Record<string, unknown> | undefi
 function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** agent 自己的会话标识（plan 20260919）：保守字符集 + 长度，与 worker 侧同口径。
+ * 中心从不把它拼进任何命令；这道校验只是不让畸形值扩散到客户端。 */
+function validAgentSessionId(value: string | undefined): boolean {
+  // 形参刻意收 undefined：旧 daemon 的消息里这个字段根本不存在，类型上却仍写着 string。
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_AGENT_SESSION_ID_BYTES && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
 function validControlId(value: string): boolean {

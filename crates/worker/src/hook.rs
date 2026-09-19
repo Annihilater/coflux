@@ -57,6 +57,9 @@ pub struct HookRequest {
     pub background_tasks: u32,
     pub pid: i32,
     pub ppid: i32,
+    /// The agent's own session identifier, already validated (plan 20260919). `None` means the
+    /// messenger sent nothing usable — never a reason to drop the event itself.
+    pub agent_session_id: Option<String>,
     pub respond: oneshot::Sender<HookOutcome>,
 }
 
@@ -115,6 +118,41 @@ struct HookBody {
     /// 信使从 Stop/SubagentStop payload 数出的在飞后台工作条数（旧信使不发 = 0）
     #[serde(default)]
     background_tasks: u32,
+    /// The agent's own session id, forwarded verbatim by the messenger (claude `session_id`,
+    /// codex `thread-id`). Deliberately typed as a free-form JSON value: the CLI copies whatever
+    /// the agent put there (`commands.rs`, `session.clone()`), and a non-string must **not** make
+    /// the whole body fail to deserialize — that would 400 the request and lose the presence
+    /// event, which is far worse than a missing transcript id. Validated by
+    /// [`sanitize_agent_session_id`] instead.
+    #[serde(default)]
+    agent_session_id: serde_json::Value,
+}
+
+/// The agent session id's upper bound. Claude ships a UUID (36 bytes) and Codex a ULID-ish
+/// string; 128 leaves generous room while keeping the value obviously bounded.
+const MAX_AGENT_SESSION_ID_BYTES: usize = 128;
+
+/// Second line of defence for the agent session id (the first one is positional: every call site
+/// passes the id as its own argv entry, never interpolated into command text). Anything that is
+/// not a plain, bounded identifier yields `None` = "no id", and the event carrying it is still
+/// processed normally.
+pub fn sanitize_agent_session_id(value: &serde_json::Value) -> Option<String> {
+    let text = value.as_str()?;
+    if text.is_empty() || text.len() > MAX_AGENT_SESSION_ID_BYTES {
+        return None;
+    }
+    if !text
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    // A leading dot would make the id look like a relative path component; refuse outright
+    // rather than reasoning about what a consumer might do with it.
+    if text.starts_with('.') {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// 处理一条已被 gateway 判定为 `POST ` 开头的连接：解析请求 → 转交消费任务 → 等结果 → 应答。
@@ -204,7 +242,14 @@ async fn handle(
 
     let parsed: HookBody = serde_json::from_slice(raw)
         .map_err(|error| RequestError::BadRequest(format!("body JSON: {error}")))?;
-    if event_state(&parsed.event, &parsed.notification, parsed.background_tasks).is_none() {
+    let agent_session_id = sanitize_agent_session_id(&parsed.agent_session_id);
+    // Two independent reasons to forward: the event carries turn state, or it carries the agent's
+    // session id. `SessionStart` is exactly the second case — the transcript exists from that
+    // moment on, so waiting for the first state-bearing event would keep the paper button hidden
+    // through a whole first turn.
+    if event_state(&parsed.event, &parsed.notification, parsed.background_tasks).is_none()
+        && agent_session_id.is_none()
+    {
         return Ok(hook_response(HookOutcome::Ignored));
     }
     let (respond, outcome_rx) = oneshot::channel();
@@ -215,6 +260,7 @@ async fn handle(
         background_tasks: parsed.background_tasks,
         pid: parsed.pid,
         ppid: parsed.ppid,
+        agent_session_id,
         respond,
     };
     endpoints
@@ -553,6 +599,41 @@ mod tests {
             Some("question")
         );
         assert_eq!(event_state("SessionStart", "", 2), None);
+    }
+
+    /// A malformed id must degrade to "no id", and — crucially — it must not be able to make the
+    /// body itself unparsable: the messenger forwards the agent's raw JSON value, so a number or
+    /// an object has to survive deserialization and simply lose the id.
+    #[test]
+    fn agent_session_id_is_validated_without_dropping_the_event() {
+        let ok = serde_json::json!("6fd5b5f9-959b-4845-91b8-e2f6cefc1a51");
+        assert_eq!(
+            sanitize_agent_session_id(&ok).as_deref(),
+            Some("6fd5b5f9-959b-4845-91b8-e2f6cefc1a51")
+        );
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!(42),
+            serde_json::json!({ "id": "x" }),
+            serde_json::json!(""),
+            serde_json::json!("a/b"),
+            serde_json::json!("../../etc/passwd"),
+            serde_json::json!("id with space"),
+            serde_json::json!("$(whoami)"),
+            serde_json::json!("x".repeat(MAX_AGENT_SESSION_ID_BYTES + 1)),
+        ] {
+            assert_eq!(sanitize_agent_session_id(&bad), None, "should reject {bad}");
+        }
+
+        // The whole body still deserializes when the field is a non-string, and the surviving
+        // fields still drive presence.
+        let raw = br#"{"agent":"claude","event":"Stop","pid":1,"agentSessionId":{"unexpected":true}}"#;
+        let parsed: HookBody = serde_json::from_slice(raw).expect("body must still parse");
+        assert_eq!(parsed.event, "Stop");
+        assert_eq!(sanitize_agent_session_id(&parsed.agent_session_id), None);
+        let missing = br#"{"agent":"claude","event":"Stop","pid":1}"#;
+        let parsed: HookBody = serde_json::from_slice(missing).expect("absent field is fine");
+        assert_eq!(sanitize_agent_session_id(&parsed.agent_session_id), None);
     }
 
     #[test]

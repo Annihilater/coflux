@@ -149,6 +149,13 @@ pub struct SessionAgentRef {
     /// progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
     #[prost(string, tag="6")]
     pub progress: ::prost::alloc::string::String,
+    /// agent 自己的会话标识（claude 的 session_id / codex 的 thread-id），由 hook 信使上报
+    /// （plan 20260919）。用途只有一个：客户端据此定位该 agent 的 transcript 文件，把整段对话
+    /// 当作可复制的"纸面"展开。worker 侧按保守字符集 + 长度校验后才放行，非法值一律按"没有 id"
+    /// 处理（但绝不因此丢掉承载它的 hook 事件）。生命周期同 progress——跨 hook 事件存活，
+    /// 随条目消失一起清掉；旧 worker 不发 = 空串 = 该终端没有纸面可看。
+    #[prost(string, tag="7")]
+    pub agent_session_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {

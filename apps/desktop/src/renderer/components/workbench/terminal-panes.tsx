@@ -1,8 +1,10 @@
+import { useStore } from "zustand";
 import type { Task } from "@coflux/protocol";
 import type { CofluxClient } from "@coflux/client";
 
 import { TerminalPane } from "@/components/workbench/terminal-pane";
 import type { TerminalAttach } from "@/components/workbench/terminal-attach";
+import { isUsableAgentSessionId, transcriptAgentOf } from "@/components/workbench/terminal-transcript";
 
 /**
  * 终端面板层（plan 104）：面板挂在 Workbench 层、按 task id 建立稳定身份，与工作区容器平级。
@@ -25,26 +27,39 @@ export function TerminalPanes({
   client: CofluxClient;
   attach: TerminalAttach;
 }) {
+  // 会话纸面（plan 20260919）的两个入参从 presence 来：终端里跑着哪个 agent、它自己的会话标识。
+  // 两者缺一按钮就不出现——每个普通 shell 角上挂一个永远点不动的灰按钮只是噪声。
+  const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+
   return (
     <div className="pointer-events-none relative col-start-1 row-start-2 min-h-0 min-w-0">
-      {tasks.map((task) => (
-        <TerminalPane
-          key={task.id}
-          taskId={task.id}
-          sessionId={task.sessionId ?? null}
-          workspaceId={task.workspaceId}
-          active={task.id === visibleTaskId}
-          controlState={attach.stateOf(task)}
-          registerSessionConsumer={client.registerSessionConsumer}
-          sendInput={client.sendInput}
-          sendResize={client.resizeSession}
-          sendFsWrite={client.sendFsWrite}
-          onReady={attach.handleTerminalReady}
-          onDispose={attach.handleTerminalDispose}
-          onSessionReady={attach.handleSessionReady}
-          onOutput={attach.handleOutput}
-        />
-      ))}
+      {tasks.map((task) => {
+        const entry = task.sessionId ? sessionAgents[task.sessionId] : undefined;
+        // 旧 worker、以及旧离线缓存里恢复出来的条目都没有这个字段——别信 TS 上那个 string。
+        const transcriptAgent = entry ? transcriptAgentOf(entry.agent) : null;
+        const agentSessionId = entry && isUsableAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : null;
+        return (
+          <TerminalPane
+            key={task.id}
+            taskId={task.id}
+            sessionId={task.sessionId ?? null}
+            workspaceId={task.workspaceId}
+            active={task.id === visibleTaskId}
+            controlState={attach.stateOf(task)}
+            registerSessionConsumer={client.registerSessionConsumer}
+            sendInput={client.sendInput}
+            sendResize={client.resizeSession}
+            sendFsWrite={client.sendFsWrite}
+            onReady={attach.handleTerminalReady}
+            onDispose={attach.handleTerminalDispose}
+            onSessionReady={attach.handleSessionReady}
+            onOutput={attach.handleOutput}
+            transcriptAgent={transcriptAgent}
+            agentSessionId={agentSessionId}
+            execInWorkspace={client.execInWorkspace}
+          />
+        );
+      })}
     </div>
   );
 }

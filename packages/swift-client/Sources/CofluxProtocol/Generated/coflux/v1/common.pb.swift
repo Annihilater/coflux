@@ -344,6 +344,13 @@ public struct Coflux_V1_SessionAgentRef: Sendable {
   /// progress 覆盖，agent 条目消失时随条目清掉。纯展示、不落库；长度由 worker 侧钳制。
   public var progress: String = String()
 
+  /// agent 自己的会话标识（claude 的 session_id / codex 的 thread-id），由 hook 信使上报
+  /// （plan 20260919）。用途只有一个：客户端据此定位该 agent 的 transcript 文件，把整段对话
+  /// 当作可复制的"纸面"展开。worker 侧按保守字符集 + 长度校验后才放行，非法值一律按"没有 id"
+  /// 处理（但绝不因此丢掉承载它的 hook 事件）。生命周期同 progress——跨 hook 事件存活，
+  /// 随条目消失一起清掉；旧 worker 不发 = 空串 = 该终端没有纸面可看。
+  public var agentSessionID: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1008,7 +1015,7 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0\u{3}agent_session_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1022,6 +1029,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 4: try { try decoder.decodeSingularStringField(value: &self.state) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.message) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.progress) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.agentSessionID) }()
       default: break
       }
     }
@@ -1046,6 +1054,9 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if !self.progress.isEmpty {
       try visitor.visitSingularStringField(value: self.progress, fieldNumber: 6)
     }
+    if !self.agentSessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.agentSessionID, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1056,6 +1067,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.state != rhs.state {return false}
     if lhs.message != rhs.message {return false}
     if lhs.progress != rhs.progress {return false}
+    if lhs.agentSessionID != rhs.agentSessionID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
