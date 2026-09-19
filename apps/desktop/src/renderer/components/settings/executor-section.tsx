@@ -11,7 +11,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Typeahead, TypeaheadItem } from "@astryxdesign/core/Typeahead";
 
-import { SettingsGroup, SettingsRow } from "@/components/settings/settings-group";
+import { SETTINGS_ROW_PADDING, SettingsGroup, SettingsRow } from "@/components/settings/settings-group";
 import { ExecutorEndpointDialog, type ExecutorEndpointDraft } from "@/components/settings/executor-endpoint-dialog";
 import {
   describeModelSpec,
@@ -324,7 +324,7 @@ export function ExecutorSection({ bridge, client }: { bridge: DesktopBridge; cli
                     onClick={() => setDialog({ open: true, editing: entry })}
                   />
                 }
-                className="px-4 py-1"
+                className={SETTINGS_ROW_PADDING}
               />
             ))}
             <ListItem
@@ -339,7 +339,7 @@ export function ExecutorSection({ bridge, client }: { bridge: DesktopBridge; cli
                   onClick={() => setDialog({ open: true, editing: null })}
                 />
               }
-              className="px-4 py-1"
+              className={SETTINGS_ROW_PADDING}
             />
           </List>
         </Card>

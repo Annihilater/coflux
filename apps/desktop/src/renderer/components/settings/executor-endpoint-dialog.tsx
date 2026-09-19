@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
-import { HStack, VStack } from "@astryxdesign/core/Layout";
+import { HStack, Layout, LayoutContent, VStack } from "@astryxdesign/core/Layout";
 import { Selector } from "@astryxdesign/core/Selector";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Switch } from "@astryxdesign/core/Switch";
@@ -10,6 +10,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 
+import { DialogFooterActions } from "@/components/dialog-footer";
 import type { DesktopExecutorCustomProvider } from "@/desktop-bridge";
 
 /** 本版暴露的四种 API 形态。pi 的 KnownApi 共十种，其余不暴露——它们要么需要更多配置项
@@ -44,6 +45,9 @@ type Props = {
  *
  * 模型 id 手填，一行一个：中转站没有统一的模型清单接口，能问出来的那部分也未必准。手填的模型没有真实
  * 规格，所以设置页对它们一律显示「未知」，不把我们自己编的占位值当事实展示。
+ *
+ * 结构照其余弹窗：Dialog > Layout(header/content/footer)。不要退回「padding={0} + 自己排版」——
+ * 那样 header 也会跟着丢掉内边距，标题会顶到 dialog 上沿被裁掉。
  */
 export function ExecutorEndpointDialog(props: Props) {
   const [id, setId] = useState("");
@@ -54,6 +58,8 @@ export function ExecutorEndpointDialog(props: Props) {
   const [apiKey, setApiKey] = useState("");
   const [authHeader, setAuthHeader] = useState(false);
   const [keyless, setKeyless] = useState(false);
+  /** 动过表单才提示缺项：一打开就挂个黄点说「给这个端点起一个 id」，是在报用户还没来得及犯的错。 */
+  const [touched, setTouched] = useState(false);
 
   // 每次打开都从入参重建：对话框是长期挂载的，不重建会把上一次编辑的残留带进新增。
   useEffect(() => {
@@ -67,6 +73,7 @@ export function ExecutorEndpointDialog(props: Props) {
     setApiKey("");
     setAuthHeader(editing?.authHeader ?? false);
     setKeyless(editing?.keyless ?? false);
+    setTouched(false);
   }, [props.open, props.editing]);
 
   const trimmedId = id.trim();
@@ -87,8 +94,19 @@ export function ExecutorEndpointDialog(props: Props) {
             ? "至少填一个模型 id"
             : "";
 
+  /** 每个字段的 onChange 都过这里：改过一次之后缺项提示才出来。 */
+  function edit<T>(set: (next: T) => void) {
+    return (next: T) => {
+      setTouched(true);
+      set(next);
+    };
+  }
+
   function save() {
-    if (error) return;
+    if (error) {
+      setTouched(true);
+      return;
+    }
     props.onSave({
       id: trimmedId,
       name: name.trim() || trimmedId,
@@ -104,71 +122,127 @@ export function ExecutorEndpointDialog(props: Props) {
   }
 
   return (
-    <Dialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={520} padding={0}>
-      <DialogHeader title={props.editing ? "编辑端点" : "添加端点"} onOpenChange={props.onOpenChange} />
-      <VStack gap={3} hAlign="stretch" padding={4}>
-        <HStack gap={3} vAlign="start">
-          <TextInput
-            label="id"
-            value={id}
-            onChange={setId}
-            placeholder="my-relay"
-            isDisabled={!!props.editing}
-            description={props.editing ? "已创建的端点不改 id" : "选模型时按它标识这个端点"}
-            width="100%"
+    <Dialog isOpen={props.open} onOpenChange={props.onOpenChange} purpose="form" width={520}>
+      <Layout
+        header={
+          <DialogHeader
+            title={props.editing ? "编辑端点" : "添加端点"}
+            subtitle="中转站、Ollama，或任何 OpenAI / Anthropic / Google 兼容的端点。"
+            onOpenChange={props.onOpenChange}
+            hasDivider={false}
           />
-          <TextInput label="名称" value={name} onChange={setName} placeholder="My relay" width="100%" />
-        </HStack>
-        <TextInput label="Base URL" value={baseUrl} onChange={setBaseUrl} placeholder="https://example.com/v1" width="100%" />
-        <Selector label="API 形态" options={API_OPTIONS} value={api} onChange={(next) => setApi(next || "openai-completions")} width="100%" />
-        <TextArea
-          label="模型 id"
-          value={models}
-          onChange={setModels}
-          placeholder={"gpt-4o\nclaude-sonnet-4"}
-          description="一行一个。中转站没有统一的模型清单接口，所以这里手填；手填的模型不显示上下文窗口与价格。"
-          rows={4}
-        />
-        <TextInput
-          label="API key"
-          type="password"
-          value={apiKey}
-          onChange={setApiKey}
-          isDisabled={keyless}
-          placeholder={keyless ? "这个端点不需要 key" : props.hasApiKey ? "已保存（留空则不改动）" : "粘贴 API key"}
-        />
-        <Collapsible trigger="高级" defaultIsOpen={false}>
-          <VStack gap={3} hAlign="stretch" padding={2}>
-            <Switch
-              label="额外带 Authorization 头"
-              description="少数中转站除了 API key 还要一个显式的 Authorization 头才认。不确定就别开。"
-              value={authHeader}
-              onChange={setAuthHeader}
-              labelPosition="start"
-              labelSpacing="spread"
-            />
-            <Switch
-              label="这个端点不需要 key"
-              description="Ollama 这类本机服务用。开了之后桌面会自己补一个占位凭据，你不必填。"
-              value={keyless}
-              onChange={setKeyless}
-              labelPosition="start"
-              labelSpacing="spread"
-            />
-          </VStack>
-        </Collapsible>
-        {error ? (
-          <HStack gap={2} vAlign="center">
-            <StatusDot variant="warning" label="还差一项" />
-            <Text type="supporting">{error}</Text>
-          </HStack>
-        ) : null}
-        <HStack gap={2} vAlign="center" hAlign="end">
-          {props.onRemove ? <Button label="删除" variant="ghost" size="sm" onClick={() => { props.onRemove?.(); props.onOpenChange(false); }} /> : null}
-          <Button label="取消" variant="ghost" size="sm" onClick={() => props.onOpenChange(false)} />
-          <Button label="保存端点" variant="primary" size="sm" isDisabled={!!error} onClick={save} />
-        </HStack>
-      </VStack>
+        }
+        content={
+          <LayoutContent>
+            {/* 单行输入里按 Enter 即保存；TextArea 的 Enter 仍然是换行（原生不隐式提交）。 */}
+            <form
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                event.preventDefault();
+                save();
+              }}
+            >
+              <VStack gap={4} hAlign="stretch">
+                <HStack gap={3} vAlign="start">
+                  <TextInput
+                    label="id"
+                    value={id}
+                    onChange={edit(setId)}
+                    placeholder="my-relay"
+                    isDisabled={!!props.editing}
+                    description={props.editing ? "已创建的端点不改 id" : "选模型时按它标识这个端点"}
+                    width="100%"
+                  />
+                  <TextInput
+                    label="名称"
+                    value={name}
+                    onChange={edit(setName)}
+                    placeholder="My relay"
+                    description="设置页里显示的名字，留空就用 id"
+                    width="100%"
+                  />
+                </HStack>
+                <TextInput
+                  label="Base URL"
+                  value={baseUrl}
+                  onChange={edit(setBaseUrl)}
+                  placeholder="https://example.com/v1"
+                  width="100%"
+                />
+                <Selector
+                  label="API 形态"
+                  options={API_OPTIONS}
+                  value={api}
+                  onChange={edit((next: string | null) => setApi(next || "openai-completions"))}
+                  width="100%"
+                />
+                <TextArea
+                  label="模型 id"
+                  value={models}
+                  onChange={edit(setModels)}
+                  placeholder={"gpt-4o\nclaude-sonnet-4"}
+                  description="一行一个。中转站没有统一的模型清单接口，所以这里手填；手填的模型不显示上下文窗口与价格。"
+                  rows={4}
+                />
+                <TextInput
+                  label="API key"
+                  type="password"
+                  value={apiKey}
+                  onChange={edit(setApiKey)}
+                  isDisabled={keyless}
+                  placeholder={keyless ? "这个端点不需要 key" : props.hasApiKey ? "已保存（留空则不改动）" : "粘贴 API key"}
+                  width="100%"
+                />
+                <Collapsible trigger="高级" defaultIsOpen={false}>
+                  <VStack gap={3} hAlign="stretch" padding={2}>
+                    <Switch
+                      label="额外带 Authorization 头"
+                      description="少数中转站除了 API key 还要一个显式的 Authorization 头才认。不确定就别开。"
+                      value={authHeader}
+                      onChange={edit(setAuthHeader)}
+                      labelPosition="start"
+                      labelSpacing="spread"
+                    />
+                    <Switch
+                      label="这个端点不需要 key"
+                      description="Ollama 这类本机服务用。开了之后桌面会自己补一个占位凭据，你不必填。"
+                      value={keyless}
+                      onChange={edit(setKeyless)}
+                      labelPosition="start"
+                      labelSpacing="spread"
+                    />
+                  </VStack>
+                </Collapsible>
+                {touched && error ? (
+                  <HStack gap={2} vAlign="center">
+                    <StatusDot variant="warning" label="还差一项" />
+                    <Text type="supporting">{error}</Text>
+                  </HStack>
+                ) : null}
+              </VStack>
+              <button type="submit" hidden />
+            </form>
+          </LayoutContent>
+        }
+        footer={
+          <DialogFooterActions
+            onCancel={() => props.onOpenChange(false)}
+            startContent={
+              props.onRemove ? (
+                <Button
+                  label="删除"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    props.onRemove?.();
+                    props.onOpenChange(false);
+                  }}
+                />
+              ) : undefined
+            }
+            action={{ label: "保存端点", onClick: save, isDisabled: !!error }}
+          />
+        }
+      />
     </Dialog>
   );
 }
