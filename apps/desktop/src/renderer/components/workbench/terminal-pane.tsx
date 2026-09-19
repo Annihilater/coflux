@@ -17,8 +17,11 @@ import {
   type TerminalControlState,
 } from "@/components/workbench/terminal-control-state";
 import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
+import { TerminalPaper } from "@/components/workbench/terminal-paper";
+import type { TranscriptAgent, TranscriptExec } from "@/components/workbench/terminal-transcript";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
+import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
 import { shouldOpenTerminalLink } from "@/components/workbench/terminal-link-activation";
 import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
@@ -52,6 +55,12 @@ type TerminalPaneProps = {
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   onOutput: (taskId: string, sessionId: string) => void;
+  /** 会话纸面（plan 20260919）：这个终端里跑着的 agent，null = 没有 agent，不出按钮。 */
+  transcriptAgent: TranscriptAgent | null;
+  /** agent 自己的会话标识，已校验过形状；null = 旧 worker / 还没上报，同样不出按钮。 */
+  agentSessionId: string | null;
+  /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
+  execInWorkspace: TranscriptExec;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -59,6 +68,11 @@ const PASTE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const PASTE_MIN_DIMENSION = 64; // 降分辨率的下限：避免退化成不可读的一两个像素
 // 拖拽文件上传上限须与 server maxPayload、worker MAX_WRITE_BYTES 同为 30MB；任一偏小都会让前端放行后被下游拒绝。
 const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+
+/** 终端纸面色：既喂给 xterm 主题的 background，也在 open() 之后直接刷到 .xterm-viewport 上。
+ * 与 index.css 的 --terminal 同值——xterm 主题只吃 #RRGGBB、读不了 CSS 变量，所以这里留一份常量，
+ * 别把字面量写第二遍。 */
+const TERMINAL_PAPER = "#0a0a0a";
 
 /** ⌘F 查找的高亮：颜色只接受 #RRGGBB，取自上面的终端主题。开着 decorations 才有
  * onDidChangeResults（命中计数），所以它不是纯装饰。 */
@@ -158,6 +172,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const commandsRef = useRef<TerminalCommandNavigation | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [paperOpen, setPaperOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
   // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
@@ -239,7 +254,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       // 面对一个「忘了这回事」的终端，协议级模式持久化不在本 plan 范围内。
       vtExtensions: { kittyKeyboard: true },
       theme: {
-        background: "#0a0a0a",
+        background: TERMINAL_PAPER,
         foreground: "#e4e4e4",
         cursor: "#e4e4e4",
         selectionBackground: "#3a3a3a88",
@@ -253,6 +268,18 @@ export function TerminalPane(props: TerminalPaneProps) {
         cyan: "#56b6c2",
         white: "#d4d4d4",
       },
+    });
+    // ⌘ 组合键归应用、不归终端（plan 20260918）：判定与全部理由在 terminal-key-ownership.ts，
+    // 这里只照判定让开。让开的方式只有一个——返回 false，xterm 会在 _keyDown 的第一句就 return，
+    // kitty 编码器不跑、事件也没被页面消费掉，于是原样回到浏览器，原生菜单的 accelerator 才匹配得上；
+    // handler 里绝不能对事件做任何拦截动作，那等于把菜单重新饿死。返回值要严格是 false
+    // （xterm 按 === false 判断），落成 undefined 就是「没让开」，bug 照旧。
+    // terminal.reset() 会把 handler 带过内部重建，gap 恢复后不必也不该重挂。
+    terminal.attachCustomKeyEventHandler((event) => {
+      const owner = decideTerminalKeyOwner(event);
+      if (owner === "terminal") return true;
+      if (owner === "select-all") terminal.selectAll();
+      return false;
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -344,9 +371,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     const paintCommand = (entry: CommandEntry) => {
       const element = entry.element;
       if (!element) return;
-      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 host 的 pl-3 内边距，当成 Cursor 那样的行首标记条。
+      // 装饰默认落在第 0 列上，会压住提示符本身；挪进 .xterm 的左内边距（12px），当成 Cursor 那样的行首标记块。
+      // 不碰 height：.xterm-decoration 是 absolute，包含块是 .xterm-screen（position: relative），
+      // 在这里写 100% 等于「整屏那么高」，几条命令叠起来就是左边一条假滚动条。
+      // xterm 的 BufferDecorationRenderer 在触发 onRender 之前已经把 height 设成了 (options.height || 1) * cell.height，
+      // 放着不动就正好一行，且自动跟随 dpr / 字号变化——这里只负责涂颜色、宽度和偏移。
       element.style.width = "3px";
-      element.style.height = "100%";
       element.style.marginLeft = "-9px";
       element.style.borderRadius = "2px";
       element.style.backgroundColor = COMMAND_COLORS[entry.state];
@@ -435,6 +465,15 @@ export function TerminalPane(props: TerminalPaneProps) {
     };
 
     terminal.open(host);
+    // .xterm-viewport 在上游样式表里被硬编码成纯黑（.xterm:not(.allow-transparency) .xterm-viewport { background-color: #000 }），
+    // 而运行时换色只刷 .xterm 和滚动容器、独独跳过 viewport——viewport 又是 absolute inset-0 盖在它俩上面。
+    // 于是渲染出来的行填不满容器的任何一刻（挂载中、fit 防抖窗口里、远端 resize 在途，或行高本来就除不尽容器高度），
+    // 底下都会漏出一条黑带。这里直接把纸面色写成内联样式，让那些余量退化成纸色的呼吸空间，
+    // 结果不再依赖行数算得像素级精确。必须是内联样式而不是 index.css 里的一条规则：
+    // xterm.css 由本文件 import、落在懒加载的 terminal-panes-*.css chunk 里，加载顺序在 index.css 之后，
+    // 两边都不在 @layer 里，而上游选择器是 (0,3,0)——两种自然写法一个输特异性、一个输顺序，且构建不会报警。
+    const viewport = terminal.element?.querySelector<HTMLElement>(".xterm-viewport");
+    if (viewport) viewport.style.backgroundColor = TERMINAL_PAPER;
     // 中文 IME 直接提交的补丁踩的是 xterm 私有内部结构，失效时会静默回落成上游 bug
     // （全角 ？！ 要连按两次），typecheck 与单测都看不出来——所以这里必须吵：控制台报错 + 终端里写一行。
     const imePatch = applyImeCommittedInputPatch((terminal as unknown as { _core?: XtermCoreInternals })._core);
@@ -774,8 +813,10 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // ⌘F / ⌘↑ / ⌘↓：挂在 window capture 阶段，只有可见面板响应。use-global-shortcuts 的纯 ⌘ 前缀里
   // 没有这几个键位，不会互相抢；这里要 preventDefault，否则组合键会被编码下发给远端 shell。
+  // 纸面展开时整个终端被盖住：⌘F 查找与命令导航此刻都作用在一个看不见的终端上，
+  // 而查找框还会和纸面的按钮抢同一个角，所以整条一并让开。
   useEffect(() => {
-    if (!props.active) return;
+    if (!props.active || paperOpen) return;
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (event.code === "KeyF") {
@@ -793,6 +834,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [props.active, paperOpen]);
+
+  // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
+  useEffect(() => {
+    if (!props.active) setPaperOpen(false);
   }, [props.active]);
 
   // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
@@ -851,8 +897,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       <ContextMenu label="终端操作" size="sm" menuWidth={220} items={contextMenuItems} onOpenChange={handleContextMenuOpenChange}>
         {/* absolute inset-0 而不是 h-full：铺满的是「最近的定位祖先」——触发区（position: relative）
             与外层容器（absolute inset-0）两者的盒子都正好是整格，谁来当这个祖先都一样大。
-            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。 */}
-        <div ref={hostRef} className={`absolute inset-0 pb-3 pl-3 pt-2${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
+            于是即便上面那条 grid 的推理哪天不成立、或者 ContextMenu 多包了一层，终端也不会塌成 0 高。
+            文字周围的内边距不在这里，而在 index.css 的 .xterm 上：FitAddon 量的是本元素的 computed height
+            （border-box，因为 Tailwind preflight 给了 box-sizing: border-box），只减 terminal.element 自己的
+            padding——padding 留在这一层会被当成可用空间多算出一行，末行被面板下沿切掉。 */}
+        <div ref={hostRef} className={`absolute inset-0${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       </ContextMenu>
       {searchOpen ? (
         <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
@@ -903,6 +952,20 @@ export function TerminalPane(props: TerminalPaneProps) {
         <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-lg border border-warning/20 bg-warning/10 text-sm font-medium text-warning backdrop-blur">
           松开上传
         </div>
+      ) : null}
+      {/* 会话纸面（plan 20260919）：有 agent 且拿到了它自己的会话标识才出现。排在最后 =
+          文档顺序最晚，与顶栏拖拽区的合成规则（见 drag-region.ts）同向，不会被后来的区域填回去。 */}
+      {props.transcriptAgent && props.agentSessionId ? (
+        <TerminalPaper
+          agent={props.transcriptAgent}
+          agentSessionId={props.agentSessionId}
+          workspaceId={props.workspaceId}
+          exec={props.execInWorkspace}
+          open={paperOpen}
+          onOpenChange={setPaperOpen}
+          buttonHidden={searchOpen}
+          onRestoreFocus={() => terminalRef.current?.focus()}
+        />
       ) : null}
     </div>
   );

@@ -470,14 +470,19 @@ async fn consume_hook_events(
     to_server_tx: Sender<WsOut>,
 ) {
     while let Some(request) = hook_rx.recv().await {
-        let Some(hook_state) = hook::event_state(
+        let hook_state = hook::event_state(
             &request.event,
             &request.notification,
             request.background_tasks,
-        ) else {
+        );
+        // An event is worth a pid lookup when it carries turn state **or** the agent's own
+        // session id. The second case is what makes `SessionStart` count: the transcript exists
+        // from then on, and gating the id behind a state-bearing event would hide the paper
+        // button for a whole first turn.
+        if hook_state.is_none() && request.agent_session_id.is_none() {
             let _ = request.respond.send(hook::HookOutcome::Ignored);
             continue;
-        };
+        }
         let alive = { state.lock().unwrap().alive.clone() };
         let (pid, ppid) = (request.pid, request.ppid);
         let session_id =
@@ -490,12 +495,27 @@ async fn consume_hook_events(
             continue;
         };
         logln!(
-            "[worker] hook event agent={} event={} notification={} bg={} state={hook_state} session={session_id}",
-            request.agent, request.event, request.notification, request.background_tasks
+            "[worker] hook event agent={} event={} notification={} bg={} state={} session={session_id}",
+            request.agent,
+            request.event,
+            request.notification,
+            request.background_tasks,
+            hook_state.unwrap_or("-")
         );
-        observed.apply_hook_state(session_id, hook_state);
+        if let Some(agent_session_id) = request.agent_session_id {
+            observed.apply_agent_session_id(session_id.clone(), agent_session_id);
+        }
+        if let Some(hook_state) = hook_state {
+            observed.apply_hook_state(session_id, hook_state);
+        }
         report_agents_if_changed(&state, &observed, &to_server_tx).await;
-        let _ = request.respond.send(hook::HookOutcome::Accepted);
+        // An id-only event changed nothing about the turn; say so, even though the messenger
+        // treats both answers the same way.
+        let _ = request.respond.send(if hook_state.is_some() {
+            hook::HookOutcome::Accepted
+        } else {
+            hook::HookOutcome::Ignored
+        });
     }
 }
 

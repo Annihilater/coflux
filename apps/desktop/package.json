@@ -1,6 +1,6 @@
 {
   "name": "@coflux/desktop",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "productName": "Coflux",
   "private": true,
   "description": "coflux 桌面客户端：Electron 主进程 + React/xterm 工作台渲染层",
@@ -52,6 +52,9 @@
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
     "shiki": "^4.3.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.2",

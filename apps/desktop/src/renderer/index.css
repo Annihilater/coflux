@@ -310,8 +310,15 @@ dialog button[aria-label="Close"] svg,
   background-clip: padding-box;
 }
 
+/* 文字周围的内边距归 .xterm，不归宿主容器：FitAddon 读的是宿主的 computed height/width
+   （box-sizing: border-box 下拿到的是 border-box 尺寸），再只减去 terminal.element 自己的 padding。
+   放在宿主上会被当成可用空间多算出一行/一列；放在这里 FitAddon 的减法才是对的，而且
+   .xterm-viewport 是相对 .xterm 的 padding box 定位（absolute inset-0），纸面色会一并盖住这圈内边距。
+   height: 100% + border-box 意味着加 padding 不改变外框高度，内容区自己会缩，别用 calc() 去补。
+   左边这 12px 同时是命令标记条（OSC 133）的栖身之处，terminal-pane.tsx 里按它算了 marginLeft: -9px。 */
 .xterm {
   height: 100%;
+  padding: 8px 0 12px 12px;
 }
 
 .xterm .xterm-screen canvas {
