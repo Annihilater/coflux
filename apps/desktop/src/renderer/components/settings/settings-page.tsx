@@ -174,7 +174,7 @@ export function SettingsPage(props: SettingsPageProps) {
                   <Text type="supporting">正在读取本机状态…</Text>
                 )
               ) : null}
-              {section.id === "executor" ? <ExecutorSection bridge={desktop} /> : null}
+              {section.id === "executor" ? <ExecutorSection bridge={desktop} client={props.client} /> : null}
             </VStack>
           </LayoutContent>
         }
