@@ -433,6 +433,19 @@ that part is verified by code review, not by hand.
 
 ## Maintenance notes
 
+- **Reversed after the walkthrough (2026-09-19): Markdown is now rendered.** The
+  decision above to show Markdown *source* verbatim — taken so that a copy gave
+  back the author's exact text — was overturned by the user once they saw the
+  page. Rendered headings, lists and code blocks read far better, and the
+  original pain point (Ink's hard newlines and indent prefixes) is solved either
+  way; what is lost is the `**`/`#` markers when pasting back into a Markdown
+  document. The same pass laid the page out as a conversation (the user's prompts
+  in bubbles, agent prose plain) and rewrote every user-facing string: the
+  original ones leaked this plan's own metaphor ("纸面", "把这段对话摊成一页")
+  and implementation detail (`CLAUDE_CONFIG_DIR`, "daemon 以后台服务运行") into
+  the product. **Lesson for future plans: prose written to explain a design to an
+  implementer is not product copy, and an executor will ship it as if it were.**
+  Name the UI strings explicitly, or say that they are yet to be written.
 - **Advisor review (2026-09-19) changed three things**, all folded in above: the
   walkthrough command was wrong (`pnpm dev:desktop:prod` cannot show this feature);
   "one new field, no other work" understated the four hand-written field lists on
