@@ -12,6 +12,10 @@ export const DAEMON_CAPABILITY_PREPARED_EXECUTE = "prepared_execute";
 export const DAEMON_CAPABILITY_TERMINAL_IO = "terminal_io";
 /** 认识 ServerExecRun：中心可在该设备上一次性执行一条 `sh -c` 命令（`coflux device exec`，不是终端）。 */
 export const DAEMON_CAPABILITY_DEVICE_EXEC = "device_exec";
+/** 认识 ExecutorSettingsUpdate：中心下发的 executor 模型配置会被落成本机缓存文件（plan 20260918）。
+ * 这条下发是 push、没有回执路径，所以门禁必须在**发送前**判定：不具备就不发，由桌面侧超时后给出
+ * 「本机 daemon 版本过旧」的可读提示。 */
+export const DAEMON_CAPABILITY_EXECUTOR_SETTINGS = "executor_settings_v1";
 
 /** 写 tool 在缺失能力时返回的可读错误；SKILL/文档里以「需要升级」一词指代它。 */
 export function daemonUpgradeRequired(deviceName: string): string {

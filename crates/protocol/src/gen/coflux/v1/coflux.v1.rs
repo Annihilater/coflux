@@ -2215,7 +2215,8 @@ pub struct DaemonAuth {
     /// 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
     /// 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
     /// `terminal_io`（认识 ServerAgentRequest 的读/写）、`device_exec`（认识 ServerExecRun，
-    /// 一次性跨设备执行）。新增控制消息时同步加能力名。
+    /// 一次性跨设备执行）、`executor_settings_v1`（认识 ExecutorSettingsUpdate，会把配置落成本机
+    /// 缓存文件）。新增控制消息时同步加能力名。
     #[prost(string, repeated, tag="5")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
@@ -3003,9 +3004,76 @@ pub struct PreparedDeviceOperationExecute {
     #[prost(string, tag="1")]
     pub operation_id: ::prost::alloc::string::String,
 }
+// ===== executor 模型配置下发（plan 20260918-executor-settings-central）=====
+//
+// 配置的真相源是中心的 executor_settings 表；这条消息是它到设备的唯一下发路径。daemon 收到后
+// 落成 $COFLUX_HOME 下权限 0600 的明文 JSON，同机的桌面主进程直接读那个文件。读路径因此永远不出
+// 本机：断网时 executor 照常能发任务，只有*修改*配置需要在线。
+//
+// 这是 push 而不是 request——没有回执路径。中心必须在下发前检查 `executor_settings_v1` 能力名：
+// 旧 worker 对未知 oneof 解出空 payload 后直接丢弃，症状是缓存文件永远不出现、桌面无限等待且
+// 没有任何可读原因。
+
+/// 一条凭据。本版只有 api_key；`type` 留着是为了下一版的 oauth 分支能原样扩进来。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutorCredential {
+    #[prost(string, tag="1")]
+    pub provider_id: ::prost::alloc::string::String,
+    /// "api_key"
+    #[prost(string, tag="2")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub api_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutorCustomProviderModel {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+/// 一个自定义端点。对 pi 来说它就是一个 provider，所以与内置 provider 共用同一个选择面。
+/// 这里**不含凭据**：凭据统一走 ExecutorCredential，按 provider_id 对应。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorCustomProvider {
+    #[prost(string, tag="1")]
+    pub provider_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub base_url: ::prost::alloc::string::String,
+    /// openai-completions | openai-responses | anthropic-messages | google-generative-ai
+    #[prost(string, tag="4")]
+    pub api: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="5")]
+    pub models: ::prost::alloc::vec::Vec<ExecutorCustomProviderModel>,
+    #[prost(bool, tag="6")]
+    pub auth_header: bool,
+    /// Ollama 这类本机 keyless 服务：桌面补一个占位凭据，否则 pi 认为模型不可用。
+    #[prost(bool, tag="7")]
+    pub keyless: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorSettingsUpdate {
+    /// 严格递增。桌面写完中心后按它判断本机缓存是否已经追上。
+    #[prost(double, tag="1")]
+    pub revision: f64,
+    #[prost(string, tag="2")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub model_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="4")]
+    pub custom_providers: ::prost::alloc::vec::Vec<ExecutorCustomProvider>,
+    #[prost(message, repeated, tag="5")]
+    pub credentials: ::prost::alloc::vec::Vec<ExecutorCredential>,
+    /// 中心解不开已存密文时的可读错误（例如服务端密钥变更）。非空表示「配过但读不出来」，
+    /// 桌面必须照实说，不能表现成 ready=false 或空配置——那会让用户以为自己没配过。
+    #[prost(string, tag="6")]
+    pub credential_error: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToDaemon {
-    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 19, 20, 35, 38, 39, 40, 41, 42")]
+    #[prost(oneof="server_to_daemon::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 22, 23, 24, 25, 29, 30, 31, 32, 19, 20, 35, 38, 39, 40, 41, 42, 43")]
     pub payload: ::core::option::Option<server_to_daemon::Payload>,
 }
 /// Nested message and enum types in `ServerToDaemon`.
@@ -3068,6 +3136,8 @@ pub mod server_to_daemon {
         DeviceTailcatGrant(super::DeviceTailcatGrant),
         #[prost(message, tag="42")]
         DeviceTailcatRevoke(super::DeviceTailcatRevoke),
+        #[prost(message, tag="43")]
+        ExecutorSettings(super::ExecutorSettingsUpdate),
     }
 }
 /// 本设备的工作区清单（连接时 + 工作区增删时全量下发），worker 据此监视各 worktree 的 HEAD

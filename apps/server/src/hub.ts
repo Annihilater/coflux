@@ -83,10 +83,20 @@ import {
 import { PreparedOperationConvergenceService, type OperationEffect } from "./prepared-operation-convergence.service.js";
 import {
   DAEMON_CAPABILITY_DEVICE_EXEC,
+  DAEMON_CAPABILITY_EXECUTOR_SETTINGS,
   DAEMON_CAPABILITY_PREPARED_EXECUTE,
   DAEMON_CAPABILITY_TERMINAL_IO,
   daemonUpgradeRequired,
 } from "./daemon-capabilities.js";
+import { createExecutorSecrets, ExecutorSecretsUnavailableError, parseExecutorSecretKeys } from "./executor-secrets.js";
+import {
+  mergeExecutorSettings,
+  rejectDangerousCredential,
+  toDelivery,
+  toWireCustomProvider,
+  type ExecutorSettingsPatch,
+  type ExecutorSettingsSaveResult,
+} from "./executor-settings.js";
 
 const log = createLogger("hub");
 const MAX_CATALOG_ENTRIES = 4096;
@@ -513,6 +523,10 @@ export class Hub {
   readonly tailcat = new TailcatRendezvous(privateTailcatRegions(), (id) => this.daemons.get(id),
     (daemon, payload) => this.sendDaemon(daemon, payload), (client, payload) => this.sendClient(client, payload));
 
+  /** executor 凭据的可逆加密（plan 20260918）。格式非法的 env 在这里就抛，启动即失败；没配密钥不是
+   * 错误——写凭据的请求会被可读地拒绝，中心的其余功能照常。 */
+  private readonly executorSecrets = createExecutorSecrets(parseExecutorSecretKeys(config.executorSecretKeys));
+
   constructor(private store: Store) {
     this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
@@ -867,6 +881,10 @@ export class Hub {
       await this.reconcileDeletingProjects(daemon);
       if (!this.isCurrentDaemon(daemon)) return false;
       await this.requestSessionCatalog(daemon);
+      if (!this.isCurrentDaemon(daemon)) return false;
+      // executor 配置（plan 20260918）：连接建立即全量下发，设备重连就自愈。缺能力名的旧 worker
+      // 在这里被静默跳过——这条是 push，没有回执路径能承载「你太旧了」。
+      await this.pushExecutorSettings(daemon);
       if (!this.isCurrentDaemon(daemon)) return false;
       // 握手完成时机（plan 015）：给自动更新编排一个立即比对本台 daemon 的机会，不必等下一次轮询。
       this.onDaemonHandshake?.(info.daemonId);
@@ -3835,6 +3853,94 @@ export class Hub {
     if (!daemon || daemon.accountId !== accountId) return { ok: false, error: "设备离线，无法执行该操作" };
     if (!daemon.capabilities.has(capability)) return { ok: false, error: daemonUpgradeRequired(daemon.info.name) };
     return { ok: true, value: daemon };
+  }
+
+  /* ------------------------ executor 模型配置 ----------------------- */
+
+  /**
+   * 保存账号级 executor 配置（plan 20260918）。本版只写 `device_id IS NULL` 的账号级行；表里留了
+   * device_id 那一列，但设备覆盖的入口是下一版的事。
+   *
+   * 中心**不判断** provider/模型是否可用——那是 pi 的知识，只有桌面主进程的 ModelRuntime 有。这里只
+   * 做与持久化直接相关的拒绝：凭据形态危险、加密密钥缺失。
+   */
+  async saveExecutorSettingsForAccount(
+    accountId: AccountId,
+    patch: ExecutorSettingsPatch,
+  ): Promise<{ ok: true; value: ExecutorSettingsSaveResult } | { ok: false; error: string }> {
+    for (const [providerId, key] of Object.entries(patch.credentials ?? {})) {
+      const rejection = rejectDangerousCredential(providerId, key);
+      if (rejection) return { ok: false, error: rejection };
+    }
+    if (patch.customProviders) {
+      const seen = new Set<string>();
+      for (const provider of patch.customProviders) {
+        if (seen.has(provider.id)) return { ok: false, error: `自定义端点 id 重复：${provider.id}` };
+        seen.add(provider.id);
+      }
+    }
+
+    const previous = await this.store.executorSettingsForDevice(accountId, null);
+    let merged;
+    try {
+      merged = mergeExecutorSettings(previous, patch, this.executorSecrets, Date.now());
+    } catch (error) {
+      if (error instanceof ExecutorSecretsUnavailableError) return { ok: false, error: error.message };
+      throw error;
+    }
+    const saved = await this.store.upsertExecutorSettings(accountId, null, merged.record);
+    if (!saved) return { ok: false, error: "保存 executor 配置失败，请重试" };
+
+    let online = 0;
+    let pushed = 0;
+    for (const daemon of this.daemons.values()) {
+      if (daemon.accountId !== accountId) continue;
+      online += 1;
+      if (await this.pushExecutorSettings(daemon)) pushed += 1;
+    }
+    return {
+      ok: true,
+      value: {
+        revision: saved.revision,
+        provider: saved.provider,
+        modelId: saved.modelId,
+        customProviders: saved.customProviders,
+        credentialProviderIds: saved.credentialProviderIds,
+        warning: merged.warning,
+        online,
+        pushed,
+      },
+    };
+  }
+
+  /**
+   * 下发某设备当前应得的 executor 配置。连接建立时与每次保存后各发一次——设备重连即自愈，中心不需要
+   * 记住谁收到过什么。
+   *
+   * 能力门禁按名字判定（`executor_settings_v1`），**绝不比较版本号**：dev/测试的 worker 报 `builtin`。
+   * 不具备就不发也不报错——这条是 push，没有回执路径可以承载错误；桌面侧等不到缓存文件更新时自己会
+   * 说「本机 daemon 版本过旧」。
+   */
+  private async pushExecutorSettings(daemon: DaemonConn): Promise<boolean> {
+    if (!daemon.capabilities.has(DAEMON_CAPABILITY_EXECUTOR_SETTINGS)) return false;
+    const record = await this.store.executorSettingsForDevice(daemon.accountId, daemon.info.daemonId);
+    if (!this.isCurrentDaemon(daemon)) return false;
+    const delivery = toDelivery(record, this.executorSecrets);
+    return this.sendDaemon(daemon, {
+      case: "executorSettings",
+      value: {
+        revision: delivery.revision,
+        provider: delivery.provider,
+        modelId: delivery.modelId,
+        customProviders: delivery.customProviders.map(toWireCustomProvider),
+        credentials: delivery.credentials.map((credential) => ({
+          providerId: credential.providerId,
+          type: credential.type,
+          apiKey: credential.apiKey,
+        })),
+        credentialError: delivery.credentialError,
+      },
+    });
   }
 
   /** 等待者在 prepareServer 返回后的同一段微任务里登记；daemon 的 installed/report 都要经 WS 事件（宏任务）
