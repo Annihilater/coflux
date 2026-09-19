@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useStore } from "zustand";
 import type { CofluxClient } from "@coflux/client";
 
 import { desktop } from "@/config";
@@ -18,11 +19,23 @@ import { desktop } from "@/config";
  * The local daemon's identity comes from the desktop side's `daemonState.daemonId` (the app has
  * managed this machine's daemon since plan 113). Without it this does nothing — the executor only
  * serves the machine the desktop app is on.
+ *
+ * **The channel is announced per connection, not per daemon.** The daemon forgets its host the
+ * moment the device channel drops, so a reconnect has to produce a fresh registration. Announcing
+ * only when `localDaemonId` changes meant the second connection never heard from this app again:
+ * the daemon's host slot stayed empty and `coflux executor run` reported "Coflux.app is not
+ * running" while it was plainly running. The device transport's `generation` identifies one
+ * connection, so it is what this watches — and it also fixes the first announcement, which used to
+ * race the lane coming up and could be sent before any channel existed.
  */
 export function useExecutorBridge(client: CofluxClient, localDaemonId: string | undefined): void {
+  // A number, not the transport object: the object is replaced on every heartbeat reading, and
+  // selecting it would re-render this subtree every fifteen seconds for nothing.
+  const liveGeneration = useStore(client.store, (state) => liveChannelGeneration(localDaemonId, state.deviceTransports));
+
   useEffect(() => {
     if (!localDaemonId) {
-      desktop.setExecutorChannel("");
+      desktop.setExecutorChannel("", 0);
       return;
     }
 
@@ -80,17 +93,44 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
       }
     });
 
-    // Announce channel readiness after subscribing: the main process sends its registration frame
-    // the moment it hears, and doing it a step earlier would send it where nobody is listening.
-    desktop.setExecutorChannel(localDaemonId);
-
     return () => {
-      desktop.setExecutorChannel("");
+      desktop.setExecutorChannel("", 0);
       unsubscribeInbound();
       unsubscribeOutbound();
       release();
     };
   }, [client, localDaemonId]);
+
+  /**
+   * The announcement is its own effect, on purpose. Folding it into the one above would make a
+   * reconnect tear down the retain and both subscriptions — and dropping the retain is itself a
+   * reason for the channel to go away, so the two would chase each other. This effect runs after
+   * that one on the same commit, so the outbound subscription is always in place before the main
+   * process is told it has somewhere to send its registration frame.
+   */
+  useEffect(() => {
+    if (!localDaemonId) return;
+    // A zero generation means there is no channel; the main process then knows not to register.
+    desktop.setExecutorChannel(liveGeneration ? localDaemonId : "", liveGeneration);
+  }, [localDaemonId, liveGeneration]);
+}
+
+/**
+ * The generation of this daemon's live device channel, or 0 when there is none.
+ *
+ * `idle` / `offline` / `probing` all mean no lane is up, so there is nothing to register over.
+ * Exported for the test that pins the reconnect behaviour: a same-daemon reconnect must produce a
+ * different number, which is exactly what makes the main process register again.
+ */
+export function liveChannelGeneration(
+  daemonId: string | undefined,
+  transports: Record<string, { mode: string; generation: number } | undefined>,
+): number {
+  if (!daemonId) return 0;
+  const transport = transports[daemonId];
+  if (!transport) return 0;
+  if (transport.mode === "idle" || transport.mode === "offline" || transport.mode === "probing") return 0;
+  return transport.generation;
 }
 
 /** The main process expresses state as strings (they read and assert better across IPC); on the
