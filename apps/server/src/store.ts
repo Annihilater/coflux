@@ -17,6 +17,12 @@
 import postgres from "postgres";
 import { runSchemaMigrations } from "./infra/database/schema-migrations.js";
 import {
+  newExecutorSettingsId,
+  parseCredentialProviderIds,
+  parseCustomProviders,
+  type ExecutorSettingsRecord,
+} from "./executor-settings.js";
+import {
   create,
   AccountNotificationSchema,
   type AccountNotification,
@@ -1316,4 +1322,76 @@ export class Store {
   async removeSessionCheckpointsByDaemon(daemonId: DaemonId): Promise<void> {
     await this.sql`DELETE FROM session_checkpoints WHERE daemon_id = ${daemonId}`;
   }
+
+  /* ------------------------ executor settings ----------------------- */
+
+  /** 本设备行优先、没有才回退账号级（device_id IS NULL）行。本版只写 NULL 行，设备覆盖留位不做 UI。 */
+  async executorSettingsForDevice(accountId: AccountId, deviceId: DaemonId | null): Promise<ExecutorSettingsRecord | undefined> {
+    const rows = await this.sql<ExecutorSettingsRow[]>`
+      SELECT account_id, device_id, provider, model_id, custom_providers, credential_provider_ids,
+             credentials_ciphertext, revision, updated_at
+      FROM executor_settings
+      WHERE account_id = ${accountId} AND (device_id IS NULL OR device_id = ${deviceId})
+      ORDER BY device_id NULLS LAST
+      LIMIT 1
+    `;
+    return rows[0] ? rowToExecutorSettings(rows[0]) : undefined;
+  }
+
+  /** 写入是整行替换：合并逻辑（凭据只写、密文保留）在 executor-settings.ts，这里只落库。 */
+  async upsertExecutorSettings(
+    accountId: AccountId,
+    deviceId: DaemonId | null,
+    next: Omit<ExecutorSettingsRecord, "accountId" | "deviceId">,
+  ): Promise<ExecutorSettingsRecord | undefined> {
+    const rows = await this.sql<ExecutorSettingsRow[]>`
+      INSERT INTO executor_settings (
+        id, account_id, device_id, provider, model_id, custom_providers,
+        credential_provider_ids, credentials_ciphertext, revision, updated_at
+      ) VALUES (
+        ${newExecutorSettingsId()}, ${accountId}, ${deviceId}, ${next.provider}, ${next.modelId},
+        ${JSON.stringify(next.customProviders)}, ${JSON.stringify(next.credentialProviderIds)},
+        ${next.credentialsCiphertext}, ${next.revision}, ${next.updatedAt}
+      )
+      ON CONFLICT (account_id, device_id) DO UPDATE SET
+        provider = excluded.provider,
+        model_id = excluded.model_id,
+        custom_providers = excluded.custom_providers,
+        credential_provider_ids = excluded.credential_provider_ids,
+        credentials_ciphertext = excluded.credentials_ciphertext,
+        -- revision 取两者大的那个再加一：并发保存也必须严格递增，桌面靠它判断缓存是否已经追上。
+        revision = GREATEST(executor_settings.revision, excluded.revision - 1) + 1,
+        updated_at = excluded.updated_at
+      RETURNING account_id, device_id, provider, model_id, custom_providers, credential_provider_ids,
+                credentials_ciphertext, revision, updated_at
+    `;
+    return rows[0] ? rowToExecutorSettings(rows[0]) : undefined;
+  }
+}
+
+/** DB 行形状：两个 JSON 列在库里是 TEXT，读回来才解析成结构。 */
+interface ExecutorSettingsRow {
+  accountId: string;
+  deviceId: string | null;
+  provider: string;
+  modelId: string;
+  customProviders: string;
+  credentialProviderIds: string;
+  credentialsCiphertext: string;
+  revision: number;
+  updatedAt: number;
+}
+
+function rowToExecutorSettings(row: ExecutorSettingsRow): ExecutorSettingsRecord {
+  return {
+    accountId: row.accountId,
+    deviceId: row.deviceId,
+    provider: row.provider,
+    modelId: row.modelId,
+    customProviders: parseCustomProviders(row.customProviders),
+    credentialProviderIds: parseCredentialProviderIds(row.credentialProviderIds),
+    credentialsCiphertext: row.credentialsCiphertext,
+    revision: row.revision,
+    updatedAt: row.updatedAt,
+  };
 }
