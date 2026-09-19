@@ -48,7 +48,8 @@ public struct Coflux_V1_DaemonAuth: Sendable {
   /// 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
   /// 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
   /// `terminal_io`（认识 ServerAgentRequest 的读/写）、`device_exec`（认识 ServerExecRun，
-  /// 一次性跨设备执行）。新增控制消息时同步加能力名。
+  /// 一次性跨设备执行）、`executor_settings_v1`（认识 ExecutorSettingsUpdate，会把配置落成本机
+  /// 缓存文件）。新增控制消息时同步加能力名。
   public var capabilities: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -1742,6 +1743,91 @@ public struct Coflux_V1_PreparedDeviceOperationExecute: Sendable {
   public init() {}
 }
 
+/// 一条凭据。本版只有 api_key；`type` 留着是为了下一版的 oauth 分支能原样扩进来。
+public struct Coflux_V1_ExecutorCredential: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var providerID: String = String()
+
+  /// "api_key"
+  public var type: String = String()
+
+  public var apiKey: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ExecutorCustomProviderModel: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String = String()
+
+  public var name: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// 一个自定义端点。对 pi 来说它就是一个 provider，所以与内置 provider 共用同一个选择面。
+/// 这里**不含凭据**：凭据统一走 ExecutorCredential，按 provider_id 对应。
+public struct Coflux_V1_ExecutorCustomProvider: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var providerID: String = String()
+
+  public var name: String = String()
+
+  public var baseURL: String = String()
+
+  /// openai-completions | openai-responses | anthropic-messages | google-generative-ai
+  public var api: String = String()
+
+  public var models: [Coflux_V1_ExecutorCustomProviderModel] = []
+
+  public var authHeader: Bool = false
+
+  /// Ollama 这类本机 keyless 服务：桌面补一个占位凭据，否则 pi 认为模型不可用。
+  public var keyless: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ExecutorSettingsUpdate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// 严格递增。桌面写完中心后按它判断本机缓存是否已经追上。
+  public var revision: Double = 0
+
+  public var provider: String = String()
+
+  public var modelID: String = String()
+
+  public var customProviders: [Coflux_V1_ExecutorCustomProvider] = []
+
+  public var credentials: [Coflux_V1_ExecutorCredential] = []
+
+  /// 中心解不开已存密文时的可读错误（例如服务端密钥变更）。非空表示「配过但读不出来」，
+  /// 桌面必须照实说，不能表现成 ready=false 或空配置——那会让用户以为自己没配过。
+  public var credentialError: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_ServerToDaemon: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1973,6 +2059,14 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     set {payload = .deviceTailcatRevoke(newValue)}
   }
 
+  public var executorSettings: Coflux_V1_ExecutorSettingsUpdate {
+    get {
+      if case .executorSettings(let v)? = payload {return v}
+      return Coflux_V1_ExecutorSettingsUpdate()
+    }
+    set {payload = .executorSettings(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -2004,6 +2098,7 @@ public struct Coflux_V1_ServerToDaemon: Sendable {
     case deviceTailcatConfigure(Coflux_V1_DeviceTailcatConfigure)
     case deviceTailcatGrant(Coflux_V1_DeviceTailcatGrant)
     case deviceTailcatRevoke(Coflux_V1_DeviceTailcatRevoke)
+    case executorSettings(Coflux_V1_ExecutorSettingsUpdate)
 
   }
 
@@ -5276,9 +5371,199 @@ extension Coflux_V1_PreparedDeviceOperationExecute: SwiftProtobuf.Message, Swift
   }
 }
 
+extension Coflux_V1_ExecutorCredential: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorCredential"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}provider_id\0\u{1}type\0\u{3}api_key\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.providerID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.type) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.apiKey) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.providerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.providerID, fieldNumber: 1)
+    }
+    if !self.type.isEmpty {
+      try visitor.visitSingularStringField(value: self.type, fieldNumber: 2)
+    }
+    if !self.apiKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.apiKey, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorCredential, rhs: Coflux_V1_ExecutorCredential) -> Bool {
+    if lhs.providerID != rhs.providerID {return false}
+    if lhs.type != rhs.type {return false}
+    if lhs.apiKey != rhs.apiKey {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ExecutorCustomProviderModel: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorCustomProviderModel"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}name\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorCustomProviderModel, rhs: Coflux_V1_ExecutorCustomProviderModel) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ExecutorCustomProvider: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorCustomProvider"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}provider_id\0\u{1}name\0\u{3}base_url\0\u{1}api\0\u{1}models\0\u{3}auth_header\0\u{1}keyless\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.providerID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.baseURL) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.api) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.models) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.authHeader) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.keyless) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.providerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.providerID, fieldNumber: 1)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 2)
+    }
+    if !self.baseURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.baseURL, fieldNumber: 3)
+    }
+    if !self.api.isEmpty {
+      try visitor.visitSingularStringField(value: self.api, fieldNumber: 4)
+    }
+    if !self.models.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.models, fieldNumber: 5)
+    }
+    if self.authHeader != false {
+      try visitor.visitSingularBoolField(value: self.authHeader, fieldNumber: 6)
+    }
+    if self.keyless != false {
+      try visitor.visitSingularBoolField(value: self.keyless, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorCustomProvider, rhs: Coflux_V1_ExecutorCustomProvider) -> Bool {
+    if lhs.providerID != rhs.providerID {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.baseURL != rhs.baseURL {return false}
+    if lhs.api != rhs.api {return false}
+    if lhs.models != rhs.models {return false}
+    if lhs.authHeader != rhs.authHeader {return false}
+    if lhs.keyless != rhs.keyless {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ExecutorSettingsUpdate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorSettingsUpdate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}revision\0\u{1}provider\0\u{3}model_id\0\u{3}custom_providers\0\u{1}credentials\0\u{3}credential_error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularDoubleField(value: &self.revision) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.provider) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.modelID) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.customProviders) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.credentials) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.credentialError) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.revision.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.revision, fieldNumber: 1)
+    }
+    if !self.provider.isEmpty {
+      try visitor.visitSingularStringField(value: self.provider, fieldNumber: 2)
+    }
+    if !self.modelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.modelID, fieldNumber: 3)
+    }
+    if !self.customProviders.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.customProviders, fieldNumber: 4)
+    }
+    if !self.credentials.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.credentials, fieldNumber: 5)
+    }
+    if !self.credentialError.isEmpty {
+      try visitor.visitSingularStringField(value: self.credentialError, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorSettingsUpdate, rhs: Coflux_V1_ExecutorSettingsUpdate) -> Bool {
+    if lhs.revision != rhs.revision {return false}
+    if lhs.provider != rhs.provider {return false}
+    if lhs.modelID != rhs.modelID {return false}
+    if lhs.customProviders != rhs.customProviders {return false}
+    if lhs.credentials != rhs.credentials {return false}
+    if lhs.credentialError != rhs.credentialError {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToDaemon"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{4}\u{3}agent_control_result\0\u{4}\u{3}prepared_device_operation_execute\0\u{3}server_agent_request\0\u{3}device_tailcat_configure\0\u{3}device_tailcat_grant\0\u{3}device_tailcat_revoke\0\u{b}device_relay_dial\0\u{b}relay_node_list\0\u{b}device_p2p_dial\0\u{b}device_p2p_channel_grant\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}\"\u{1}\u{c}$\u{1}\u{c}%\u{1}\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_enrolled\0\u{3}daemon_authed\0\u{3}daemon_auth_error\0\u{3}daemon_authorize_pending\0\u{3}project_validate\0\u{3}worktree_add\0\u{3}worktree_remove\0\u{3}worker_upgrade\0\u{3}session_create\0\u{3}session_close\0\u{4}\u{3}proxy_open\0\u{3}proxy_close\0\u{4}\u{5}proxy_data\0\u{3}workspace_list\0\u{4}\u{2}daemon_set_name\0\u{3}local_grant_install\0\u{3}local_grant_revoke\0\u{3}local_lease_install\0\u{4}\u{4}local_gateway_configure\0\u{3}session_catalog_request\0\u{3}exit_ack\0\u{3}prepared_device_operation\0\u{4}\u{3}agent_control_result\0\u{4}\u{3}prepared_device_operation_execute\0\u{3}server_agent_request\0\u{3}device_tailcat_configure\0\u{3}device_tailcat_grant\0\u{3}device_tailcat_revoke\0\u{3}executor_settings\0\u{b}device_relay_dial\0\u{b}relay_node_list\0\u{b}device_p2p_dial\0\u{b}device_p2p_channel_grant\0\u{b}session_replay\0\u{b}pty_resize\0\u{b}exec_run\0\u{b}fs_list\0\u{b}fs_read\0\u{b}pty_input\0\u{b}fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}\"\u{1}\u{c}$\u{1}\u{c}%\u{1}\u{c}\u{b}\u{1}\u{c}\u{c}\u{1}\u{c}\u{f}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{15}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5650,6 +5935,19 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .deviceTailcatRevoke(v)
         }
       }()
+      case 43: try {
+        var v: Coflux_V1_ExecutorSettingsUpdate?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorSettings(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorSettings(v)
+        }
+      }()
       default: break
       }
     }
@@ -5772,6 +6070,10 @@ extension Coflux_V1_ServerToDaemon: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .deviceTailcatRevoke?: try {
       guard case .deviceTailcatRevoke(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 42)
+    }()
+    case .executorSettings?: try {
+      guard case .executorSettings(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 43)
     }()
     case nil: break
     }

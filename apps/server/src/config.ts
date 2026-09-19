@@ -122,6 +122,11 @@ export const config = {
   execDefaultTimeoutMs: int("COFLUX_EXEC_TIMEOUT_MS", 60_000),
   execMaxTimeoutMs: int("COFLUX_EXEC_MAX_TIMEOUT_MS", 300_000),
 
+  /** executor 凭据加密密钥（plan 20260918）：逗号分隔的 `<keyId>:<base64 32 字节>`，第一项是当前密钥。
+   * 刻意**不**走 `secret()` 的 fail-closed：已在跑的生产没有这把密钥，缺失应表现为「写凭据被可读地
+   * 拒绝」，而不是整个中心拒绝启动。解析在 executor-secrets.ts，格式非法即抛（启动失败）。 */
+  executorSecretKeys: process.env.COFLUX_EXECUTOR_KEYS ?? "",
+
   /** 自动更新编排（plan 015）：轮询 GitHub `/releases/latest` + manifest.json，对在线 daemon
    * 推送 worker 升级。未设 COFLUX_AUTOUPDATE_REPO（形如 owner/repo）则功能整体关闭。 */
   autoUpdateApiBase: process.env.COFLUX_AUTOUPDATE_API_BASE ?? "https://api.github.com",

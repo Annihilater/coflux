@@ -1241,6 +1241,37 @@ CREATE INDEX account_notifications_history ON coflux.account_notifications(accou
 CREATE INDEX account_notifications_unread ON coflux.account_notifications(account_id, sequence) WHERE read_at = 0;
 `;
 
+/**
+ * executor 的模型配置（plan 20260918-executor-settings-central）。真相源在中心，经 daemon 链路
+ * 下发到设备。
+ *
+ * 两处刻意的形状：
+ * - `device_id` 可空，NULL 行 = 账号级默认；读取时先找本设备行、没有才回退 NULL 行。**不能**写成
+ *   `PRIMARY KEY (account_id, device_id)`——Postgres 的主键列隐含 NOT NULL，可空列进不了主键。
+ *   代理主键 + `UNIQUE NULLS NOT DISTINCT`（PG15+，生产 PG17）才能让 NULL 行也受唯一约束。
+ * - `credentials_ciphertext` 是 AES-256-GCM 密文（见 executor-secrets.ts），自带 key-id 前缀。
+ *   这是中心第一次持有可还原的秘密：此前每个秘密都只存不可逆 hash。密钥未配置时写凭据被拒绝，
+ *   绝不降级成明文落库。`credential_provider_ids` 是非敏感索引，让中心不解密也能回答「配没配」。
+ */
+const EXECUTOR_SETTINGS_SCHEMA_SQL = `
+CREATE TABLE coflux.executor_settings (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  device_id TEXT,
+  provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  custom_providers TEXT NOT NULL DEFAULT '[]',
+  credential_provider_ids TEXT NOT NULL DEFAULT '[]',
+  credentials_ciphertext TEXT NOT NULL DEFAULT '',
+  revision DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at DOUBLE PRECISION NOT NULL,
+  CONSTRAINT uq_executor_settings_scope UNIQUE NULLS NOT DISTINCT (account_id, device_id),
+  CONSTRAINT fk_executor_settings_device FOREIGN KEY (device_id, account_id)
+    REFERENCES coflux.devices(id, account_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1283,6 +1314,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "account_notification_inbox",
     definition: NOTIFICATION_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(NOTIFICATION_SCHEMA_SQL); },
+  },
+  {
+    version: 6,
+    name: "executor_settings",
+    definition: EXECUTOR_SETTINGS_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(EXECUTOR_SETTINGS_SCHEMA_SQL); },
   },
 ];
 

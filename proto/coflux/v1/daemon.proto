@@ -20,7 +20,8 @@ message DaemonAuth {
   // 上报 `builtin`，自动升级也刻意不做 semver 比较。旧 worker 不发此字段 → 自然被挡。
   // 现有能力名：`prepared_execute`（认识 PreparedDeviceOperationExecute）、
   // `terminal_io`（认识 ServerAgentRequest 的读/写）、`device_exec`（认识 ServerExecRun，
-  // 一次性跨设备执行）。新增控制消息时同步加能力名。
+  // 一次性跨设备执行）、`executor_settings_v1`（认识 ExecutorSettingsUpdate，会把配置落成本机
+  // 缓存文件）。新增控制消息时同步加能力名。
   repeated string capabilities = 5;
 }
 
@@ -574,6 +575,55 @@ message PreparedDeviceOperationExecute {
   string operation_id = 1;
 }
 
+// ===== executor 模型配置下发（plan 20260918-executor-settings-central）=====
+//
+// 配置的真相源是中心的 executor_settings 表；这条消息是它到设备的唯一下发路径。daemon 收到后
+// 落成 $COFLUX_HOME 下权限 0600 的明文 JSON，同机的桌面主进程直接读那个文件。读路径因此永远不出
+// 本机：断网时 executor 照常能发任务，只有*修改*配置需要在线。
+//
+// 这是 push 而不是 request——没有回执路径。中心必须在下发前检查 `executor_settings_v1` 能力名：
+// 旧 worker 对未知 oneof 解出空 payload 后直接丢弃，症状是缓存文件永远不出现、桌面无限等待且
+// 没有任何可读原因。
+
+// 一条凭据。本版只有 api_key；`type` 留着是为了下一版的 oauth 分支能原样扩进来。
+message ExecutorCredential {
+  string provider_id = 1;
+  // "api_key"
+  string type = 2;
+  string api_key = 3;
+}
+
+message ExecutorCustomProviderModel {
+  string id = 1;
+  string name = 2;
+}
+
+// 一个自定义端点。对 pi 来说它就是一个 provider，所以与内置 provider 共用同一个选择面。
+// 这里**不含凭据**：凭据统一走 ExecutorCredential，按 provider_id 对应。
+message ExecutorCustomProvider {
+  string provider_id = 1;
+  string name = 2;
+  string base_url = 3;
+  // openai-completions | openai-responses | anthropic-messages | google-generative-ai
+  string api = 4;
+  repeated ExecutorCustomProviderModel models = 5;
+  bool auth_header = 6;
+  // Ollama 这类本机 keyless 服务：桌面补一个占位凭据，否则 pi 认为模型不可用。
+  bool keyless = 7;
+}
+
+message ExecutorSettingsUpdate {
+  // 严格递增。桌面写完中心后按它判断本机缓存是否已经追上。
+  double revision = 1;
+  string provider = 2;
+  string model_id = 3;
+  repeated ExecutorCustomProvider custom_providers = 4;
+  repeated ExecutorCredential credentials = 5;
+  // 中心解不开已存密文时的可读错误（例如服务端密钥变更）。非空表示「配过但读不出来」，
+  // 桌面必须照实说，不能表现成 ready=false 或空配置——那会让用户以为自己没配过。
+  string credential_error = 6;
+}
+
 message ServerToDaemon {
   // Removed custom relay/WebRTC transport fields are never reused.
   reserved 33, 34, 36, 37;
@@ -612,6 +662,7 @@ message ServerToDaemon {
     DeviceTailcatConfigure device_tailcat_configure = 40;
     DeviceTailcatGrant device_tailcat_grant = 41;
     DeviceTailcatRevoke device_tailcat_revoke = 42;
+    ExecutorSettingsUpdate executor_settings = 43;
   }
 }
 

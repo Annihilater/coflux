@@ -1,4 +1,9 @@
-import type { DesktopExecutorInbound, DesktopNotification } from "../shared/desktop-bridge";
+import type {
+  DesktopExecutorCustomProvider,
+  DesktopExecutorInbound,
+  DesktopExecutorSaveInput,
+  DesktopNotification,
+} from "../shared/desktop-bridge";
 
 // 渲染层 IPC 载荷的校验（纯函数，不 import electron，供 ipc.ts 与单测共用）。
 
@@ -107,17 +112,82 @@ export function sanitizeExecutorInbound(payload: unknown): DesktopExecutorInboun
   }
 }
 
-/** 设置面的两项。空串合法，等于清空配置。 */
-export function sanitizeExecutorModel(payload: unknown): { provider: string; modelId: string } | null {
-  if (!payload || typeof payload !== "object") return null;
-  const { provider, modelId } = payload as Record<string, unknown>;
-  if (typeof provider !== "string" || typeof modelId !== "string") return null;
-  if (provider.length > MAX_PROVIDER || modelId.length > MAX_MODEL_ID) return null;
-  return { provider, modelId };
+const MAX_NAME = 256;
+const MAX_URL = 2048;
+const MAX_CUSTOM_PROVIDERS = 16;
+const MAX_CUSTOM_MODELS = 64;
+
+/** 本版暴露的四种 API 形态；名单外的一律丢弃，不放行任意字符串给 pi 当 api 名。 */
+const ALLOWED_CUSTOM_APIS = new Set(["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]);
+
+function optionalKey(value: unknown): { ok: true; value: string | undefined } | { ok: false } {
+  if (value === undefined) return { ok: true, value: undefined };
+  // 空串是有意义的取值（清除），所以这里不能用 boundedString。
+  if (typeof value !== "string" || value.length > MAX_API_KEY) return { ok: false };
+  return { ok: true, value };
 }
 
-/** API key：空串 = 清除。trim 交给配置层做（贴进来的 key 常带换行）。 */
-export function sanitizeExecutorApiKey(payload: unknown): string | null {
-  if (typeof payload !== "string" || payload.length > MAX_API_KEY) return null;
-  return payload;
+function sanitizeCustomProvider(payload: unknown): (DesktopExecutorCustomProvider & { apiKey?: string }) | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const id = boundedString(record.id, MAX_PROVIDER);
+  if (!id) return null;
+  if (typeof record.api !== "string" || !ALLOWED_CUSTOM_APIS.has(record.api)) return null;
+  if (typeof record.baseUrl !== "string" || record.baseUrl.length > MAX_URL) return null;
+  if (typeof record.name !== "string" || record.name.length > MAX_NAME) return null;
+  const rawModels = Array.isArray(record.models) ? record.models.slice(0, MAX_CUSTOM_MODELS) : [];
+  const models: { id: string; name: string }[] = [];
+  for (const model of rawModels) {
+    if (!model || typeof model !== "object") return null;
+    const entry = model as Record<string, unknown>;
+    const modelId = boundedString(entry.id, MAX_MODEL_ID);
+    if (!modelId) return null;
+    if (entry.name !== undefined && (typeof entry.name !== "string" || entry.name.length > MAX_NAME)) return null;
+    models.push({ id: modelId, name: typeof entry.name === "string" ? entry.name : modelId });
+  }
+  const apiKey = optionalKey(record.apiKey);
+  if (!apiKey.ok) return null;
+  return {
+    id,
+    name: record.name || id,
+    baseUrl: record.baseUrl,
+    api: record.api,
+    models,
+    authHeader: record.authHeader === true,
+    keyless: record.keyless === true,
+    ...(apiKey.value === undefined ? {} : { apiKey: apiKey.value }),
+  };
+}
+
+/**
+ * 一次保存。provider/modelId 空串合法（等于清空选择）；`apiKey` 缺席表示不改动，空串表示清除——
+ * 两者必须区分开，否则「不填 key 直接保存」会把已存的 key 抹掉。
+ */
+export function sanitizeExecutorSave(payload: unknown): DesktopExecutorSaveInput | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const { provider, modelId } = record;
+  if (typeof provider !== "string" || typeof modelId !== "string") return null;
+  if (provider.length > MAX_PROVIDER || modelId.length > MAX_MODEL_ID) return null;
+  const apiKey = optionalKey(record.apiKey);
+  if (!apiKey.ok) return null;
+  const rawProviders = Array.isArray(record.customProviders) ? record.customProviders : [];
+  if (rawProviders.length > MAX_CUSTOM_PROVIDERS) return null;
+  const customProviders: (DesktopExecutorCustomProvider & { apiKey?: string })[] = [];
+  for (const item of rawProviders) {
+    const sanitized = sanitizeCustomProvider(item);
+    if (!sanitized) return null;
+    customProviders.push(sanitized);
+  }
+  return { provider, modelId, customProviders, ...(apiKey.value === undefined ? {} : { apiKey: apiKey.value }) };
+}
+
+/** device 通道的宣告：daemonId 为空串表示断开；generation 标识这一次连接。 */
+export function sanitizeExecutorChannel(payload: unknown): { daemonId: string; generation: number } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  if (typeof record.daemonId !== "string" || record.daemonId.length > MAX_ID) return null;
+  const generation = record.generation;
+  if (typeof generation !== "number" || !Number.isFinite(generation) || generation < 0) return null;
+  return { daemonId: record.daemonId, generation: Math.floor(generation) };
 }

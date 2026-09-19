@@ -2,6 +2,8 @@ import { ClientLoginContract } from "./interface/client-login/client-login.contr
 import { ClientLoginHandler } from "./interface/client-login/client-login.handler.js";
 import { ClientCommandContract } from "./interface/client-command/client-command.contract.js";
 import { ClientCommandHandler } from "./interface/client-command/client-command.handler.js";
+import { ClientExecutorSettingsContract } from "./interface/client-executor/client-executor.contract.js";
+import { ClientExecutorSettingsHandler } from "./interface/client-executor/client-executor.handler.js";
 /**
  * 组合根（RavenJS runtime assembly）：创建 Raven app、注册基础设施插件与 HTTP 路由。
  * 不在此调用 ready() —— serve 入口（index.ts）决定何时就绪并负责传输层
@@ -54,3 +56,4 @@ registerContractRoute(app, PostProxyAuthLoginContract, PostProxyAuthLoginHandler
 
 registerContractRoute(app, ClientLoginContract, ClientLoginHandler);
 registerContractRoute(app, ClientCommandContract, ClientCommandHandler);
+registerContractRoute(app, ClientExecutorSettingsContract, ClientExecutorSettingsHandler);

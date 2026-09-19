@@ -21,6 +21,8 @@ import { setDockBadge, setDockBadgeLabel, showWorkspaceNotification } from "./no
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
 import { createExecutorConfigStore } from "./executor-config";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
+import { createExecutorRuntime } from "./executor-runtime";
+import { createExecutorSettingsWriter } from "./executor-settings-writer";
 import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
@@ -80,9 +82,10 @@ function sendToRenderer(channel: string, payload: unknown): void {
 const settingsPath = () => join(app.getPath("userData"), "settings.json");
 const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
 const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
-// executor（plan 116）：非敏感项与 API key 分两个文件，后者同样 safeStorage 加密。
-const executorSettingsPath = () => join(app.getPath("userData"), "executor.json");
-const executorKeyPath = () => join(app.getPath("userData"), "executor-key.bin");
+// executor（plan 20260918）：配置的真相源是账号，不再有本机的 executor.json / executor-key.bin。
+// 读的是本机 daemon 写下的缓存文件（$COFLUX_HOME 下，见 executor-settings-cache.ts）；pi 自己的
+// 工作目录常驻在 userData 下，与用户的 ~/.pi 严格隔离。
+const executorAgentDir = () => join(app.getPath("userData"), "executor-pi");
 
 function currentServerUrl(): string {
   return resolveServerUrl({
@@ -186,21 +189,6 @@ if (!app.requestSingleInstanceLock()) {
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
 
-    // executor（plan 116）：配置 + 作业表 + runner 全在主进程；渲染层只当 device 通道的信使。
-    const executorConfig = createExecutorConfigStore({
-      settingsPath: executorSettingsPath(),
-      keyPath: executorKeyPath(),
-      codec: safeStorage,
-      onError: (stage, error) => log.warn(`executor 配置 ${stage} 失败`, error),
-    });
-    const executor = createExecutorHost({
-      config: executorConfig,
-      runnerPath: join(__dirname, "executor-runner.js"),
-      sendToRenderer,
-      log: (message) => log.info(message),
-    });
-    executorHost = executor;
-
     // 自动更新：generic provider 读仓库 desktop-updates 分支的 latest-mac.yml；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
     const updater = createUpdater({
@@ -236,6 +224,27 @@ if (!app.requestSingleInstanceLock()) {
     log.info("内置 coflux 插件", claudePluginDir ? { dir: claudePluginDir } : { bundled: false });
     const localPaths = daemonHomePaths(app.isPackaged && !process.env.COFLUX_HOME ? homedir() : app.getPath("userData"), app.isPackaged ? process.env : { ...process.env, COFLUX_HOME: join(app.getPath("userData"), "runtime") });
     mkdirSync(localPaths.home, { recursive: true, mode: 0o700 });
+
+    // executor（plan 116；配置改由账号持有见 plan 20260918）：作业表、runner、模型运行时与凭据
+    // 全在主进程；渲染层只当 device 通道的信使，外加一个设置面。配置**读**自本机 daemon 写下的
+    // 缓存文件（所以断网照常能发任务）、**写**经 HTTPS 直发中心，两条路都不经渲染层。
+    // 构造点在这里而不是更早：缓存文件的位置要等 localPaths 把 $COFLUX_HOME 算出来。
+    const executorConfig = createExecutorConfigStore({
+      cachePath: join(localPaths.home, "executor-settings.json"),
+      // 配置也会从别的设备改过来：daemon 把新版本落到本机，这里要走完整的「配置变了」一遍
+      // （刷新作业表的准入、推给渲染层、重新向 daemon 报到），而不只是刷新 UI。
+      onChange: () => executorHost?.configChanged(),
+    });
+    const executor = createExecutorHost({
+      config: executorConfig,
+      runtime: createExecutorRuntime({ agentDir: executorAgentDir(), log: (message) => log.info(message) }),
+      writer: createExecutorSettingsWriter({ serverUrl, token: tokenStore.read }),
+      runnerPath: join(__dirname, "executor-runner.js"),
+      sendToRenderer,
+      log: (message) => log.info(message),
+    });
+    executorHost = executor;
+    app.once("will-quit", () => executor.dispose());
     const accountKey = createHash("sha256").update(serverUrl).digest("hex").slice(0, 16);
     const localAccount = createDesktopAccount(localPaths.home, serverUrl, createTokenStore({
       filePath: join(app.getPath("userData"), `desktop-account-${accountKey}.bin`), codec: safeStorage,
@@ -297,9 +306,9 @@ if (!app.requestSingleInstanceLock()) {
       })();
       return localConnect;
     }
-    // Logout clears account state only. `executor.json` and `executor-key.bin` are global app
-    // configuration — the provider and model the user picked once, not something an account owns —
-    // so they deliberately survive: signing back in must not mean configuring the executor again.
+    // Logout clears account state only. The executor configuration is not app state any more — it
+    // belongs to the account and lives at the centre — so there is nothing local to clear: signing
+    // back in gets the same configuration back, on this machine or any other.
     // Running executor jobs do end here, through the confirmed `logout` stop (see `onStopOutcome`).
     async function logoutLocal(): Promise<boolean> {
       if (exitInFlight || quitting) return false;
@@ -374,8 +383,9 @@ if (!app.requestSingleInstanceLock()) {
         daemonOpenFdaGuide: daemon.openFdaGuide,
         daemonDismissError: daemon.dismissError,
         getExecutorSettings: executor.getSettings,
-        setExecutorModel: executor.setModel,
-        setExecutorApiKey: executor.setApiKey,
+        getExecutorCatalog: executor.getCatalog,
+        saveExecutorSettings: executor.save,
+        testExecutorConnection: executor.testConnection,
         executorInbound: executor.inbound,
         executorChannel: executor.setChannel,
       },
@@ -400,7 +410,7 @@ if (!app.requestSingleInstanceLock()) {
     const resetForRebuiltRenderer = createRendererResetListener(
       {
         closeTransport: () => nativeTransport?.close(),
-        resetExecutorChannel: () => executor.setChannel(""),
+        resetExecutorChannel: () => executor.setChannel("", 0),
         setBadge: setDockBadge,
       },
       trusted,

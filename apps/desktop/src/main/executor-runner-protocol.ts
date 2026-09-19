@@ -8,6 +8,26 @@
  * in a tool process's environment, never transcribed, and never logged.
  */
 
+/**
+ * One custom endpoint, as the runner's own `ModelRuntime` needs it.
+ *
+ * The runner builds a **separate** runtime in its own process, so a provider the main process
+ * registered means nothing to it: "I can pick it in the settings page" and "a job with it actually
+ * runs" are two different things unless the definition travels in the start message.
+ *
+ * It deliberately carries no credential — that arrives once, in `apiKey`, and never goes into
+ * `registerProvider`.
+ */
+export type ExecutorRunnerCustomProvider = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  api: string;
+  models: { id: string; name: string }[];
+  authHeader: boolean;
+  keyless: boolean;
+};
+
 export type ExecutorRunnerStart = {
   type: "start";
   runId: string;
@@ -25,8 +45,12 @@ export type ExecutorRunnerStart = {
   /** The system prompt, fixed by coflux. */
   systemPrompt: string;
   model: { provider: string; id: string };
+  /** Custom endpoint definitions to register before resolving the model. */
+  customProviders: ExecutorRunnerCustomProvider[];
   /** The provider credential. It appears **only here**; the runner must never forward it to a child
-   * process or write it into any output. */
+   * process or write it into any output. The runner cannot fetch it itself: a `utilityProcess` has
+   * no `safeStorage`, and giving it a second route to the daemon's 0600 cache file would only widen
+   * the exposure. */
   apiKey: string;
   /** Wall-clock cap for one task, in milliseconds. */
   timeoutMs: number;

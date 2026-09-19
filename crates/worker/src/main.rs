@@ -9,6 +9,7 @@ mod agents;
 mod conn_state;
 mod creds;
 mod device;
+mod executor_settings;
 mod gateway;
 mod git;
 mod handle;
@@ -136,12 +137,17 @@ const CAPABILITY_TERMINAL_IO: &str = "terminal_io";
 /// Knows ServerExecRun: one-shot `sh -c` execution on this device (`coflux device exec`), which is
 /// deliberately not a Terminal. Paired with DAEMON_CAPABILITY_DEVICE_EXEC in apps/server.
 const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
+/// Knows ExecutorSettingsUpdate: the centre's executor model configuration is written to this
+/// machine's cache file, where the desktop main process reads it. Paired with
+/// DAEMON_CAPABILITY_EXECUTOR_SETTINGS in apps/server.
+const CAPABILITY_EXECUTOR_SETTINGS: &str = "executor_settings_v1";
 
 fn daemon_capabilities() -> Vec<String> {
     let mut capabilities = vec![
         CAPABILITY_PREPARED_EXECUTE.to_string(),
         CAPABILITY_TERMINAL_IO.to_string(),
         CAPABILITY_DEVICE_EXEC.to_string(),
+        CAPABILITY_EXECUTOR_SETTINGS.to_string(),
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());
@@ -1144,6 +1150,15 @@ async fn handle_sup_record(
 
 /* ------------------------------- server ------------------------------- */
 
+/// Wall-clock milliseconds as f64 — the wire and the desktop-side cache both use `double` for
+/// timestamps, so the conversion happens once, here.
+fn now_ms_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
 fn backoff(attempts: u32, cfg: &Config) -> Duration {
     let base = cfg
         .reconnect_base_ms
@@ -1747,6 +1762,30 @@ async fn on_server_message(
                             .remove(&result.request_id);
                         if let Some(waiter) = waiter {
                             let _ = waiter.send(result);
+                        }
+                    }
+                    // executor 模型配置（plan 20260918）：中心是真相源，daemon 只把下发落成本机
+                    // 缓存文件，读方是同机的桌面主进程。这里不回执——中心在每次重连与每次保存后
+                    // 都会重发全量，落盘失败下一次自然补上。
+                    server_to_daemon::Payload::ExecutorSettings(update) => {
+                        let store = executor_settings::ExecutorSettingsStore::new(&cfg.home);
+                        match store.save(&update, now_ms_f64()) {
+                            Ok(()) => {
+                                // Never log a credential, only which provider is selected.
+                                let provider = if update.provider.is_empty() {
+                                    "-"
+                                } else {
+                                    update.provider.as_str()
+                                };
+                                logln!(
+                                    "[worker] executor 配置已更新（revision={}，provider={}）",
+                                    update.revision,
+                                    provider
+                                );
+                            }
+                            Err(error) => {
+                                logln!("[worker] executor 配置落盘失败: {error}")
+                            }
                         }
                     }
                     server_to_daemon::Payload::SessionCatalogRequest(request) => {

@@ -8,146 +8,130 @@ import {
   createExecutorConfigStore,
   deriveReadiness,
   EXECUTOR_SYSTEM_PROMPT,
-  readExecutorSettingsFile,
+  toExecutorView,
 } from "./executor-config";
-import type { TokenCodec } from "./token-store";
+import { EMPTY_EXECUTOR_CACHE, readExecutorSettingsCache, type ExecutorCachedSettings } from "./executor-settings-cache";
 
-/** A workable fake codec: a prefix standing in for encryption, enough to prove nothing lands on
- * disk in the clear. */
-function fakeCodec(available = true): TokenCodec {
-  return {
-    isEncryptionAvailable: () => available,
-    encryptString: (plain) => Buffer.from(`enc:${plain}`),
-    decryptString: (buf) => buf.toString().replace(/^enc:/, ""),
-  };
+function cache(overrides: Partial<ExecutorCachedSettings> = {}): ExecutorCachedSettings {
+  return { ...EMPTY_EXECUTOR_CACHE, present: true, ...overrides };
 }
 
-function store(codec: TokenCodec = fakeCodec()) {
+function scratch() {
   const dir = mkdtempSync(join(tmpdir(), "coflux-execcfg-"));
-  return {
-    dir,
-    settingsPath: join(dir, "executor.json"),
-    keyPath: join(dir, "executor-key"),
-    make: () =>
-      createExecutorConfigStore({ settingsPath: join(dir, "executor.json"), keyPath: join(dir, "executor-key"), codec }),
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
-  };
+  return { dir, path: join(dir, "executor-settings.json"), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("三项齐全才 ready，缺哪项理由就说哪项且告诉用户去哪配", () => {
-  assert.equal(deriveReadiness("", "", false).ready, false);
-  assert.match(deriveReadiness("", "", false).reason, /provider 与模型/);
-  assert.match(deriveReadiness("anthropic", "", true).reason, /provider 与模型/);
-  const noKey = deriveReadiness("anthropic", "claude-x", false);
+test("配置还没下发到本机时不是「没配过」，理由指向接入而不是去填模型", () => {
+  const verdict = deriveReadiness(EMPTY_EXECUTOR_CACHE);
+  assert.equal(verdict.ready, false);
+  assert.match(verdict.reason, /还没收到账号里的 executor 配置/);
+});
+
+test("缺哪项理由就说哪项，且指向设置页而不是早已不存在的账号菜单入口", () => {
+  const noModel = deriveReadiness(cache({ provider: "anthropic" }));
+  assert.equal(noModel.ready, false);
+  assert.match(noModel.reason, /provider 与模型/);
+  assert.match(noModel.reason, /设置页/);
+
+  const noKey = deriveReadiness(cache({ provider: "anthropic", modelId: "claude-x" }));
   assert.equal(noKey.ready, false);
   assert.match(noKey.reason, /anthropic 的 API key/);
-  assert.deepEqual(deriveReadiness("anthropic", "claude-x", true), { ready: true, reason: "" });
+  assert.match(noKey.reason, /设置页/);
+
+  for (const reason of [noModel.reason, noKey.reason]) assert.doesNotMatch(reason, /账号菜单/);
 });
 
-test("每条 reason 都指向账号菜单里的那个入口", () => {
-  for (const reason of [deriveReadiness("", "", false).reason, deriveReadiness("a", "b", false).reason]) {
-    assert.match(reason, /Executor 设置/);
-  }
+test("配齐即 ready", () => {
+  const verdict = deriveReadiness(cache({ provider: "anthropic", modelId: "claude-x", credentials: { anthropic: "sk-1" } }));
+  assert.deepEqual(verdict, { ready: true, reason: "" });
 });
 
-test("空配置下 view 不炸，ready 为假", () => {
-  const s = store();
+test("keyless 端点不需要 key 也 ready", () => {
+  const settings = cache({
+    provider: "ollama",
+    modelId: "llama3",
+    customProviders: [{ id: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", models: [{ id: "llama3", name: "llama3" }], authHeader: false, keyless: true }],
+  });
+  assert.equal(deriveReadiness(settings).ready, true);
+});
+
+/** 解密失败必须表现成一条可读错误，而不是 ready=false 的「你没配过」——后者会让用户重配一遍并
+ * 以为自己记错了。 */
+test("中心解不开旧密文时，理由照实说密钥变更，且不假装成未配置", () => {
+  const settings = cache({ provider: "anthropic", modelId: "claude-x", credentialError: "服务端密钥已变更，请重新填写 API key" });
+  const verdict = deriveReadiness(settings);
+  assert.equal(verdict.ready, false);
+  assert.match(verdict.reason, /服务端密钥已变更/);
+  assert.doesNotMatch(verdict.reason, /还没收到/);
+});
+
+test("渲染层看得见的视图里没有凭据的任何形态", () => {
+  const view = toExecutorView(cache({
+    provider: "anthropic",
+    modelId: "claude-x",
+    credentials: { anthropic: "sk-super-secret", "my-relay": "sk-relay" },
+  }));
+  assert.equal(view.hasApiKey, true);
+  assert.deepEqual(view.credentialProviders, ["anthropic", "my-relay"]);
+  assert.equal(JSON.stringify(view).includes("sk-super-secret"), false);
+  assert.equal(JSON.stringify(view).includes("sk-relay"), false);
+});
+
+test("secrets() 才给明文 key，并且带上自定义端点定义给 runner 自己注册", () => {
+  const scratchDir = scratch();
   try {
-    const view = s.make().view();
-    assert.deepEqual(
-      { provider: view.provider, modelId: view.modelId, hasApiKey: view.hasApiKey, ready: view.ready },
-      { provider: "", modelId: "", hasApiKey: false, ready: false },
+    writeFileSync(
+      scratchDir.path,
+      JSON.stringify({
+        revision: 3,
+        provider: "my-relay",
+        modelId: "gpt-x",
+        customProviders: [{ id: "my-relay", name: "Relay", baseUrl: "https://relay/v1", api: "openai-completions", models: [{ id: "gpt-x", name: "GPT X" }], authHeader: true, keyless: false }],
+        credentials: [{ providerId: "my-relay", type: "api_key", apiKey: "sk-relay" }],
+        credentialError: "",
+      }),
     );
+    const store = createExecutorConfigStore({ cachePath: scratchDir.path, pollMs: 60_000 });
+    try {
+      const secrets = store.secrets();
+      assert.equal(secrets.apiKey, "sk-relay");
+      assert.equal(secrets.customProviders[0]?.baseUrl, "https://relay/v1");
+      assert.equal(store.view().ready, true);
+    } finally {
+      store.dispose();
+    }
   } finally {
-    s.cleanup();
+    scratchDir.cleanup();
   }
 });
 
-test("配齐之后 ready，且 view 里没有 apiKey 字段", () => {
-  const s = store();
+test("缓存文件缺失或损坏都不抛，按「daemon 还没下发」处理", () => {
+  const scratchDir = scratch();
   try {
-    const cfg = s.make();
-    cfg.setModel("anthropic", "claude-x");
-    assert.equal(cfg.setApiKey("sk-secret"), true);
-    const view = cfg.view();
-    assert.equal(view.ready, true);
-    assert.equal(view.hasApiKey, true);
-    assert.equal(JSON.stringify(view).includes("sk-secret"), false);
+    assert.deepEqual(readExecutorSettingsCache(scratchDir.path), EMPTY_EXECUTOR_CACHE);
+    writeFileSync(scratchDir.path, "{ not json");
+    const broken = readExecutorSettingsCache(scratchDir.path);
+    // 文件在但读不懂：说它在、且不可用，而不是当成从没配过。
+    assert.equal(broken.present, true);
+    assert.equal(broken.provider, "");
+    assert.match(broken.credentialError, /无法解析/);
   } finally {
-    s.cleanup();
+    scratchDir.cleanup();
   }
 });
 
-test("API key 不出现在明文设置文件里", () => {
-  const s = store();
+test("oauth 形态的凭据这一版读不懂，被丢掉而不是当成 api_key", () => {
+  const scratchDir = scratch();
   try {
-    const cfg = s.make();
-    cfg.setModel("anthropic", "claude-x");
-    cfg.setApiKey("sk-secret");
-    const raw = readExecutorSettingsFile(s.settingsPath);
-    assert.deepEqual(raw, { provider: "anthropic", modelId: "claude-x" });
+    writeFileSync(
+      scratchDir.path,
+      JSON.stringify({ revision: 1, provider: "anthropic", modelId: "claude-x", customProviders: [], credentials: [{ providerId: "anthropic", type: "oauth", apiKey: "" }], credentialError: "" }),
+    );
+    const settings = readExecutorSettingsCache(scratchDir.path);
+    assert.deepEqual(settings.credentials, {});
+    assert.equal(deriveReadiness(settings).ready, false);
   } finally {
-    s.cleanup();
-  }
-});
-
-test("secrets() 才给明文 key，且能取回写进去的值", () => {
-  const s = store();
-  try {
-    const cfg = s.make();
-    cfg.setModel("openai", "gpt-x");
-    cfg.setApiKey("sk-abc");
-    assert.deepEqual(cfg.secrets(), { provider: "openai", modelId: "gpt-x", apiKey: "sk-abc" });
-  } finally {
-    s.cleanup();
-  }
-});
-
-test("加密不可用时不落盘、不回退明文，ready 保持为假", () => {
-  const s = store(fakeCodec(false));
-  try {
-    const cfg = s.make();
-    cfg.setModel("anthropic", "claude-x");
-    assert.equal(cfg.setApiKey("sk-secret"), false);
-    assert.equal(cfg.view().hasApiKey, false);
-    assert.equal(cfg.view().ready, false);
-  } finally {
-    s.cleanup();
-  }
-});
-
-test("空串清除 key", () => {
-  const s = store();
-  try {
-    const cfg = s.make();
-    cfg.setModel("anthropic", "claude-x");
-    cfg.setApiKey("sk-secret");
-    cfg.setApiKey("");
-    assert.equal(cfg.view().hasApiKey, false);
-  } finally {
-    s.cleanup();
-  }
-});
-
-test("provider / model 两端空白被 trim", () => {
-  const s = store();
-  try {
-    const cfg = s.make();
-    cfg.setModel("  anthropic  ", "  claude-x  ");
-    assert.deepEqual(readExecutorSettingsFile(s.settingsPath), { provider: "anthropic", modelId: "claude-x" });
-  } finally {
-    s.cleanup();
-  }
-});
-
-test("设置文件损坏时按空配置处理，不抛", () => {
-  const s = store();
-  try {
-    writeFileSync(s.settingsPath, "{ not json");
-    assert.deepEqual(readExecutorSettingsFile(s.settingsPath), {});
-    assert.equal(s.make().view().ready, false);
-  } finally {
-    s.cleanup();
+    scratchDir.cleanup();
   }
 });
 
