@@ -253,7 +253,13 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
               : "配置已存到账号，但本机 daemon 还没把它取回来：确认 daemon 在跑，稍后会自动同步",
         };
       }
-      return { ok: true, validated: "已校验：provider、模型与凭据形式都正确", warning: written.warning };
+      return {
+        ok: true,
+        validated: "已校验：provider、模型与凭据形式都正确",
+        // The centre's own warning (an unreadable old ciphertext) outranks "no key yet": it is the
+        // less obvious of the two.
+        warning: written.warning || verdict.warning,
+      };
     },
 
     async testConnection() {

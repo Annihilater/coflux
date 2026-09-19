@@ -320,7 +320,7 @@ impl ExecutorLedger {
         };
         if !host.ready {
             let reason = if host.not_ready_reason.trim().is_empty() {
-                "Coflux.app 还没配置 executor 的模型：在账号菜单的「Executor 设置…」里填 provider / model / API key".to_string()
+                "Coflux.app 还没配置 executor 的模型：在 Coflux 设置页的 Executor 分区里选好 provider 与模型并填上 API key".to_string()
             } else {
                 host.not_ready_reason.clone()
             };

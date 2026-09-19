@@ -120,7 +120,7 @@ export function parseCredentialProviderIds(raw: string): string[] {
 }
 
 /** 凭据明文的落库形态：providerId -> Credential。加密后整块存一列。 */
-type CredentialMap = Record<string, { type: "api_key"; key: string }>;
+export type CredentialMap = Record<string, { type: "api_key"; key: string }>;
 
 function parseCredentialMap(plaintext: string): CredentialMap {
   try {

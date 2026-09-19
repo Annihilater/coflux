@@ -68,11 +68,20 @@ test("保存时的失败原因按成因分开，不合并成一句「配置无�
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "" }).error, /选一个模型/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "nope", modelId: "x" }).error, /provider 不存在/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "nope" }).error, /没有这个模型/);
-  assert.match(
-    validateExecutorSelection(catalog, { ...base, provider: "my-relay", modelId: "gpt-x", credentialProviders: [] }).error,
-    /还没填 My relay 的 API key/,
-  );
   assert.equal(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "claude-sonnet-5" }).ok, true);
+});
+
+/** 清除 key 就是一次没有 key 的保存；拒绝它等于让清除按钮按不动。状态区已经把「未就绪」说得很响。 */
+test("没有凭据是警告不是拒绝，否则清除 key 无法完成", () => {
+  const verdict = validateExecutorSelection(catalog, {
+    provider: "my-relay",
+    modelId: "gpt-x",
+    credentialProviders: [],
+    customProviders: [relay],
+  });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.error, "");
+  assert.match(verdict.warning, /还没填 My relay 的 API key/);
 });
 
 test("keyless 端点没有 key 也算配好了", () => {
@@ -84,6 +93,7 @@ test("keyless 端点没有 key 也算配好了", () => {
     customProviders: [ollama],
   });
   assert.equal(verdict.ok, true);
+  assert.equal(verdict.warning, "");
 });
 
 test("形如命令或环境变量名的 key 在输入这一层就被挡下（第二道防线）", () => {

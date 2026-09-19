@@ -118,11 +118,14 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
 /**
  * The generation of this daemon's live device channel, or 0 when there is none.
  *
- * `idle` / `offline` / `probing` all mean no lane is up, so there is nothing to register over.
- * Exported for the test that pins the reconnect behaviour: a same-daemon reconnect must produce a
- * different number, which is exactly what makes the main process register again.
+ * `idle` / `offline` / `probing` all mean no lane is up, so there is nothing to register over. A
+ * relayed channel still counts: whether executor frames are accepted over it is the daemon's own
+ * loopback judgement, not this side's.
+ *
+ * A reconnect to the same daemon produces a different number, and that difference is the whole
+ * reason the main process registers again — the rule itself is pinned in main/executor-channel.ts.
  */
-export function liveChannelGeneration(
+function liveChannelGeneration(
   daemonId: string | undefined,
   transports: Record<string, { mode: string; generation: number } | undefined>,
 ): number {

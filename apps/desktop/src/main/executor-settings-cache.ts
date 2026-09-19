@@ -185,8 +185,9 @@ export function createExecutorSettingsCache(options: ExecutorSettingsCacheOption
     return changed;
   }
 
+  // unref: this poll must never be the reason the process stays alive.
   const timer = setInterval(refresh, pollMs);
-  timer.unref?.();
+  timer.unref();
 
   return {
     snapshot: () => current,

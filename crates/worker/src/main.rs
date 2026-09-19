@@ -1750,11 +1750,19 @@ async fn on_server_message(
                     server_to_daemon::Payload::ExecutorSettings(update) => {
                         let store = executor_settings::ExecutorSettingsStore::new(&cfg.home);
                         match store.save(&update, now_ms_f64()) {
-                            Ok(()) => logln!(
-                                "[worker] executor 配置已更新（revision={}，provider={}）",
-                                update.revision,
-                                if update.provider.is_empty() { "-" } else { &update.provider }
-                            ),
+                            Ok(()) => {
+                                // Never log a credential, only which provider is selected.
+                                let provider = if update.provider.is_empty() {
+                                    "-"
+                                } else {
+                                    update.provider.as_str()
+                                };
+                                logln!(
+                                    "[worker] executor 配置已更新（revision={}，provider={}）",
+                                    update.revision,
+                                    provider
+                                );
+                            }
                             Err(error) => {
                                 logln!("[worker] executor 配置落盘失败: {error}")
                             }

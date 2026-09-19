@@ -97,26 +97,39 @@ export type ExecutorSelection = {
   customProviders: readonly ExecutorCachedCustomProvider[];
 };
 
+export type ExecutorSelectionVerdict = {
+  ok: boolean;
+  /** Why the save cannot happen at all. */
+  error: string;
+  /** Saved, but it will not run yet, and this says why. */
+  warning: string;
+};
+
 /**
  * Save-time checks that cost nothing. They are split by cause on purpose: "that provider does not
- * exist", "that model does not exist under it" and "the key is not usable" are three different
- * things to fix, and one merged "configuration invalid" sends the user hunting.
+ * exist" and "that model does not exist under it" are different things to fix, and one merged
+ * "configuration invalid" sends the user hunting.
+ *
+ * A missing credential is a **warning, not a refusal**. Clearing a key is a save with no key, and
+ * refusing it would make the clear button impossible to press; the status section already reports
+ * loudly that the executor is not ready. A credential that is present but malformed *is* refused —
+ * that is `validateCredentialShape`.
  *
  * Whether the model *answers* is a separate, explicit action — see the connection test.
  */
-export function validateExecutorSelection(catalog: ExecutorCatalog, selection: ExecutorSelection): { ok: boolean; error: string } {
-  if (!selection.provider) return { ok: false, error: "先选一个 provider" };
-  if (!selection.modelId) return { ok: false, error: "先选一个模型" };
+export function validateExecutorSelection(catalog: ExecutorCatalog, selection: ExecutorSelection): ExecutorSelectionVerdict {
+  const refuse = (error: string): ExecutorSelectionVerdict => ({ ok: false, error, warning: "" });
+  if (!selection.provider) return refuse("先选一个 provider");
+  if (!selection.modelId) return refuse("先选一个模型");
   const provider = catalog.providers.find((option) => option.id === selection.provider);
-  if (!provider) return { ok: false, error: `provider 不存在：${selection.provider}` };
+  if (!provider) return refuse(`provider 不存在：${selection.provider}`);
   const model = catalog.models.find((option) => option.provider === selection.provider && option.id === selection.modelId);
-  if (!model) return { ok: false, error: `${selection.provider} 下没有这个模型：${selection.modelId}` };
+  if (!model) return refuse(`${selection.provider} 下没有这个模型：${selection.modelId}`);
   const custom = selection.customProviders.find((entry) => entry.id === selection.provider);
-  if (custom?.keyless) return { ok: true, error: "" };
-  if (!selection.credentialProviders.includes(selection.provider)) {
-    return { ok: false, error: `还没填 ${provider.name} 的 API key` };
+  if (!custom?.keyless && !selection.credentialProviders.includes(selection.provider)) {
+    return { ok: true, error: "", warning: `还没填 ${provider.name} 的 API key，填上之前 executor 不能发任务` };
   }
-  return { ok: true, error: "" };
+  return { ok: true, error: "", warning: "" };
 }
 
 /**
