@@ -12,7 +12,7 @@ function task(id: string, workspaceId: string, sessionId: string): Task {
   return { id, workspaceId, sessionId, status: TaskStatus.RUNNING, title: "终端" } as unknown as Task;
 }
 function agent(taskId: string, state: string, message = ""): SessionAgentState {
-  return { daemonId: "d1", taskId, agent: "claude", state, message, progress: "" };
+  return { daemonId: "d1", taskId, agent: "claude", state, message, progress: "", agentSessionId: "" };
 }
 
 const base = {

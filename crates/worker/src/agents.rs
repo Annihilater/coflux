@@ -60,6 +60,7 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
                 state: String::new(), // 回合状态由 observed 合并本地 annotation 时回填
                 message: String::new(), // notify 留言同上（plan 074）
                 progress: String::new(), // 进度短评同上（plan 088）
+                agent_session_id: String::new(), // agent 自己的会话标识同上（plan 20260919）
             })
         })
         .collect();

@@ -28,6 +28,10 @@ export type SessionAgentState = {
   message: string;
   /** `coflux progress` 的进度短评（plan 088）：跨 hook 事件存活，覆盖式，空 = 没播报过 */
   progress: string;
+  /** agent 自己的会话标识（plan 20260919）：claude 的 session_id / codex 的 thread-id，
+   * 客户端据此定位 transcript 文件。空 = 旧 worker、旧离线缓存或未上报——**按"没有 id"处理，
+   * 别信这里的 string 类型**（离线缓存里恢复出来的旧条目根本没有这个字段）。 */
+  agentSessionId: string;
 };
 
 export type WorkspaceActivity =
@@ -202,6 +206,18 @@ type OfflineCatalog = {
   sessionAgents: Record<string, SessionAgentState>;
 };
 
+/** 离线缓存里的 presence 条目（plan 20260919）：plan 之前写下的缓存没有 agentSessionId，
+ * TS 类型却照旧声称有。恢复时统一补齐成空串，调用方才不必到处 `?? ""`。 */
+function restoreSessionAgents(value: Record<string, SessionAgentState> | undefined): Record<string, SessionAgentState> {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value).map(([sessionId, entry]) => [
+      sessionId,
+      { ...entry, agentSessionId: typeof entry?.agentSessionId === "string" ? entry.agentSessionId : "" },
+    ]),
+  );
+}
+
 function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
   if (!raw) return null;
   try {
@@ -220,7 +236,7 @@ function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
       workspaces: catalog.workspaces as Workspace[],
       tasks: catalog.tasks as Task[],
       ports: catalog.ports && typeof catalog.ports === "object" ? catalog.ports : {},
-      sessionAgents: catalog.sessionAgents && typeof catalog.sessionAgents === "object" ? catalog.sessionAgents : {},
+      sessionAgents: restoreSessionAgents(catalog.sessionAgents),
     };
   } catch {
     return null;
@@ -903,6 +919,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
               state: session.state,
               message: session.message,
               progress: session.progress,
+              agentSessionId: session.agentSessionId ?? "",
             };
           }
           return { sessionAgents };
