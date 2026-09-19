@@ -1,6 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ScrollText, X } from "lucide-react";
+import Markdown, { type Components } from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 
 import {
   loadTranscript,
@@ -10,15 +22,22 @@ import {
 } from "@/components/workbench/terminal-transcript";
 
 /**
- * 会话纸面（plan 20260919）：把当前终端里那个 agent 的整段对话摊成一页可以随便框选复制的纸。
+ * The conversation behind a terminal, as a page you can read and copy (plan 20260919).
  *
- * 为什么需要它：claude / codex 都经 Ink 渲染，**自己**按终端宽度折行，每一条视觉行都带一个
- * 真换行加缩进前缀。xterm 的选区本身处理软折行是对的，所以复制出来的每个换行都是应用真的
- * 发出过的——终端这侧无解。唯一没被折过的正文在 agent 自己的记录文件里。
+ * Why it exists: claude / codex both render through Ink, which wraps prose to the terminal width
+ * *itself*, so every visual line carries a real newline plus an indent prefix. xterm's selection
+ * handles soft wrapping correctly, which means every newline a copy brings back is one the
+ * application really emitted — there is no fix on the terminal side. The only unwrapped prose
+ * lives in the agent's own transcript file, which is what this page reads.
  *
- * 三条形态上的定调（已与用户敲定，勿改）：展开 200–260ms、ease-out，收起约 160ms 快一档；
- * 纸面跟随主题、比终端亮一档、**绝不纯白**；正文是 Markdown **源码**、不渲染——这正是"粘贴
- * 出来就是作者原文"的原因，也让依赖数保持为零。
+ * Settled shape (do not relitigate): expand in 200–260ms ease-out with a faster collapse; the
+ * surface follows the theme, one step lighter than the terminal and **never pure white**; the
+ * person's turns get a bubble and the agent's prose does not, so the alternation reads without
+ * dividers.
+ *
+ * Markdown is **rendered**, which reverses this plan's original decision to show the source
+ * verbatim. That decision bought byte-exact copy; the user chose readability instead, and the
+ * problem that started all of this — hard newlines and indent prefixes — is solved either way.
  */
 
 /** 展开/收起时长：这动画一天要看几十次，过 300ms 就从惊喜变成等待。 */
@@ -192,12 +211,13 @@ export function TerminalPaper(props: TerminalPaperProps) {
           <div
             ref={scrollRef}
             tabIndex={-1}
-            aria-label="会话纸面"
+            aria-label="对话原文"
             className="h-full w-full cursor-text select-text overflow-y-auto outline-none"
           >
             {/* 单栏窄版心 + 系统 UI 字体：与终端的等宽字一起，这两样才是"这是纸不是终端"的由来，
-                不靠一个刺眼的白底（夜里会炸眼，纸面颜色跟随主题）。 */}
-            <div className="mx-auto max-w-[68ch] px-8 pb-16 pt-6 font-sans text-base leading-[1.85]">
+                不靠一个刺眼的白底（夜里会炸眼，纸面颜色跟随主题）。break-words 兜住长到没有断点的
+                token（URL、哈希），让它换行而不是把版心撑宽。 */}
+            <div className="mx-auto max-w-[68ch] break-words px-8 pb-16 pt-6 font-sans text-base leading-[1.85]">
               <PaperHeader agent={props.agent} />
               <PaperBody result={result} />
             </div>
@@ -205,12 +225,12 @@ export function TerminalPaper(props: TerminalPaperProps) {
         </div>
       ) : null}
       {showButton ? (
-        <Tooltip content={props.open ? "收起会话纸面" : "把这段对话摊成一页"}>
+        <Tooltip content={props.open ? "关闭" : "对话原文"}>
           <button
             ref={buttonRef}
             // z-50：压在纸面（z-40）之上，于是"再点一次按钮收起"成立——按钮始终在原地。
             className="pointer-events-auto absolute right-4 top-2 z-50 flex size-6 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
-            aria-label={props.open ? "收起会话纸面" : "展开会话纸面"}
+            aria-label={props.open ? "关闭对话原文" : "查看对话原文"}
             aria-expanded={props.open}
             onClick={toggle}
           >
@@ -227,33 +247,29 @@ export function TerminalPaper(props: TerminalPaperProps) {
 function PaperHeader({ agent }: { agent: string }) {
   return (
     <div className="sticky top-0 z-10 mb-6 flex select-none items-baseline gap-2 border-b border-border bg-popover pb-3 pr-10 pt-1 text-xs text-muted-foreground">
-      <span className="font-medium text-foreground">会话纸面</span>
+      <span className="font-medium text-foreground">对话原文</span>
       <span>{agent}</span>
-      <span className="ml-auto">Esc 收起</span>
+      <span className="ml-auto">Esc 关闭</span>
     </div>
   );
 }
 
 function PaperBody({ result }: { result: TranscriptResult | null }) {
-  if (result === null) return <PaperNote title="正在读取会话记录…" />;
+  if (result === null) return <PaperNote title="正在加载…" />;
+  // Every failure state is written from the reader's chair: what they are looking at and what to
+  // do next. Config directories, daemons and exit codes are ours to debug, not theirs to read.
   if (result.status === "not-found") {
-    return (
-      <PaperNote
-        title="没找到这个会话的记录文件"
-        detail="agent 可能刚起来还没写下第一条，或者它的记录目录被 CLAUDE_CONFIG_DIR / CODEX_HOME 挪到了别处。daemon 以后台服务运行，环境变量与你的交互式 shell 未必一致。"
-      />
-    );
+    return <PaperNote title="读不到这个会话的内容" detail="agent 可能刚启动，等它回复一次再看" />;
   }
-  if (result.status === "failed") return <PaperNote title="读取失败" detail={result.detail} />;
+  if (result.status === "failed") return <PaperNote title="打不开这个会话" detail={result.detail} />;
   const { entries, truncated } = result.document;
   if (entries.length === 0) {
-    return <PaperNote title="这段会话还没有可显示的内容" detail="记录文件读到了，但里面还没有人类提问或 agent 正文。" />;
+    return <PaperNote title="还没有对话内容" detail="跟它说点什么，再回来看" />;
   }
+  // 块级排版（不是 flex column）：宽内容——代码块、表格——撑不宽版心，只在自己那格里横向滚。
   return (
     <div className="space-y-5">
-      {truncated ? (
-        <p className="text-xs text-muted-foreground">⋯ 更早的内容已省略：只读取了记录文件末尾的一段。</p>
-      ) : null}
+      {truncated ? <p className="text-xs text-muted-foreground">只显示了最近的部分</p> : null}
       {entries.map((entry, index) => (
         <PaperEntry key={index} entry={entry} />
       ))}
@@ -267,14 +283,22 @@ function PaperEntry({ entry }: { entry: TranscriptEntry }) {
     return <p className="truncate font-mono text-xs text-muted-foreground">⏺ {entry.label}</p>;
   }
   if (entry.kind === "prompt") {
-    // 自己的话带一道浅浅的竖线，滚动时用它当锚点。
+    // Only the person's own turns get a bubble: those are the anchors you scan for on the way
+    // back up. The extra top padding does the work a divider would.
     return (
-      <p className="whitespace-pre-wrap break-words border-l-2 border-foreground/25 pl-4 text-foreground">{entry.text}</p>
+      <div className="flex justify-end pt-2">
+        <div className="min-w-0 max-w-[80%] rounded-lg bg-accent px-4 py-2.5 text-foreground">
+          <PaperMarkdown text={entry.text} />
+        </div>
+      </div>
     );
   }
-  // 正文原样铺开：whitespace-pre-wrap 保住作者写下的换行、让浏览器负责软折行——于是框选复制
-  // 出来的是连续的散文，没有硬换行也没有缩进前缀。这里刻意不渲染 Markdown。
-  return <p className="whitespace-pre-wrap break-words text-foreground/90">{entry.text}</p>;
+  // 正文是页面的主体，不装框：它读起来该像文档，不像聊天记录。
+  return (
+    <div className="text-foreground/90">
+      <PaperMarkdown text={entry.text} />
+    </div>
+  );
 }
 
 function PaperNote({ title, detail }: { title: string; detail?: string }) {
@@ -283,5 +307,122 @@ function PaperNote({ title, detail }: { title: string; detail?: string }) {
       <p className="text-sm text-foreground">{title}</p>
       {detail ? <p className="text-xs leading-relaxed text-muted-foreground">{detail}</p> : null}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Markdown
+ * ------------------------------------------------------------------ */
+
+/**
+ * `remark-gfm` because agents write GFM, not bare CommonMark: tables, strikethrough and task
+ * lists are routine in their answers. `remark-breaks` because a single newline is a line the
+ * author meant — neither a model nor a person typing into a terminal hard-wraps to a column, so
+ * CommonMark's "fold soft breaks into spaces" would run their lines together.
+ *
+ * Deliberately absent: `rehype-raw`. Everything on this page is agent output, which includes
+ * whatever a person pasted at it, so raw HTML must stay inert. react-markdown's default turns an
+ * html node into a *text* node — the tags show up as the characters they are — and nothing here
+ * hands transcript content to `dangerouslySetInnerHTML`.
+ */
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+
+/**
+ * Fenced blocks and inline spans both arrive as a hast `code` element; the `pre` wrapper is the
+ * only thing that tells them apart, so it announces itself to whatever it wraps.
+ */
+const InsideCodeBlock = createContext(false);
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  return (
+    <InsideCodeBlock value={true}>
+      {/* 横向滚动而不是撑宽：版心宽度是这页可读性的全部，长命令行不该改变它。 */}
+      <pre className="my-3 overflow-x-auto rounded-md border border-border bg-background px-3 py-2 font-mono text-sm leading-relaxed first:mt-0 last:mb-0">
+        {children}
+      </pre>
+    </InsideCodeBlock>
+  );
+}
+
+function MarkdownCode({ children, className }: { children?: ReactNode; className?: string }) {
+  const insideBlock = useContext(InsideCodeBlock);
+  // 块内的 code 不再自己上底色：外面那层 pre 已经是块了，再叠一层会糊成两个方框。
+  if (insideBlock) return <code className={className}>{children}</code>;
+  return <code className="rounded-sm bg-accent px-1 py-0.5 font-mono text-sm">{children}</code>;
+}
+
+function MarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
+  return (
+    <a
+      href={href}
+      className="text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
+      onClick={(event) => {
+        // 与终端里的链接同一条路（plan 109）：带 URL 调 window.open，主进程一律 deny 并把真实
+        // URL 交 shell.openExternal。渲染层自己绝不导航——那会把整个工作台冲掉。
+        event.preventDefault();
+        if (href) window.open(href, "_blank", "noopener");
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+/**
+ * Images are never fetched. The source of this page is agent output, so a remote `<img>` would
+ * make opening it a network callback to whoever wrote the URL. The alt text and the link are all
+ * a reader needs anyway.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const label = alt && alt.length > 0 ? alt : (src ?? "image");
+  return <MarkdownLink href={src}>{label}</MarkdownLink>;
+}
+
+/**
+ * `first:mt-0 last:mb-0` on every block does more than trim the page's ends: a single paragraph
+ * inside a list item or a table cell is both first and last, so a loose list stops looking like
+ * a set of separate paragraphs without a rule of its own.
+ */
+const MARKDOWN_COMPONENTS: Components = {
+  a: MarkdownLink,
+  img: MarkdownImage,
+  pre: MarkdownPre,
+  code: MarkdownCode,
+  // 标题整体降一级：这页自己的标题在顶栏上，消息里的 `#` 是段落分节，不是页面标题。
+  h1: ({ children }) => <h2 className="mb-2 mt-5 text-lg font-semibold text-foreground first:mt-0">{children}</h2>,
+  h2: ({ children }) => <h3 className="mb-2 mt-5 text-base font-semibold text-foreground first:mt-0">{children}</h3>,
+  h3: ({ children }) => <h4 className="mb-1 mt-4 text-base font-medium text-foreground first:mt-0">{children}</h4>,
+  h4: ({ children }) => <h5 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h5>,
+  h5: ({ children }) => <h6 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h6>,
+  h6: ({ children }) => <h6 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h6>,
+  p: ({ children }) => <p className="my-3 first:mt-0 last:mb-0">{children}</p>,
+  ul: ({ children }) => (
+    <ul className="my-3 list-disc space-y-1 pl-5 marker:text-muted-foreground first:mt-0 last:mb-0">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="my-3 list-decimal space-y-1 pl-5 marker:text-muted-foreground first:mt-0 last:mb-0">{children}</ol>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="my-3 border-l-2 border-border pl-4 text-muted-foreground first:mt-0 last:mb-0">
+      {children}
+    </blockquote>
+  ),
+  hr: () => <hr className="my-6 border-border" />,
+  strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  table: ({ children }) => (
+    <div className="my-3 overflow-x-auto first:mt-0 last:mb-0">
+      <table className="w-full border-collapse text-sm">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => <th className="border border-border px-2 py-1 text-left font-medium">{children}</th>,
+  td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+};
+
+function PaperMarkdown({ text }: { text: string }) {
+  return (
+    <Markdown components={MARKDOWN_COMPONENTS} remarkPlugins={REMARK_PLUGINS}>
+      {text}
+    </Markdown>
   );
 }
