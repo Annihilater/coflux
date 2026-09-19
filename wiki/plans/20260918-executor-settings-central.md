@@ -195,12 +195,13 @@ Out of scope:
 | 装依赖（**先做**） | `pnpm install` | exit 0；本 worktree 是新切出来的，没有 `node_modules`，所有 pnpm 命令在此之前都会失败 |
 | 协议 lint | `buf lint`（在 `proto/` 下） | exit 0 |
 | 协议生成 | `buf generate`（在 `proto/` 下） | exit 0，且生成产物三处均已提交、工作区对这三个路径为空 |
-| 协议兼容 | `node scripts/check-protocol-breaking.mjs` | exit 0 |
+| 协议兼容 | 在 `proto/` 下 `node ../scripts/check-protocol-breaking.mjs "../.git#ref=<base_sha>,subdir=proto"` | exit 0（**必须带 baseline 参数**，不带只会打印用法并 exit 1；CI 传的是 PR base，本地用 main 的 SHA） |
 | 桌面类型检查 | `pnpm -C apps/desktop typecheck` | exit 0 |
 | 桌面单测 | `pnpm -C apps/desktop test` | exit 0 |
 | server 构建 | `pnpm -C apps/server build` | exit 0（`tsc -p tsconfig.json`，会写 gitignored 的 `dist/`） |
 | Rust 单测 | `COFLUX_HOME= cargo test -p coflux-worker` | exit 0 |
-| Rust lint | `cargo clippy -p coflux-worker --all-targets -- -D warnings` | exit 0 |
+| Rust 零警告构建 | `cargo build -p coflux-worker` | exit 0 且零 warning（这才是 `AGENTS.md` 要求的那道门） |
+| ~~Rust lint~~ | ~~`cargo clippy -p coflux-worker --all-targets -- -D warnings`~~ | **不要用这条判定本改动**：本仓库 CI 完全不跑 clippy，baseline 上它就报 23 个 error（集中在 `observed.rs` 8、`device.rs` 7、`main.rs` 4 等既有代码）。2026-09-19 验证时确认这 23 条全部落在本次 diff 的 hunk 之外 |
 | 黑盒 (acceptance) | `pnpm -C tests test` | exit 0（需要本机 PG:5432，Docker 是 OrbStack，先 `orb start`） |
 
 ## Done criteria
