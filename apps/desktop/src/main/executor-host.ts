@@ -255,7 +255,13 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       }
       return {
         ok: true,
-        validated: "已校验：provider、模型与凭据形式都正确",
+        // A save that stored no selection validated the endpoints and the credential shape and
+        // nothing else. Claiming the provider and model were checked would be a lie on exactly the
+        // path this sentence is seen most: adding the first endpoint, before anything is chosen.
+        validated:
+          input.provider && input.modelId
+            ? "已校验：provider、模型与凭据形式都正确"
+            : "已保存到账号：端点与凭据形式都正确",
         // The centre's own warning (an unreadable old ciphertext) outranks "no key yet": it is the
         // less obvious of the two.
         warning: written.warning || verdict.warning,
