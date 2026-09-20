@@ -64,7 +64,8 @@ test("自定义模型补齐 pi 必填的元数据，而这些值是编出来的�
 
 test("保存时的失败原因按成因分开，不合并成一句「配置无效」", () => {
   const base = { credentialProviders: ["anthropic"], customProviders: [relay] };
-  assert.match(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "" }).error, /^$/);
+  // 两个都空不在这一串里：它现在是合法状态，见下一条。
+  assert.equal(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "" }).ok, true);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "" }).error, /选一个模型/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "claude-sonnet-5" }).error, /选一个 provider/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "nope", modelId: "x" }).error, /provider 不存在/);
