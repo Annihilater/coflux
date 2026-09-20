@@ -50,7 +50,7 @@ read out of its shipped `workbench.desktop.main.{css,js}` and
 | h3–h6 | body size, weight alone separates them | 13px / 12px |
 | code block | **0.85em** ≈ 13px, line height 1.4 | 12px, `leading-relaxed` |
 | inline code | 0.8em = 12px | 12px — already matching |
-| blockquote | 3px left rule, `padding-left: 1em`, `margin: .5em 0` | 2px rule, `pl-4`, `my-3` |
+| blockquote | 3px left rule, `padding-left: 1em`, and the one-sided block margin below (Cursor's own `.5em 0` loses to the rule that no block carries a top margin) | 2px rule, `pl-4`, `my-3` |
 | table | `margin: 1em 0`, cell padding `.5em` | `my-3`, `px-2 py-1` |
 | rule (`hr`) | `margin: 1em 0` | `my-6` |
 | person's turn | right-aligned, **1px stroke + input-coloured fill + 12px radius**, padding 8px/12px | solid `bg-accent`, 8px radius, `px-4 py-2.5` |
@@ -269,6 +269,18 @@ stack instead (`pnpm dev:pg`, `pnpm dev:server`, this branch's `pnpm dev:daemon`
   (`workbench.glass.main.css`) over a 14px/22px default in
   `workbench.desktop.main.js`. The larger pair was taken deliberately: glass mode
   is what ships on by default, and it is what the maintainer sees.
+- Two landmine corrections found during implementation, both verified against the
+  built CSS rather than assumed. **`rounded-xl` is not 12px here** — astryx's
+  `tailwind-theme.css` maps `--radius-xl` to `--radius-page`, which
+  `theme-neutral` sets to 1.75rem (28px), so the explicit `rounded-[12px]` is
+  required and the landmine's suggestion was wrong. **`text-2xl` does resolve to
+  18px**, but not through `index.css`, whose `@theme inline` stops at `--text-lg`:
+  astryx maps `--text-2xl` to `--font-size-2xl`, which `main.tsx:36` points at
+  `--coflux-text-2xl`. Both resolve at the use site inside `<Theme>`.
+- **`#` and `##` now render identically** — 18px semibold, both — because Cursor
+  sets one size for h1 and h2 and separates nothing below that by size. It is the
+  reference's behaviour and it is a visible change from before, where the two
+  levels differed.
 - 840px at 15px is about 56 CJK characters or 110 latin characters per line —
   long by classical typographic advice and deliberately so, because matching
   Cursor was the requirement. If lines ever feel too long in practice, the measure
