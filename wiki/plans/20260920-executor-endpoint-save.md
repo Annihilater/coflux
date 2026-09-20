@@ -385,3 +385,14 @@ Rejected on advisor review: passing the catalogue into the projection function
 was adopted (it covers a built-in provider vanishing across a pi upgrade), but
 no attempt is made to *repair* such a selection — it is cleared like any other
 unresolvable one, and the user re-picks.
+
+Known narrow gap, found in review and deliberately left: while the catalogue is
+still loading (`catalog === null`, the first few hundred ms after the page
+opens) the projection cannot tell a built-in provider from a custom endpoint the
+save is deleting, so it preserves the saved selection. Deleting the endpoint the
+account is using inside that window is therefore still refused with "provider
+不存在", and the user succeeds on a second attempt. The endpoint controls are
+enabled during that window because `editingDisabled` only covers offline and
+`catalog.ready === false`, not `catalog === null`. Closing it properly means
+giving the projection the *pre-save* endpoint list (`settings.customProviders`),
+which distinguishes the two without the catalogue.
