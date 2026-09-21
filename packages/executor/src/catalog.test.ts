@@ -8,8 +8,8 @@ import {
   validateCredentialShape,
   validateExecutorSelection,
   type ExecutorCatalog,
-} from "./executor-catalog";
-import { EMPTY_EXECUTOR_CACHE, type ExecutorCachedCustomProvider } from "./executor-settings-cache";
+} from "./catalog.js";
+import { EMPTY_EXECUTOR_CACHE, type ExecutorCachedCustomProvider } from "./settings-cache.js";
 
 const relay: ExecutorCachedCustomProvider = {
   id: "my-relay",

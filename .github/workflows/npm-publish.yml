@@ -110,6 +110,16 @@ jobs:
         run: |
           node scripts/product-version.mjs --check "$RELEASE_TAG"
 
+      # cofluxd 的 prepack 用 esbuild 把 @coflux/executor 的 host/runner 打进包里（见 packages/cli
+      # 的 prepack）。那个包是 workspace 内部的、从不发布，所以 esbuild 必须先装好，否则 npm publish
+      # 在 prepack 就失败——这正是它该做的：发一个没有 executor 的 cofluxd，会在用户那里表现为
+      # 「这台机器没有 executor host」，而不是一个显眼的安装错误。
+      - name: 装 prepack 需要的构建工具
+        if: ${{ steps.release_tag.outputs.publish != 'false' }}
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
       - name: 发布（版本已存在则跳过）
         if: ${{ steps.release_tag.outputs.publish != 'false' }}
         working-directory: packages/cli

@@ -22,6 +22,8 @@
 - Workspace: isolated — 从 main 主工作区切出 `dev/20260918-executor-settings-central`
 - Planned at: `392387f4`, 2026-09-18
 
+> **Where this plan sits in what came after (added 2026-09-21)**: by moving credential persistence out of the desktop's `safeStorage` and into the 0600 cache file the daemon writes, this plan **reversed evidence (3) of decision D1 in [20260912-executor-engine](20260912-executor-engine.md)** ("provider credentials live only in desktop safeStorage, which a daemon-side runner cannot read"). [20260921-executor-daemon-host](20260921-executor-daemon-host.md) builds directly on that: the executor became an npm package the daemon can host, and its host reads exactly the cache file defined here — no second credential-distribution path was built. Everything this plan records about the read/write split, the cache file's shape and the memory-only credentials in both runtimes still holds; the only change is that the long-lived main-process `ModelRuntime` now comes from `@coflux/executor`, one implementation shared by both hosts.
+
 ## Requirement
 
 ### 问题

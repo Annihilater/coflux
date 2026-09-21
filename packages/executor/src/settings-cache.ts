@@ -8,7 +8,7 @@
  * offline, so only *changing* the configuration may require the centre.
  *
  * The file carries API keys in the clear. Nothing here may hand them to the renderer; the view the
- * renderer gets is assembled in `executor-config.ts` and deliberately has no credential field.
+ * renderer gets is assembled in `config.ts` and deliberately has no credential field.
  *
  * Change detection is a poll, not `fs.watch`: the daemon writes through a rename, the file may not
  * exist yet when the app starts, and `$COFLUX_HOME` itself may appear later — a two-second stat of

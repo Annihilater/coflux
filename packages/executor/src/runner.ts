@@ -1,13 +1,17 @@
 /**
- * The executor runner: the utilityProcess child's entry point. One process runs one task.
+ * The executor runner: the child process's entry point. One process runs one task.
  *
- * Why a separate process instead of running pi in the main process: pi spawns children, uses memory
- * and can crash, and a crashed main process takes the whole app with it. One process per task also
+ * It is forked two ways, by the two hosts: Coflux.app forks it as an Electron `utilityProcess`, and
+ * the daemon's host forks it with plain `child_process.fork`. Only the message channel differs (see
+ * `send` / `onHostMessage` below); everything a task does is this one file.
+ *
+ * Why a separate process instead of running pi inside the host: pi spawns children, uses memory and
+ * can crash, and a crashed host takes every concurrent task with it. One process per task also
  * gives "stop" a clean last resort — kill the whole tree.
  *
  * This side is **outside the sandbox**: model calls are made from this process, so it has network
  * access. The bash children that actually run the user's commands are wrapped in `sandbox-exec`, and
- * that side has no network and can only write the workspace (see executor-sandbox.ts).
+ * that side has no network and can only write the workspace (see sandbox.ts).
  *
  * Four key integration points with pi, each matching a recorded decision:
  *   1. **A closed ResourceLoader**: `noExtensions/noSkills/noPromptTemplates/noThemes/noContextFiles`
@@ -31,19 +35,38 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-import { guardToolCall } from "./executor-guard";
-import { sandboxArgv } from "./executor-sandbox";
+import { guardToolCall } from "./guard.js";
+import { sandboxArgv } from "./sandbox.js";
 import {
   EXECUTOR_RUNNER_EXIT,
   type ExecutorRunnerInbound,
   type ExecutorRunnerOutbound,
   type ExecutorRunnerStart,
-} from "./executor-runner-protocol";
+} from "./runner-protocol.js";
 
-declare const process: NodeJS.Process & { parentPort: { postMessage(value: unknown): void; on(event: "message", listener: (event: { data: unknown }) => void): void } };
+/**
+ * The link back to the host, in the two shapes a runner can be started in.
+ *
+ * Coflux.app forks this file as an Electron `utilityProcess`, which communicates through
+ * `process.parentPort`; the daemon's host forks it with plain `child_process.fork`, which gives
+ * `process.send`. Both are message channels carrying the same objects, so the difference is these
+ * few lines and nothing else — there is no second runner.
+ */
+type ParentPort = {
+  postMessage(value: unknown): void;
+  on(event: "message", listener: (event: { data: unknown }) => void): void;
+};
+
+const parentPort = (process as NodeJS.Process & { parentPort?: ParentPort }).parentPort;
 
 function send(message: ExecutorRunnerOutbound): void {
-  process.parentPort.postMessage(message);
+  if (parentPort) parentPort.postMessage(message);
+  else process.send?.(message);
+}
+
+function onHostMessage(listener: (message: ExecutorRunnerInbound) => void): void {
+  if (parentPort) parentPort.on("message", (event) => listener(event.data as ExecutorRunnerInbound));
+  else process.on("message", (value) => listener(value as ExecutorRunnerInbound));
 }
 
 let transcriptSeq = 0;
@@ -441,8 +464,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
 
 let aborting = false;
 
-process.parentPort.on("message", (event) => {
-  const message = event.data as ExecutorRunnerInbound;
+onHostMessage((message) => {
   if (message?.type === "abort") {
     aborting = true;
     void stopAllGroups().then(() => {

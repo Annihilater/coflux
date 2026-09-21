@@ -25,8 +25,10 @@ use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::agent_ctl::executor::{
-    self, Effect as ExecutorEffect, ExecutorLedger, RunRecord as ExecutorRun,
+    self, Effect as ExecutorEffect, ExecutorLedger, HostAuthority, RegisterOutcome,
+    RunRecord as ExecutorRun,
 };
+use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
 use crate::{Config, WorkerState, WsOut};
 
@@ -792,6 +794,11 @@ pub struct DeviceRuntime {
     /// 放在 runtime 上是因为两个消费方都只握得到它：`/agent` 的 executor.* 动作，
     /// 与本机 loopback 通道上来的 host 登记 / 回报帧。
     executor: Mutex<ExecutorLedger>,
+    /// JSONL towards the daemon's own executor host child, when this machine has one
+    /// (`executor_host.rs`). `None` means the host slot, if taken at all, belongs to Coflux.app.
+    /// Kept beside the ledger rather than in the channels table on purpose: that table is device
+    /// channels, and this link is a pipe to a child process with no principal and no scopes.
+    executor_local_host: Mutex<Option<mpsc::Sender<String>>>,
     /// 中心已触发执行过的 operation_id（plan 091）：Execute 重发只重放上次 report 或忽略在飞，绝不二次分派。
     executed_operations: Mutex<HashSet<String>>,
     /// 中心按需读快照的在飞等待者：内部 request_id → (session_id, 回执)。
@@ -887,6 +894,7 @@ impl DeviceRuntime {
             agent_io_states: Mutex::new(HashMap::new()),
             prepared: Mutex::new(HashMap::new()),
             executor: Mutex::new(ExecutorLedger::default()),
+            executor_local_host: Mutex::new(None),
             executed_operations: Mutex::new(HashSet::new()),
             pending_snapshot_reads: Mutex::new(HashMap::new()),
             requests: Mutex::new(CallLedger::default()),
@@ -2113,6 +2121,10 @@ impl DeviceRuntime {
             .host()
             .map(|host| host.channel_id.clone());
         let lost = match host_channel {
+            // The daemon's own host is a child process, not a device channel: its liveness is the
+            // process, reported by `executor_local_host_gone`. Looking it up here would declare it
+            // lost on the first gate, because it is deliberately not in the channels table.
+            Some(channel_id) if channel_id == EXECUTOR_LOCAL_CHANNEL => false,
             Some(channel_id) => !self.channels.lock().unwrap().contains_key(&channel_id),
             None => false,
         };
@@ -2148,6 +2160,7 @@ impl DeviceRuntime {
             device_envelope::Payload::ExecutorHostRegister(register) => {
                 let outcome = self.executor.lock().unwrap().register_host(
                     channel_id,
+                    HostAuthority::Client,
                     &register.host_id,
                     register.host_epoch,
                     &register.capabilities,
@@ -2209,6 +2222,9 @@ impl DeviceRuntime {
     }
 
     /// 把账本给出的一条 effect 变成真的帧。账本自己不碰 I/O，锁在这里已经放掉。
+    ///
+    /// 两个承载：本机 daemon 自己托管的 host 走 stdio JSONL（channel_id 是那个保留常量），
+    /// Coflux.app 走 device 通道。账本只认 channel_id，路由在这一层。
     fn dispatch_executor_effect(&self, effect: ExecutorEffect) {
         match effect {
             ExecutorEffect::Assign {
@@ -2226,26 +2242,154 @@ impl DeviceRuntime {
                         submitted_at: record.created_at,
                     })
                 };
-                if let Some(assign) = assign {
+                let Some(assign) = assign else { return };
+                if channel_id == EXECUTOR_LOCAL_CHANNEL {
+                    self.executor_local_host_send(&ExecutorHostInbound::Assign {
+                        run_id: assign.run_id,
+                        prompt: assign.prompt,
+                        write: assign.write,
+                        workspace_id: assign.workspace_id,
+                        workspace_root: assign.workspace_root,
+                        submitted_at: assign.submitted_at,
+                    });
+                } else {
                     self.send_payload(&channel_id, device_envelope::Payload::ExecutorAssign(assign));
                 }
             }
             ExecutorEffect::Cancel {
                 channel_id,
                 run_id,
-            } => self.send_payload(
-                &channel_id,
-                device_envelope::Payload::ExecutorCancel(wire::DeviceExecutorCancel { run_id }),
-            ),
+            } => {
+                if channel_id == EXECUTOR_LOCAL_CHANNEL {
+                    self.executor_local_host_send(&ExecutorHostInbound::Cancel { run_id });
+                } else {
+                    self.send_payload(
+                        &channel_id,
+                        device_envelope::Payload::ExecutorCancel(wire::DeviceExecutorCancel {
+                            run_id,
+                        }),
+                    );
+                }
+            }
             ExecutorEffect::ReportAck {
                 channel_id,
                 run_id,
-            } => self.send_payload(
-                &channel_id,
-                device_envelope::Payload::ExecutorReportAck(wire::DeviceExecutorReportAck {
-                    run_id,
-                }),
-            ),
+            } => {
+                if channel_id == EXECUTOR_LOCAL_CHANNEL {
+                    self.executor_local_host_send(&ExecutorHostInbound::Ack { run_id });
+                } else {
+                    self.send_payload(
+                        &channel_id,
+                        device_envelope::Payload::ExecutorReportAck(
+                            wire::DeviceExecutorReportAck { run_id },
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /* ------------------- the daemon's own executor host (stdio JSONL) ------------------- */
+
+    /// A freshly spawned host child brought its stdin queue. Replaces whatever was there: the
+    /// supervision loop in `executor_host.rs` only ever has one child at a time.
+    pub fn executor_local_host_attach(&self, outbound: mpsc::Sender<String>) {
+        *self.executor_local_host.lock().unwrap() = Some(outbound);
+    }
+
+    /// The host child exited.
+    ///
+    /// **Process-alive and link-up are different facts, and this is the first one.** The child is
+    /// really gone, so its runs cannot be re-reported by it; they get the same reconcile grace as a
+    /// dropped channel and become `Unknown` if the successor does not account for them — which it
+    /// will not, since a new host instance does not recognize another instance's runs. The job
+    /// table is still never cleared here, and no writer is ever re-dispatched.
+    pub fn executor_local_host_gone(&self) {
+        *self.executor_local_host.lock().unwrap() = None;
+        let now = epoch_ms();
+        let mut ledger = self.executor.lock().unwrap();
+        let ours = ledger
+            .host()
+            .is_some_and(|host| host.channel_id == EXECUTOR_LOCAL_CHANNEL);
+        if ours {
+            ledger.host_channel_lost(now);
+        }
+        ledger.sweep(now);
+    }
+
+    /// The host child claimed this machine's host slot. The election lives in the ledger.
+    pub fn executor_local_host_register(
+        &self,
+        host_id: &str,
+        epoch: u64,
+        capabilities: &[String],
+        ready: bool,
+        not_ready_reason: &str,
+    ) -> Result<RegisterOutcome, String> {
+        let now = self.executor_gate();
+        self.executor.lock().unwrap().register_host(
+            EXECUTOR_LOCAL_CHANNEL,
+            HostAuthority::DaemonLocal,
+            host_id,
+            epoch,
+            capabilities,
+            ready,
+            not_ready_reason,
+            now,
+        )
+    }
+
+    /// One report from the host child. Its identity is not taken from what it says: only the host
+    /// currently filed under the daemon-local slot may report, exactly as on the channel path.
+    pub fn executor_local_host_report(
+        &self,
+        run_id: &str,
+        state: &str,
+        note: &str,
+        summary: &str,
+        changed_files: Vec<String>,
+        error: &str,
+    ) {
+        let now = self.executor_gate();
+        let host = {
+            let ledger = self.executor.lock().unwrap();
+            ledger
+                .host()
+                .filter(|host| host.channel_id == EXECUTOR_LOCAL_CHANNEL)
+                .map(|host| (host.host_id.clone(), host.epoch))
+        };
+        let Some((host_id, host_epoch)) = host else {
+            return;
+        };
+        let Some(state) = executor::report_state_from_str(state) else {
+            return;
+        };
+        let effect = self.executor.lock().unwrap().apply_report(
+            &host_id,
+            host_epoch,
+            run_id,
+            state,
+            note,
+            summary,
+            changed_files,
+            error,
+            now,
+        );
+        if let Some(effect) = effect {
+            self.dispatch_executor_effect(effect);
+        }
+    }
+
+    /// Queue one frame towards the host child. A full or closed queue is dropped rather than
+    /// awaited: this runs under the ledger's callers, and the exit watcher is what notices a child
+    /// that stopped reading.
+    pub fn executor_local_host_send(&self, message: &ExecutorHostInbound) {
+        let Ok(line) = serde_json::to_string(message) else {
+            return;
+        };
+        let sender = self.executor_local_host.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            let _ = sender.try_send(line);
         }
     }
 

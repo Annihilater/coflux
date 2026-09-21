@@ -424,8 +424,31 @@ test("entity handle：账号下没有对应实体的 handle 报未知，不落�
   assert.equal(unknownTerminal.ok, false);
   assert.match(unknownTerminal.error, /没有对应的终端/);
 
-  // 不是 handle 的字符串原样透传，走原来的归属校验，措辞不变。
+  // 不是 handle 的字符串原样透传，走原来的归属校验，终端这条的措辞不变（设备那条见下一用例）。
   const plain = await accountCommand({ op: "terminal.read", terminalId: randomUUID(), lines: 5 });
   assert.equal(plain.ok, false);
   assert.match(plain.error, /不存在或不属于当前账号/);
+});
+
+/** 打不中任何设备的 id 必须说"这不是本账号的设备"，不能说"离线"：后者会让 agent 去查连通性，
+ * 而真正要改的是它写的那串 id。回归时症状就是这个误诊本身，用着产品看不出来，所以留一条断言。 */
+test("device：写错的设备 id 说的是 id 不对，不是设备离线", async () => {
+  // 在线设备 UUID 的裸 8 位前缀——少了 coflux:device: 前缀就不是 handle，会原样当 id 透传，
+  // 正是这条 plan 要修的那条路；再配一个全新 UUID，确保不是只对某种形状的 id 成立。
+  const barePrefix = stack.daemonId.slice(0, 8);
+  for (const deviceId of [randomUUID(), barePrefix]) {
+    const exec = await accountCommand({ op: "device.exec", deviceId, command: "true" });
+    assert.equal(exec.ok, false, `device.exec 不该受理不存在的设备 ${deviceId}`);
+    assert.match(exec.error, /不存在或不属于当前账号/, `device.exec 要点出 id 不对：${exec.error}`);
+    assert.doesNotMatch(exec.error, /离线/, `不能把写错的 id 报成掉线：${exec.error}`);
+
+    const imported = await accountCommand({ op: "project.import", daemonId: deviceId, path: "/tmp" });
+    assert.equal(imported.ok, false, `project.import 不该受理不存在的设备 ${deviceId}`);
+    assert.match(imported.error, /不存在或不属于当前账号/, `project.import 要点出 id 不对：${imported.error}`);
+    assert.doesNotMatch(imported.error, /离线/, `不能把写错的 id 报成掉线：${imported.error}`);
+  }
+
+  // 在线的真设备照旧受理（上面那条 doesNotMatch 不是靠把设备判成"存在但离线"混过去的）。
+  const live = await deviceExec({ command: "true" });
+  assert.equal(live.ok, true, live.error);
 });

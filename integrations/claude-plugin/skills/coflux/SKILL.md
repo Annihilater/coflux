@@ -206,8 +206,9 @@ and terminal tabs, long-press on iOS rows and terminal chips) and show no handle
 
 ### When a handle does not resolve
 
-A handle is a prefix, so resolving one can fail in three distinct ways. Each is one readable
-sentence; what matters is which of the three you got:
+A handle is a prefix, so resolving one can fail in three distinct ways — and there is a fourth case
+that is not a resolution failure at all. Each is one readable sentence; what matters is which of the
+four you got:
 
 - **Nothing matches** — no entity of that kind, within the scope that command can see, starts with
   that short id. The handle belongs to another account, to a workspace you are not in, or to
@@ -218,6 +219,12 @@ sentence; what matters is which of the three you got:
 - **Wrong kind** — the handle is well-formed but names a different kind than the command expects
   (a workspace handle where a terminal id goes). The command fails rather than act on an adjacent
   entity; the fix is a handle of the expected kind, never a retry.
+- **It was never a handle** — the `coflux:<kind>:` prefix is **mandatory**. `b6767697` on its own is
+  not a handle, however faithfully it copies the first 8 characters of a real UUID. Nothing rejects
+  it as malformed: it is forwarded untouched as a literal id and fails wherever that id is looked
+  up, **with a message that says nothing about id syntax** — for a device it reads
+  `设备 b6767697 不存在或不属于当前账号`. The three errors above cannot warn you here, because the
+  string never reached the resolver. Write `coflux:device:b6767697`, never `b6767697`.
 
 The scopes differ on purpose: account CLI commands resolve a handle among **the requesting
 account's** entities, while local terminal commands resolve it among the terminals of **the
@@ -433,7 +440,12 @@ to change something, send a new run with a new prompt. So **write the prompt as 
 hint**: the executor gets that one string and nothing else — no conversation history, no way to ask
 you what you meant. Say what done looks like and how to check it.
 
-Its boundaries, enforced by a kernel sandbox — count on them, and tell it what it needs up front:
+**Where it exists: macOS only.** Its boundaries are enforced by the macOS kernel sandbox, and there
+is no equivalent on Linux yet, so a Linux machine has no executor and the command says so. On macOS
+it is hosted either by the daemon the user installed from npm or by the desktop app, whichever that
+machine has — you do not choose, and nothing about the command changes either way.
+
+Its boundaries, enforced by that kernel sandbox — count on them, and tell it what it needs up front:
 
 - **Only the originating workspace is writable.** Writes anywhere outside it are refused by the
   kernel. Reads are not restricted, so it can still see system files, toolchains and the rest of the
@@ -446,12 +458,14 @@ Its boundaries, enforced by a kernel sandbox — count on them, and tell it what
 - **One writing executor per workspace at a time.** A second `--write` in the same workspace is
   refused outright rather than queued; read-only runs may go in parallel up to a small cap.
 
-It runs inside the user's desktop app, so it only exists on the machine that app is on, and a run
-ends if the user quits the app, signs out, or stops the machine's terminals (you get a definite
-failure, never a hang). `--timeout <seconds>` caps how long you wait; the default is 30 minutes and
-a timeout cancels the run before failing. The model comes from the user's desktop settings; if they
-have not configured one, the command says so in one line — relay that to the user instead of
-retrying.
+A run ends if the host it is on goes away — the user quits the desktop app, signs out, or stops the
+machine's terminals — and you get a definite failure, never a hang. `--timeout <seconds>` caps how
+long you wait; the default is 30 minutes and a timeout cancels the run before failing. The model
+comes from the user's account-wide executor settings; if they have not configured one, the command
+says so in one line — relay that to the user instead of retrying.
+
+**Images and other files are not an input.** The prompt is a task description with a size cap, not a
+file channel: point at paths inside the workspace instead of trying to hand anything over.
 
 ### Errors from local commands
 
@@ -529,7 +543,9 @@ Success is one line of JSON: `projectId`, `name`, `repoPath`, `defaultBranch`, t
 project, so importing the same repository twice returns the existing one with
 `alreadyImported: true` and creates nothing — re-running it is safe. Failures are one sentence and a
 non-zero exit: "不是 git 仓库" (the path is not inside a repository), "设备离线，无法执行该操作"
-(that device is not connected), and a submitted-but-unfinished import tells you to check
+(that device exists but is not connected), "设备 <id> 不存在或不属于当前账号" (no device of this
+account has that id — fix what you typed rather than go looking at the machine; a bare `b6767697`
+with no `coflux:device:` prefix lands here), and a submitted-but-unfinished import tells you to check
 `coflux project list`.
 
 ### Run one command on another machine
@@ -548,9 +564,11 @@ work, and quoting is yours to get right.
 Its output is not JSON: stdout goes to stdout, stderr goes to stderr (always separate, and each one
 carries an explicit marker if it had to be truncated), and the last line is `# exit=<code>`. **The
 CLI's exit code is the remote command's**, so an ordinary shell test around it works. The CLI's own
-failures — device offline, that device's daemon too old (`cofluxd update && cofluxd restart` there),
-`--cwd` missing or not a directory, the timeout elapsing — are one readable sentence and exit **255**,
-so a remote exit 1 is never confused with "it never ran".
+failures — device offline (it exists and is not connected), no device of this account with that id
+(`设备 <id> 不存在或不属于当前账号`: a mistyped or bare-prefix id, **not** an outage to investigate),
+that device's daemon too old (`cofluxd update && cofluxd restart` there), `--cwd` missing or not a
+directory, the timeout elapsing — are one readable sentence and exit **255**, so a remote exit 1 is
+never confused with "it never ran".
 
 `--cwd` is the only addressing: an absolute path or a `~` prefix, defaulting to the daemon user's
 HOME. To run inside a workspace, pass the `path` from `coflux workspace list --device <deviceId>`.

@@ -17,3 +17,6 @@ target/
 
 # Xcode 自动生成（本项目不用 Xcode Cloud）
 xcodecloud/
+
+# cofluxd 打包前从 packages/executor/dist 拷入的 executor 产物（scripts/vendor-executor.mjs）
+packages/cli/executor/
