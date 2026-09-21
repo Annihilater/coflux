@@ -137,6 +137,9 @@ function PaletteHeader({
               "flex h-6 items-center rounded-md px-2 text-xs transition-colors",
               tab.id === filter ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
             )}
+            // Keep the caret in the search field: a click that stole focus would leave the user
+            // typing into a tab button, with the palette apparently ignoring the keyboard.
+            onMouseDown={(event) => event.preventDefault()}
             onClick={() => context && onFilterChange(tab.id, context)}
           >
             {tab.label}
@@ -184,6 +187,12 @@ export function NavigationPalette(props: NavigationPaletteProps) {
   const recentRef = useRef<readonly string[]>([]);
   const filterRef = useRef<PaletteFilter>("all");
   const wasOpenRef = useRef(false);
+  // One CommandPalette instance per open, because the component only resets itself along its own
+  // close path: ⌘P pressed a second time flips `isOpen` from the outside, and the query, its
+  // results and the highlight index would all still be there when the palette came back. The key
+  // changes on open and never on close, so the instance that is on screen is always the one that
+  // handles its own dismissal — including handing focus back to the terminal.
+  const openEpochRef = useRef(0);
   const [filter, setFilter] = useState<PaletteFilter>("all");
 
   if (props.isOpen !== wasOpenRef.current) {
@@ -191,6 +200,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
     filterRef.current = "all";
     setFilter("all");
     if (props.isOpen) {
+      openEpochRef.current += 1;
       const state = props.client.store.getState();
       snapshotRef.current = buildPaletteSnapshot({
         projects: state.projects,
@@ -239,6 +249,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
 
   return (
     <CommandPalette<PaletteItem>
+      key={openEpochRef.current}
       isOpen={props.isOpen}
       onOpenChange={props.onOpenChange}
       searchSource={searchSource}

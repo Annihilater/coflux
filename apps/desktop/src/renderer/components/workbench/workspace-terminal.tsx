@@ -312,6 +312,22 @@ export const WorkspaceTerminal = forwardRef<WorkspaceTerminalHandle, WorkspaceTe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTasks]);
 
+  // A jump that is not a task move (plan 20260921's ⌘P palette, and the notification inbox before
+  // it) changes no task entity, so the effect above — which tracks `workspaceTasks` alone — never
+  // runs for it. The symptom is partial and easy to misread: a jump into a freshly mounted
+  // workspace works, because that effect runs on mount anyway, while a jump inside a workspace
+  // already on screen leaves the tab bar on the old tab with the panel showing the new one.
+  // Activating here covers both. The parent clears the follow token after one pass, so the re-run
+  // with a null token is a no-op, and so is a token that is already the active tab.
+  useEffect(() => {
+    if (!followTaskId) return;
+    if (activeTaskIdRef.current === followTaskId && viewRef.current === "terminal") return;
+    const task = currentTasks().find((item) => item.id === followTaskId);
+    if (!task) return;
+    requestActivation(task.id, attach.stateOf(task) === "detached");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followTaskId]);
+
   // error 消息到达时清 pending 创建态（taskCreate 失败兜底）；launching 态归提升后的状态机清。
   useEffect(() => {
     if (!lastError) return;

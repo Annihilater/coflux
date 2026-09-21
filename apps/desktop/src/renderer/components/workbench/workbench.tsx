@@ -18,6 +18,9 @@ import {
   type ConfirmAction,
 } from "@/components/workbench/dialogs";
 import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding";
+import { NavigationPalette } from "@/components/workbench/command-palette";
+import { deviceVisitKey, terminalVisitKey, workspaceVisitKey } from "@/components/workbench/command-palette-data";
+import { recordRecentPlace, type RecentPlacesStore } from "@/components/workbench/command-palette-recent";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { useSettingsTooltipControl } from "@/components/workbench/account-footer";
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
@@ -43,7 +46,7 @@ import {
   taskCloseNeedsConfirmation,
   type WorkbenchSelection,
 } from "@/components/workbench/workbench-state";
-import { DAEMON_ONBOARDING_DISMISSED_KEY, WORKSPACE_KEY, desktop } from "@/config";
+import { COMMAND_PALETTE_RECENT_KEY, DAEMON_ONBOARDING_DISMISSED_KEY, WORKSPACE_KEY, desktop } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { isDirWorkspace, type CofluxClient } from "@coflux/client";
@@ -86,6 +89,13 @@ function persistSelection(selection: WorkbenchSelection | null) {
   if (serialized === null) localStorage.removeItem(WORKSPACE_KEY);
   else localStorage.setItem(WORKSPACE_KEY, serialized);
 }
+
+/**
+ * Where the ⌘P palette's 「最近」 list lives (plan 20260921). The store is the injection point the
+ * MRU module asks for: it never reaches for `@/config` or `localStorage` itself, so it stays
+ * unit-testable, and every read and write inside it is already guarded against storage throwing.
+ */
+const RECENT_PLACES_STORE: RecentPlacesStore = { storage: localStorage, key: COMMAND_PALETTE_RECENT_KEY };
 
 /** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
 function persistOnboardingDismissed() {
@@ -202,6 +212,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useExecutorBridge(client, daemonState?.daemonId);
   const [daemonDialog, setDaemonDialog] = useState<"onboarding" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The ⌘P navigation palette (plan 20260921). While it is open the whole workbench shortcut set
+  // is suspended, which is what lets ⌘[ / ⌘] reach its filter tabs.
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // 侧栏宽度在这里持有一份，工作台侧栏与设置页左栏共用，避免设置页盖上来时宽度突变。
   const sidebarWidth = useSidebarWidth();
   // 齿轮 tooltip 的压制开关同理：点一下齿轮就换了一个脚部实例接管同一个位置，状态必须在它们之上。
@@ -280,6 +293,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
     activeTabsRef.current = { ...activeTabsRef.current, [workspaceId]: next };
     setActiveTabs(activeTabsRef.current);
     syncVisibleTask();
+    // The ⌘P recent list (plan 20260921) only counts the terminal the user is actually looking
+    // at. These reports also arrive for hidden, kept-alive workspaces — a background agent
+    // exiting makes its container fall back to another tab — and recording those would put a
+    // place the user has never seen at the top of 「最近」. An optimistic tab's fake id is not a
+    // place either, so the task has to exist in the catalogue.
+    if (workspaceId !== activeWorkspaceIdRef.current || !next.viewIsTerminal || !next.taskId) return;
+    const taskId = next.taskId;
+    if (client.store.getState().tasks.some((task) => task.id === taskId)) recordRecentPlace(RECENT_PLACES_STORE, terminalVisitKey(taskId));
   }
 
   const activeTab = activeWorkspaceId ? activeTabs[activeWorkspaceId] : undefined;
@@ -363,6 +384,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
     document.title = selectedDevice ? `${selectedDevice.name} · coflux` : project ? `${project.name} · coflux` : "coflux · workspace";
   }, [selectedWorkspace, selectedDevice, projects]);
 
+  // The ⌘P recent list (plan 20260921) records the place the user is actually looking at, which
+  // includes the one restored from storage on a cold start — without that, the first ⌘P after a
+  // restart would have no "previous place" to bounce back to. Keying the effect on the composed
+  // key rather than the selection object keeps snapshot reconciliation, which re-resolves the
+  // selection on every batch, from writing on every batch; recording is move-to-front anyway.
+  const visitedPlaceKey =
+    selection?.kind === "device" ? deviceVisitKey(selection.id) : selectedWorkspace ? workspaceVisitKey(selectedWorkspace.id) : null;
+  useEffect(() => {
+    if (visitedPlaceKey) recordRecentPlace(RECENT_PLACES_STORE, visitedPlaceKey);
+  }, [visitedPlaceKey]);
+
   // 只为当前进入的工作区显式持有 Device route；隐藏终端若仍 desired，会由 session 自身继续
   // 持有。切换/删除工作区时 release，避免一次 probe 永久留下 socket 与轮询器。
   useEffect(() => {
@@ -408,6 +440,41 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
     setSelection(next);
     persistSelection(next);
+  }
+
+  /**
+   * ⌘P (plan 20260921). Opening the palette closes the settings page first: settings owns Escape
+   * in the capture phase and stops propagation, so with both on screen Escape would close settings
+   * and leave the palette stranded. Closing needs no interlock — nothing can be under it by then.
+   */
+  function togglePalette() {
+    if (paletteOpen) {
+      setPaletteOpen(false);
+      return;
+    }
+    setSettingsOpen(false);
+    setPaletteOpen(true);
+  }
+
+  /**
+   * Land on a terminal tab, wherever it lives: the same five-step jump the task-move and
+   * notification paths take. The follow token is what carries the request into a workspace whose
+   * container is not mounted yet; the container also activates on the token alone, which is what
+   * makes a jump inside the workspace already on screen work (see workspace-terminal.tsx).
+   */
+  function openPaletteTerminal(workspaceId: string, taskId: string) {
+    activeTabsRef.current = { ...activeTabsRef.current, [workspaceId]: { taskId, viewIsTerminal: true } };
+    setActiveTabs(activeTabsRef.current);
+    setFollowTask({ workspaceId, taskId });
+    // A directory workspace is the carrier of a device detail view, and selecting it directly
+    // would leave the sidebar with nothing highlighted. Select the device instead — but only when
+    // this really is the workspace that view resolves to, otherwise the panel would land elsewhere.
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (workspace && isDirWorkspace(workspace) && canonicalDirWorkspaceOf(workspace.daemonId)?.id === workspaceId) {
+      selectDevice(workspace.daemonId);
+      return;
+    }
+    selectWorkspace(workspaceId);
   }
 
   function navigateNotificationTask(taskId: string): boolean {
@@ -625,9 +692,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     onOpenCreateWorkspaceMenu: setCreateMenuProjectId,
     onToggleHelp: () => setHelpOpen((open) => !open),
     onToggleSettings: () => setSettingsOpen((open) => !open),
+    onTogglePalette: togglePalette,
     // 设置页盖住工作台时终端既看不见也点不到，⌘T/⌘W/⌘1 之类再落到终端上就是盲操作；
-    // 原生菜单项走同一条挂起开关。
-    isSuspended: settingsOpen,
+    // 原生菜单项走同一条挂起开关。跳转面板同理，而且它还要拿回被这里吞掉的 ⌘[ ⌘]。
+    isSuspended: settingsOpen || paletteOpen,
   });
 
   const surface = resolveWorkbenchSurface(authState);
@@ -851,6 +919,25 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onSave={saveProjectName}
       />
       <ConfirmActionDialog action={confirmAction} onCancel={() => setConfirmAction(null)} />
+      {/* The ⌘P navigation palette (plan 20260921). Kept mounted and toggled through `isOpen`
+          rather than mounted on demand: astryx's Dialog hands focus back to whatever was focused
+          before it opened, and unmounting it means nobody does — Escape would leave the terminal
+          without focus. The palette rebuilds its snapshot in the render that opens it, so nothing
+          of the previous open survives. */}
+      <NavigationPalette
+        isOpen={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        client={client}
+        recentStore={RECENT_PLACES_STORE}
+        current={{
+          workspaceId: activeWorkspaceId,
+          taskId: visibleTaskId,
+          daemonId: selection?.kind === "device" ? selection.id : null,
+        }}
+        onOpenWorkspace={selectWorkspace}
+        onOpenTerminal={openPaletteTerminal}
+        onOpenDevice={selectDevice}
+      />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <EnrollmentDialog open={enrollmentOpen} onOpenChange={setEnrollmentOpen} />
       {settingsOpen ? (

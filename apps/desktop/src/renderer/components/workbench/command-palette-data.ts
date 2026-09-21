@@ -93,7 +93,7 @@ export function deviceVisitKey(daemonId: string): string {
   return `device:${daemonId}`;
 }
 
-export const EMPTY_PALETTE_SNAPSHOT: PaletteSnapshot = { entries: [], currentKeys: new Set() };
+export const EMPTY_PALETTE_SNAPSHOT: PaletteSnapshot = { entries: [], currentKeys: new Set<string>() };
 
 export type PaletteSnapshotInput = {
   projects: readonly Project[];
@@ -141,9 +141,9 @@ function agentActivityOf(state: string | undefined, daemonOnline: boolean): Pale
  * but their running terminals are, because those are real terminals the user may be looking for.
  */
 export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapshot {
-  const daemonById = new Map(input.daemons.map((daemon) => [daemon.daemonId, daemon]));
-  const projectById = new Map(input.projects.map((project) => [project.id, project]));
-  const workspaceById = new Map(input.workspaces.map((workspace) => [workspace.id, workspace]));
+  const daemonById = new Map<string, DaemonInfo>(input.daemons.map((daemon) => [daemon.daemonId, daemon]));
+  const projectById = new Map<string, Project>(input.projects.map((project) => [project.id, project]));
+  const workspaceById = new Map<string, Workspace>(input.workspaces.map((workspace) => [workspace.id, workspace]));
   const entries: PaletteEntry[] = [];
 
   for (const project of input.projects) {
@@ -286,7 +286,7 @@ export function searchPaletteEntries(input: PaletteSearchInput): PaletteItem[] {
     // The current location is only excluded here: on a typed query, hiding what the user just
     // searched for by name would read as a bug.
     const reachable = candidates.filter((entry) => !input.snapshot.currentKeys.has(entry.key));
-    const byKey = new Map(reachable.map((entry) => [entry.key, entry]));
+    const byKey = new Map<string, PaletteEntry>(reachable.map((entry) => [entry.key, entry]));
     const recent: PaletteEntry[] = [];
     for (const key of input.recent) {
       const entry = byKey.get(key);

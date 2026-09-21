@@ -71,7 +71,15 @@ export type DesktopUpdateState = {
 };
 
 /** 原生菜单项触发的命令；语义与 use-global-shortcuts.ts 的键位一一对应，⌘1-9 不进菜单。 */
-export type DesktopCommand = "create-terminal" | "close-terminal" | "create-workspace" | "previous-tab" | "next-tab" | "toggle-help" | "open-settings";
+export type DesktopCommand =
+  | "create-terminal"
+  | "close-terminal"
+  | "create-workspace"
+  | "previous-tab"
+  | "next-tab"
+  | "toggle-help"
+  | "open-settings"
+  | "toggle-palette";
 
 export type DesktopNotification = {
   notificationId?: string;
