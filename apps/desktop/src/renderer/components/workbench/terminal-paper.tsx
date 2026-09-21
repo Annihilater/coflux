@@ -214,10 +214,16 @@ export function TerminalPaper(props: TerminalPaperProps) {
             aria-label="对话原文"
             className="h-full w-full cursor-text select-text overflow-y-auto outline-none"
           >
-            {/* 单栏窄版心 + 系统 UI 字体：与终端的等宽字一起，这两样才是"这是纸不是终端"的由来，
-                不靠一个刺眼的白底（夜里会炸眼，纸面颜色跟随主题）。break-words 兜住长到没有断点的
-                token（URL、哈希），让它换行而不是把版心撑宽。 */}
-            <div className="mx-auto max-w-[68ch] break-words px-8 pb-16 pt-6 font-sans text-base leading-[1.85]">
+            {/* One centred column in the system UI face: together with the terminal's monospace, that
+                pairing — not a glaring white sheet — is what makes this read as paper (the surface
+                follows the theme). The measure is Cursor's `--composer-max-width`, a constant 840px at
+                every window size: a pane narrower than it simply fills, and a 3840px display does not
+                stretch prose into hundred-character lines. 15px on a 24px line is Cursor's
+                `--cursor-font-size-lg` / `--cursor-line-height-lg`; `text-lg` is already that step here
+                (index.css, IDE density — `text-base` is 13px, which is how a `ch` measure once came out
+                at 490px). break-words catches tokens with no break opportunity (URLs, hashes) so they
+                wrap instead of widening the column. */}
+            <div className="mx-auto max-w-[840px] break-words px-8 pb-16 pt-6 font-sans text-lg leading-[1.6]">
               <PaperHeader agent={props.agent} />
               <PaperBody result={result} />
             </div>
@@ -279,15 +285,23 @@ function PaperBody({ result }: { result: TranscriptResult | null }) {
 
 function PaperEntry({ entry }: { entry: TranscriptEntry }) {
   if (entry.kind === "tool") {
-    // 工具调用只当路标：一行、灰、永不展开。
-    return <p className="truncate font-mono text-xs text-muted-foreground">⏺ {entry.label}</p>;
+    // A tool call is only a landmark: one line, dim, never expanded. It sits one step under the
+    // prose (12px against 15px) so it signposts without competing — and keeps the monospace face,
+    // because these lines carry shell commands.
+    return <p className="truncate font-mono text-sm text-muted-foreground">⏺ {entry.label}</p>;
   }
   if (entry.kind === "prompt") {
     // Only the person's own turns get a bubble: those are the anchors you scan for on the way
     // back up. The extra top padding does the work a divider would.
+    //
+    // The skin is Cursor's `.composer-human-message`: a 1px stroke, the input surface as fill, a
+    // 12px radius. Two of those three have to be spelled out rather than taken from a token.
+    // `border-border` (#242422 on a #1b1b1a paper) is a ~3% step and reads as no outline at all,
+    // where Cursor's stroke is ~12% of the foreground — hence the foreground mix. And `rounded-xl`
+    // is not 12px here: Astryx maps it to `--radius-page`, 28px.
     return (
       <div className="flex justify-end pt-2">
-        <div className="min-w-0 max-w-[80%] rounded-lg bg-accent px-4 py-2.5 text-foreground">
+        <div className="min-w-0 max-w-[80%] rounded-[12px] border border-foreground/12 bg-input px-3 py-2 text-foreground">
           <PaperMarkdown text={entry.text} />
         </div>
       </div>
@@ -337,7 +351,7 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
   return (
     <InsideCodeBlock value={true}>
       {/* 横向滚动而不是撑宽：版心宽度是这页可读性的全部，长命令行不该改变它。 */}
-      <pre className="my-3 overflow-x-auto rounded-md border border-border bg-background px-3 py-2 font-mono text-sm leading-relaxed first:mt-0 last:mb-0">
+      <pre className="mb-[1em] overflow-x-auto rounded-md border border-border bg-background px-3 py-2 font-mono text-base leading-[1.4] last:mb-0">
         {children}
       </pre>
     </InsideCodeBlock>
@@ -379,44 +393,53 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 /**
- * `first:mt-0 last:mb-0` on every block does more than trim the page's ends: a single paragraph
- * inside a list item or a table cell is both first and last, so a loose list stops looking like
- * a set of separate paragraphs without a rule of its own.
+ * Block spacing is Cursor's one-sided rule — `margin-top: 0`, `margin-bottom: 1em` — and not a
+ * symmetric rhythm: symmetric margins collapse differently between siblings and nested blocks, so
+ * the same markup gains and loses gaps depending on what it happens to sit next to. Headings are
+ * the one exception and keep symmetric `.5em` margins, which is why they alone still carry
+ * `first:mt-0`; everywhere else the top margin is already zero.
+ *
+ * `last:mb-0` stays on every block, and still earns its keep: a single paragraph inside a list
+ * item or a table cell is both first and last, so a loose list stops looking like a set of
+ * separate paragraphs without a rule of its own.
  */
 const MARKDOWN_COMPONENTS: Components = {
   a: MarkdownLink,
   img: MarkdownImage,
   pre: MarkdownPre,
   code: MarkdownCode,
-  // 标题整体降一级：这页自己的标题在顶栏上，消息里的 `#` 是段落分节，不是页面标题。
-  h1: ({ children }) => <h2 className="mb-2 mt-5 text-lg font-semibold text-foreground first:mt-0">{children}</h2>,
-  h2: ({ children }) => <h3 className="mb-2 mt-5 text-base font-semibold text-foreground first:mt-0">{children}</h3>,
-  h3: ({ children }) => <h4 className="mb-1 mt-4 text-base font-medium text-foreground first:mt-0">{children}</h4>,
-  h4: ({ children }) => <h5 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h5>,
-  h5: ({ children }) => <h6 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h6>,
-  h6: ({ children }) => <h6 className="mb-1 mt-4 text-sm font-medium text-foreground first:mt-0">{children}</h6>,
-  p: ({ children }) => <p className="my-3 first:mt-0 last:mb-0">{children}</p>,
+  // The tag demotion stays (this page's own title is in the header bar, so a message's `#` is a
+  // section break, not a page title). Only the top two levels grow, to Cursor's 1.214em of the
+  // 15px body — 18px, which is the `--coflux-text-2xl` step. From there down a heading sits at
+  // body size and its weight alone separates it, exactly as the reference does.
+  h1: ({ children }) => <h2 className="my-[0.5em] text-2xl font-semibold text-foreground first:mt-0">{children}</h2>,
+  h2: ({ children }) => <h3 className="my-[0.5em] text-2xl font-semibold text-foreground first:mt-0">{children}</h3>,
+  h3: ({ children }) => <h4 className="my-[0.5em] text-lg font-medium text-foreground first:mt-0">{children}</h4>,
+  h4: ({ children }) => <h5 className="my-[0.5em] text-lg font-medium text-foreground first:mt-0">{children}</h5>,
+  h5: ({ children }) => <h6 className="my-[0.5em] text-lg font-medium text-foreground first:mt-0">{children}</h6>,
+  h6: ({ children }) => <h6 className="my-[0.5em] text-lg font-medium text-foreground first:mt-0">{children}</h6>,
+  p: ({ children }) => <p className="mb-[1em] last:mb-0">{children}</p>,
   ul: ({ children }) => (
-    <ul className="my-3 list-disc space-y-1 pl-5 marker:text-muted-foreground first:mt-0 last:mb-0">{children}</ul>
+    <ul className="mb-[1em] list-disc space-y-1 pl-[2em] marker:text-muted-foreground last:mb-0">{children}</ul>
   ),
   ol: ({ children }) => (
-    <ol className="my-3 list-decimal space-y-1 pl-5 marker:text-muted-foreground first:mt-0 last:mb-0">{children}</ol>
+    <ol className="mb-[1em] list-decimal space-y-1 pl-[2em] marker:text-muted-foreground last:mb-0">{children}</ol>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="my-3 border-l-2 border-border pl-4 text-muted-foreground first:mt-0 last:mb-0">
+    <blockquote className="mb-[1em] border-l-[3px] border-border pl-[1em] text-muted-foreground last:mb-0">
       {children}
     </blockquote>
   ),
-  hr: () => <hr className="my-6 border-border" />,
+  hr: () => <hr className="mb-[1em] border-border last:mb-0" />,
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,
   table: ({ children }) => (
-    <div className="my-3 overflow-x-auto first:mt-0 last:mb-0">
+    <div className="mb-[1em] overflow-x-auto last:mb-0">
       <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border border-border px-2 py-1 text-left font-medium">{children}</th>,
-  td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+  th: ({ children }) => <th className="border border-border p-[0.5em] text-left font-medium">{children}</th>,
+  td: ({ children }) => <td className="border border-border p-[0.5em] align-top">{children}</td>,
 };
 
 function PaperMarkdown({ text }: { text: string }) {
