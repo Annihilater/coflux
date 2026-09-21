@@ -13,9 +13,14 @@
     "account-client.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
+    "service-unit.mjs",
     "README.md",
-    "skills"
+    "skills",
+    "executor"
   ],
+  "scripts": {
+    "prepack": "esbuild ../executor/src/host.ts ../executor/src/runner.ts --bundle --platform=node --target=node20 --format=esm --external:@earendil-works/pi-coding-agent --outdir=executor --log-level=warning"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -33,5 +38,11 @@
     "cli",
     "remote-terminal",
     "pty"
-  ]
+  ],
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
 }

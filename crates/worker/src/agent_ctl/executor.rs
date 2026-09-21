@@ -1,20 +1,25 @@
-//! The executor run ledger: the very small job table between `coflux executor run` and the desktop
-//! app.
+//! The executor run ledger: the very small job table between `coflux executor run` and whichever
+//! host this machine has.
 //!
 //! **The daemon does exactly three things on this path**: recognize the machine's single executor
 //! host, push assignments to it, and store the states and terminal outcomes it reports for the CLI
-//! to poll. Scheduling, the write lock, transcripts and model calls all live in the desktop main
-//! process — worker memory is lost on hot upgrade (see the command-log index comment in
-//! `crates/worker/src/main.rs`), so putting the job table here would put what most needs to survive
-//! in the place most likely to vanish.
+//! to poll. Scheduling, the write lock, transcripts and model calls all live in the host — worker
+//! memory is lost on hot upgrade (see the command-log index comment in `crates/worker/src/main.rs`),
+//! so putting the job table here would put what most needs to survive in the place most likely to
+//! vanish.
+//!
+//! There are two kinds of host and one implementation of them (`@coflux/executor`): a child process
+//! this daemon starts itself when it has a JS runtime (`crates/worker/src/executor_host.rs`), and
+//! Coflux.app arriving over a loopback device channel. [`HostAuthority`] is where the choice between
+//! them is made, and the daemon's own host wins.
 //!
 //! **Failure boundaries (fixed; do not relax them)**:
-//! - A dropped channel does not mean the app died. **Never re-dispatch a writer** — an expired lease
+//! - A lost link does not mean the host died. **Never re-dispatch a writer** — an expired lease
 //!   does not prove the old writer stopped, and re-dispatching is a double write.
-//! - After a host generation change (app restart / channel reconnect), go through **reconciliation**:
+//! - After a host generation change (host restart / channel reconnect), go through **reconciliation**:
 //!   the daemon names the runs it still has unfinished and the host re-reports each one. Anything not
 //!   re-reported in time becomes `Unknown` (result unknown) — not a failure, and certainly not a rerun.
-//! - When another desktop instance claims the host slot, every unfinished run under the previous host
+//! - When another host instance claims the slot, every unfinished run under the previous host
 //!   becomes `Unknown` immediately: the new instance has no way to know whether the old one is still
 //!   writing.
 //!
@@ -27,9 +32,10 @@ use std::collections::{BTreeMap, HashMap};
 /// comparison, following `apps/server/src/daemon-capabilities.ts`: old clients drop unknown payloads
 /// silently, so having no gate would only leave the agent waiting for a timeout.
 ///
-/// The desktop host reads the same string from `EXECUTOR_HOST_CAPABILITY` in
-/// `packages/protocol/src/index.ts`. Changing one side alone silently refuses every registration,
-/// which surfaces only as "Coflux.app is not running" on the agent's side.
+/// Both hosts read the same string from `EXECUTOR_HOST_CAPABILITY` in `packages/executor`, and
+/// `packages/protocol/src/index.ts` carries a third copy for the desktop bridge. Changing one side
+/// alone silently refuses every registration, which surfaces only as "this machine has no executor
+/// host" on the agent's side; `packages/executor/src/capability.test.ts` pins all three.
 pub const CAPABILITY_EXECUTOR_HOST: &str = "executor_host_v1";
 
 /// The window a host gets to re-report after a disconnect or a generation change. Anything still
@@ -134,9 +140,26 @@ impl RunRecord {
     }
 }
 
+/// Which kind of host is claiming this machine's single executor slot.
+///
+/// Both kinds run the very same `@coflux/executor` package; the difference is who started it and
+/// how its frames arrive. It matters because on a machine where both *could* host — an npm-installed
+/// `cofluxd` with its own node, plus a running Coflux.app — exactly one must, and **which one is the
+/// daemon's decision, made here**. Letting both register and sorting it out by epoch does not work:
+/// a takeover declares the previous host's unfinished runs `Unknown`, so two eager hosts would clear
+/// each other's tasks on every restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostAuthority {
+    /// A host this daemon started itself, on the other end of inherited stdio. It wins.
+    DaemonLocal,
+    /// A host that arrived over a local loopback device channel — Coflux.app.
+    Client,
+}
+
 #[derive(Clone, Debug)]
 pub struct HostRecord {
     pub channel_id: String,
+    pub authority: HostAuthority,
     pub host_id: String,
     pub epoch: u64,
     pub ready: bool,
@@ -183,9 +206,16 @@ impl ExecutorLedger {
     /// is refused outright. A different host_id takes over, and every unfinished run under the
     /// previous host becomes `Unknown` — the new instance has no way to know whether the old one is
     /// still writing.
+    ///
+    /// **The election lives here.** A daemon-hosted executor is authoritative: while one holds the
+    /// slot, a client host is refused with a reason it can act on, rather than being allowed in and
+    /// then fought over. A daemon host may still take over from a client one, because it is the
+    /// answer the daemon would give if asked again.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_host(
         &mut self,
         channel_id: &str,
+        authority: HostAuthority,
         host_id: &str,
         epoch: u64,
         capabilities: &[String],
@@ -201,10 +231,19 @@ impl ExecutorLedger {
             .any(|name| name == CAPABILITY_EXECUTOR_HOST)
         {
             return Err(format!(
-                "executor host 未声明能力 {CAPABILITY_EXECUTOR_HOST}：请升级 Coflux.app"
+                "executor host 未声明能力 {CAPABILITY_EXECUTOR_HOST}：请升级 Coflux.app 或 cofluxd"
             ));
         }
         if let Some(current) = &self.host {
+            if current.authority == HostAuthority::DaemonLocal
+                && authority != HostAuthority::DaemonLocal
+                && current.host_id != host_id
+            {
+                return Err(
+                    "本机 daemon 自己在托管 executor（cofluxd 装的 node 运行时），不接受第二个 host"
+                        .into(),
+                );
+            }
             if current.host_id == host_id && epoch < current.epoch {
                 return Err("executor host 登记已过期（更高 epoch 已在位）".into());
             }
@@ -214,6 +253,7 @@ impl ExecutorLedger {
         }
         self.host = Some(HostRecord {
             channel_id: channel_id.to_string(),
+            authority,
             host_id: host_id.to_string(),
             epoch,
             ready,
@@ -319,7 +359,9 @@ impl ExecutorLedger {
         }
         let Some(host) = self.host.clone() else {
             return Err(
-                "本机 Coflux.app 没在跑（executor 由桌面 app 执行）：打开 Coflux.app 后重试".into(),
+                "本机没有 executor host：macOS 上由 cofluxd 安装的 node 运行时或 Coflux.app 托管，\
+                 确认其中之一在跑后重试（Linux 暂无沙箱，executor 尚未开放）"
+                    .into(),
             );
         };
         if !host.ready {
@@ -484,6 +526,25 @@ pub enum ReportState {
     Terminal(Terminal),
 }
 
+/// The JSONL wire's state string -> a ledger state, for the daemon's own host.
+///
+/// The strings are the same ones [`Terminal::as_str`] produces and the CLI and SKILL expose, so the
+/// two carriers cannot drift into different vocabularies. Anything unrecognized maps to None and the
+/// report is dropped, exactly as an unknown protobuf enum value is.
+pub fn report_state_from_str(value: &str) -> Option<ReportState> {
+    match value {
+        "accepted" => Some(ReportState::Accepted),
+        "running" => Some(ReportState::Running),
+        "succeeded" => Some(ReportState::Terminal(Terminal::Succeeded)),
+        "rejected" => Some(ReportState::Terminal(Terminal::Rejected)),
+        "model_error" => Some(ReportState::Terminal(Terminal::ModelError)),
+        "tool_failed" => Some(ReportState::Terminal(Terminal::ToolFailed)),
+        "cancelled" => Some(ReportState::Terminal(Terminal::Cancelled)),
+        "unknown" => Some(ReportState::Terminal(Terminal::Unknown)),
+        _ => None,
+    }
+}
+
 /// The wire's `ExecutorRunState` -> a ledger state. Unknown values map to None rather than panicking.
 pub fn report_state_from_wire(value: i32) -> Option<ReportState> {
     use coflux_protocol::wire::ExecutorRunState as Wire;
@@ -521,7 +582,7 @@ mod tests {
     fn ledger_with_host(now: f64) -> ExecutorLedger {
         let mut ledger = ExecutorLedger::default();
         ledger
-            .register_host("ch-1", "host-a", 1, &caps(), true, "", now)
+            .register_host("ch-1", HostAuthority::Client, "host-a", 1, &caps(), true, "", now)
             .expect("登记成功");
         ledger
     }
@@ -537,7 +598,7 @@ mod tests {
     fn host_must_declare_the_capability_by_name() {
         let mut ledger = ExecutorLedger::default();
         let refused = ledger
-            .register_host("ch-1", "host-a", 1, &[], true, "", 0.0)
+            .register_host("ch-1", HostAuthority::Client, "host-a", 1, &[], true, "", 0.0)
             .expect_err("缺能力名必须拒");
         assert!(refused.contains(CAPABILITY_EXECUTOR_HOST), "{refused}");
         assert!(ledger.host().is_none());
@@ -549,14 +610,100 @@ mod tests {
         let refused = ledger
             .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
             .expect_err("没有 host 必须立刻拒");
+        // The sentence reaches the calling agent verbatim, so it has to name both places a host can
+        // come from — an npm-installed daemon and Coflux.app — not just the desktop app.
+        assert!(refused.contains("cofluxd"), "{refused}");
         assert!(refused.contains("Coflux.app"), "{refused}");
+    }
+
+    /// The election: on a machine where both could host, the daemon's own host owns the slot and a
+    /// client host is turned away with a reason rather than allowed in to fight over it.
+    #[test]
+    fn a_daemon_host_refuses_a_client_host_instead_of_being_taken_over() {
+        let mut ledger = ExecutorLedger::default();
+        ledger
+            .register_host(
+                "local-executor",
+                HostAuthority::DaemonLocal,
+                "host-daemon",
+                1,
+                &caps(),
+                true,
+                "",
+                0.0,
+            )
+            .expect("daemon host 登记成功");
+        let refused = ledger
+            .register_host(
+                "ch-1",
+                HostAuthority::Client,
+                "host-desktop",
+                1,
+                &caps(),
+                true,
+                "",
+                1.0,
+            )
+            .expect_err("daemon 在位时必须拒绝第二个 host");
+        assert!(refused.contains("daemon"), "{refused}");
+        let host = ledger.host().expect("daemon host 还在位");
+        assert_eq!(host.host_id, "host-daemon");
+        assert_eq!(host.authority, HostAuthority::DaemonLocal);
+    }
+
+    /// The same host re-registering (a configuration change bumps the epoch) is never the election;
+    /// it must go through even though it arrives on the daemon-local slot.
+    #[test]
+    fn a_daemon_host_may_re_register_itself_under_a_higher_epoch() {
+        let mut ledger = ExecutorLedger::default();
+        for epoch in [1, 2] {
+            ledger
+                .register_host(
+                    "local-executor",
+                    HostAuthority::DaemonLocal,
+                    "host-daemon",
+                    epoch,
+                    &caps(),
+                    true,
+                    "",
+                    0.0,
+                )
+                .expect("同一 host 重新报到必须通过");
+        }
+        assert_eq!(ledger.host().expect("host 在位").epoch, 2);
+    }
+
+    /// A daemon host starting up on a machine whose desktop already registered takes the slot: it is
+    /// the answer the daemon would give if asked again, so it is not a race.
+    #[test]
+    fn a_daemon_host_takes_over_from_a_client_host_and_the_old_runs_go_unknown() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        ledger
+            .register_host(
+                "local-executor",
+                HostAuthority::DaemonLocal,
+                "host-daemon",
+                1,
+                &caps(),
+                true,
+                "",
+                1.0,
+            )
+            .expect("daemon host 接管");
+        assert_eq!(ledger.host().expect("host 在位").host_id, "host-daemon");
+        assert_eq!(
+            ledger.run(&run_id).expect("run 还在").terminal,
+            Some(Terminal::Unknown),
+            "接管方无从判断旧 host 是否还在写文件"
+        );
     }
 
     #[test]
     fn unconfigured_host_is_refused_at_submit_time_with_its_own_reason() {
         let mut ledger = ExecutorLedger::default();
         ledger
-            .register_host("ch-1", "host-a", 1, &caps(), false, "去桌面配 provider", 0.0)
+            .register_host("ch-1", HostAuthority::Client, "host-a", 1, &caps(), false, "去桌面配 provider", 0.0)
             .expect("登记成功");
         let refused = ledger
             .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
@@ -678,7 +825,7 @@ mod tests {
         ledger.host_channel_lost(10.0);
         // Reconnect after a generation change: get the reconcile list.
         let outcome = ledger
-            .register_host("ch-2", "host-a", 2, &caps(), true, "", 20.0)
+            .register_host("ch-2", HostAuthority::Client, "host-a", 2, &caps(), true, "", 20.0)
             .expect("重连登记成功");
         assert_eq!(outcome.reconcile_run_ids, vec![run_id.clone()]);
         assert_eq!(outcome.reconcile_deadline, 20.0 + RECONCILE_GRACE_MS);
@@ -697,7 +844,7 @@ mod tests {
         let run_id = submit(&mut ledger, "sub-1", true, 0.0);
         ledger.host_channel_lost(10.0);
         ledger
-            .register_host("ch-2", "host-a", 2, &caps(), true, "", 20.0)
+            .register_host("ch-2", HostAuthority::Client, "host-a", 2, &caps(), true, "", 20.0)
             .unwrap();
         ledger.apply_report(
             "host-a",
@@ -719,7 +866,7 @@ mod tests {
         let mut ledger = ledger_with_host(0.0);
         let run_id = submit(&mut ledger, "sub-1", true, 0.0);
         ledger
-            .register_host("ch-9", "host-b", 1, &caps(), true, "", 5.0)
+            .register_host("ch-9", HostAuthority::Client, "host-b", 1, &caps(), true, "", 5.0)
             .expect("另一个实例可以接管 host");
         let record = ledger.run(&run_id).unwrap();
         assert_eq!(record.terminal, Some(Terminal::Unknown), "不得重派 writer");
@@ -730,10 +877,10 @@ mod tests {
     fn stale_epoch_registration_is_refused() {
         let mut ledger = ExecutorLedger::default();
         ledger
-            .register_host("ch-2", "host-a", 5, &caps(), true, "", 0.0)
+            .register_host("ch-2", HostAuthority::Client, "host-a", 5, &caps(), true, "", 0.0)
             .unwrap();
         let refused = ledger
-            .register_host("ch-1", "host-a", 4, &caps(), true, "", 1.0)
+            .register_host("ch-1", HostAuthority::Client, "host-a", 4, &caps(), true, "", 1.0)
             .expect_err("较低 epoch 是 stale");
         assert!(refused.contains("过期"), "{refused}");
         assert_eq!(ledger.host().unwrap().channel_id, "ch-2");
@@ -744,7 +891,7 @@ mod tests {
         let mut ledger = ledger_with_host(0.0);
         let run_id = submit(&mut ledger, "sub-1", true, 0.0);
         ledger
-            .register_host("ch-2", "host-a", 2, &caps(), true, "", 1.0)
+            .register_host("ch-2", HostAuthority::Client, "host-a", 2, &caps(), true, "", 1.0)
             .unwrap();
         let ack = ledger.apply_report(
             "host-a",

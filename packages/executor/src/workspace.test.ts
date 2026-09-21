@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { collectWorkspaceFacts, type GitRunner } from "./executor-workspace";
+import { collectWorkspaceFacts, type GitRunner } from "./workspace.js";
 
 const ROOT = "/Users/alice/repo";
 

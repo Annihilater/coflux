@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ExecutorJobTable, isTerminal, type ExecutorAssignment, type ExecutorEffect } from "./executor-jobs";
+import { ExecutorJobTable, isTerminal, type ExecutorAssignment, type ExecutorEffect } from "./jobs.js";
 
 const READY = { ready: true, reason: "" };
 
