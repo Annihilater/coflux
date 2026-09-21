@@ -126,16 +126,27 @@ function PaletteHeader({
           stepFilter(event.code === "BracketLeft" ? -1 : 1);
         }}
       />
-      <div role="tablist" aria-label="条目类别" className="flex items-center gap-1 border-t border-border px-3 py-1.5">
+      {/* No rule between the input and the tabs — the header reads as one surface. The permanent
+          hairline below the tabs is astryx's own `LayoutHeader` divider, which lands exactly here
+          because this whole component is the header's only child; nothing is drawn for it.
+          Note that a Tailwind `border-b-border` would *not* match it: `index.css` redefines
+          `--color-border` for Tailwind to an opaque #242422, darker than the dialog it sits on,
+          while astryx's stylex rule reads the translucent value the footer divider also uses. */}
+      <div role="tablist" aria-label="条目类别" className="flex items-center gap-1 px-3 py-2.5">
         {FILTER_TABS.map((tab) => (
           <button
             key={tab.id}
             type="button"
             role="tab"
             aria-selected={tab.id === filter}
+            // The selected tab has to separate from the dialog it sits on, and `bg-accent` (#262624)
+            // does not: the palette's surface is #262626, so the active tab was invisible. These are
+            // astryx's own interactive overlays, which are defined as alpha over whatever is beneath.
             className={cn(
               "flex h-6 items-center rounded-md px-2 text-xs transition-colors",
-              tab.id === filter ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60 hover:text-foreground",
+              tab.id === filter
+                ? "bg-[var(--color-overlay-pressed)] text-foreground"
+                : "text-secondary-foreground hover:bg-[var(--color-overlay-hover)] hover:text-foreground",
             )}
             // Keep the caret in the search field: a click that stole focus would leave the user
             // typing into a tab button, with the palette apparently ignoring the keyboard.
@@ -254,9 +265,18 @@ export function NavigationPalette(props: NavigationPaletteProps) {
       onOpenChange={props.onOpenChange}
       searchSource={searchSource}
       onValueChange={openEntry}
+      // Reaches the <dialog> element; `index.css` uses it to top-align the palette.
+      className="coflux-nav-palette"
+      // Paired with the 12vh block-start offset in `index.css`: the default 480px could reach past
+      // the bottom of a short window once the palette no longer centres itself.
+      maxHeight="min(480px, 74dvh)"
       label="快速跳转"
-      emptyBootstrapText="还没有去过别处，输入关键字搜索工作区、终端或设备"
-      emptySearchText="没有匹配的工作区、终端或设备"
+      // Not "还没有去过别处": that is read as a statement about the user, and it is usually false.
+      // The current place is excluded from 「最近」 on purpose, so anyone with a single workspace
+      // sees this every single time — told they have been nowhere while sitting in the only place
+      // there is. Both strings say what to do or what happened, never what the user has not done.
+      emptyBootstrapText="输入关键字开始搜索"
+      emptySearchText="没有匹配的结果"
       renderItem={(item) => <PaletteRow entry={item.auxiliaryData.entry} />}
       input={<PaletteHeader filter={filter} onFilterChange={changeFilter} />}
       footer={

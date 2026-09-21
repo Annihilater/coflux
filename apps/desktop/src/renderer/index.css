@@ -503,3 +503,14 @@ dialog button[aria-label="Close"] svg,
   overflow-y: auto;
   padding: 0;
 }
+
+/* 面板顶端对齐窗口，而不是垂直居中。Dialog 的基础样式是 inset:0 + margin:auto（两轴居中），
+ * 于是结果条数一变、fit-content 高度一变，输入框就跟着上下漂移——而输入框是全程有焦点、眼睛盯着
+ * 的那个元素。这里只改块轴：block-start 固定、block-end 交回 auto，inline 轴仍由 margin 简写居中。
+ * StyleX 用 `:not(#\#)` 把自己的特异度抬到 (1,1,0)，单凭类名压不过；但它整体在 @layer astryx-base
+ * 里，而本文件末尾这些规则无层，无层样式胜过任何 layer——这才是覆盖生效的原因。
+ * 配套的 maxHeight 由组件 prop 给出（12vh + 74dvh 留足底部余量），不在这里写死。 */
+.coflux-nav-palette {
+  margin-block-start: 12vh;
+  margin-block-end: auto;
+}
