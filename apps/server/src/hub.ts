@@ -3864,6 +3864,36 @@ export class Hub {
     return { ok: true, value: daemon };
   }
 
+  /**
+   * Sharpen a `requireOnlineDaemon` refusal for the two account-API entry points that take the device
+   * id **from the caller** (`device.exec`, `project.import`). The helper above collapses "not
+   * connected", "another account's device" and "no such device" into one outage sentence, which is
+   * accurate for its other callers — they hold a `daemonId` read off an entity that already exists —
+   * but for a typed id it is a wrong diagnosis: an agent told the device is offline investigates
+   * connectivity when the fix is the three characters of prefix it wrote instead of a whole id.
+   *
+   * Which failure occurred is read from `this.daemons` directly, never by comparing `error` against
+   * the outage sentence — that string is user-facing and is exactly what this change is in the
+   * business of editing. A live connection under this account can only have failed the capability
+   * gate, so it keeps its own message.
+   *
+   * The lookup is on the failure path only: a successful call runs exactly the queries it ran before.
+   * `getDevice` is a bare primary-key read, so revocation and ownership are checked here, as
+   * `localControl` does for the same question — and both of them answer with the same sentence, since
+   * the account check is the boundary that keeps an id from becoming an existence oracle.
+   */
+  private async explainDaemonUnavailable(
+    daemonId: DaemonId,
+    accountId: AccountId,
+    refusal: { ok: false; error: string },
+  ): Promise<{ ok: false; error: string }> {
+    const live = this.daemons.get(daemonId);
+    if (live && live.accountId === accountId) return refusal;
+    const device = await this.store.getDevice(daemonId);
+    if (device && !device.revoked && device.accountId === accountId) return refusal;
+    return { ok: false, error: `设备 ${daemonId} 不存在或不属于当前账号` };
+  }
+
   /* ------------------------ executor 模型配置 ----------------------- */
 
   /**
@@ -3976,7 +4006,7 @@ export class Hub {
       return { ok: false, error: "项目名称过长或含控制字符" };
     }
     const daemon = this.requireOnlineDaemon(input.daemonId, accountId, DAEMON_CAPABILITY_PREPARED_EXECUTE);
-    if (!daemon.ok) return daemon;
+    if (!daemon.ok) return await this.explainDaemonUnavailable(input.daemonId, accountId, daemon);
 
     const projectId = randomUUID();
     const workspaceId = randomUUID();
@@ -4441,7 +4471,7 @@ export class Hub {
     const commandBytes = Buffer.byteLength(command, "utf8");
     if (commandBytes > MAX_DEVICE_EXEC_COMMAND_BYTES) return { ok: false, error: `命令不超过 ${MAX_DEVICE_EXEC_COMMAND_BYTES} 字节` };
     const daemon = this.requireOnlineDaemon(input.deviceId, accountId, DAEMON_CAPABILITY_DEVICE_EXEC);
-    if (!daemon.ok) return daemon;
+    if (!daemon.ok) return await this.explainDaemonUnavailable(input.deviceId, accountId, daemon);
     const timeoutMs = Math.max(1000, Math.min(DEVICE_EXEC_MAX_MS, Math.floor(input.timeoutMs) || DEVICE_EXEC_DEFAULT_MS));
     const startedAt = Date.now();
     log.info("device exec 受理", { accountId, daemonId: input.deviceId, cwd: input.cwd, timeoutMs, commandBytes });
