@@ -179,7 +179,11 @@ importers:
         specifier: ^8.5.13
         version: 8.18.1
 
-  packages/cli: {}
+  packages/cli:
+    dependencies:
+      '@coflux/executor':
+        specifier: workspace:*
+        version: link:../executor
 
   packages/client:
     dependencies:

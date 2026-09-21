@@ -13,6 +13,7 @@
     "account-client.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
+    "service-unit.mjs",
     "README.md",
     "skills"
   ],
@@ -33,5 +34,8 @@
     "cli",
     "remote-terminal",
     "pty"
-  ]
+  ],
+  "dependencies": {
+    "@coflux/executor": "workspace:*"
+  }
 }
