@@ -21,6 +21,7 @@ import {
   parseReleaseManifestEntry,
   verifyReleaseArtifact,
 } from "./release-trust.mjs";
+import { executorRuntime, plistXml, systemdUnit } from "./service-unit.mjs";
 
 // 默认中心服务（公共 SaaS）；自托管用 --server 覆盖。
 const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
@@ -395,49 +396,25 @@ function applyConfig({ serverUrl, deviceName, shell }) {
   return settings;
 }
 
-function plistXml() {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.coflux.daemon</string>
-  <key>ProgramArguments</key>
-  <array><string>${SUP_BIN}</string></array>
-  <key>EnvironmentVariables</key>
-  <dict><key>COFLUX_HOME</key><string>${HOME}</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${LOG_FILE}</string>
-  <key>StandardErrorPath</key><string>${LOG_FILE}</string>
-</dict>
-</plist>
-`;
+/**
+ * The executor runtime recorded in the unit, worked out once per `cofluxd up`. See
+ * `service-unit.mjs`: null simply means this installation does not host an executor.
+ */
+function executorUnitRuntime() {
+  const runtime = executorRuntime();
+  if (!runtime) console.log("· 本次安装不托管 executor（找不到 @coflux/executor）；由 Coflux.app 托管或先重装 cofluxd");
+  return runtime;
 }
-function systemdUnit() {
-  return `[Unit]
-Description=coflux daemon (supervisor)
-After=network-online.target
-Wants=network-online.target
 
-[Service]
-Environment=COFLUX_HOME=${HOME}
-ExecStart=${SUP_BIN}
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-`;
-}
 function installService(start) {
   if (IS_MAC) {
     fs.mkdirSync(dirname(PLIST), { recursive: true });
-    fs.writeFileSync(PLIST, plistXml());
+    fs.writeFileSync(PLIST, plistXml({ supervisorBin: SUP_BIN, home: HOME, logFile: LOG_FILE, executor: executorUnitRuntime() }));
     if (start) { run("launchctl", ["unload", PLIST]); run("launchctl", ["load", PLIST]); }
     console.log(`✓ launchd: ${PLIST}`);
   } else if (IS_LINUX) {
     fs.mkdirSync(dirname(UNIT), { recursive: true });
-    fs.writeFileSync(UNIT, systemdUnit());
+    fs.writeFileSync(UNIT, systemdUnit({ supervisorBin: SUP_BIN, home: HOME, executor: executorUnitRuntime() }));
     if (start) { run("systemctl", ["--user", "daemon-reload"]); run("systemctl", ["--user", "enable", "--now", "coflux-daemon.service"]); }
     console.log(`✓ systemd: ${UNIT}`);
   } else die("仅支持 macOS / Linux");

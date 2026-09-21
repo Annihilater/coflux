@@ -1,11 +1,17 @@
 /**
- * The executor host: the main process's facade.
+ * The executor host, as Coflux.app provides it: the main process's facade over `@coflux/executor`.
  *
- * It gathers four things in one place so `index.ts` only needs one object:
+ * The executor itself is not here any more — the job table, the sandbox, the guard and the runner
+ * all live in the package, which a headless daemon runs with its own node. What is here is the part
+ * that is genuinely Electron's: the device channel the registration rides on, the settings page's
+ * four operations, and the app lifecycle events that may end a run.
+ *
+ * It gathers them in one place so `index.ts` only needs one object:
  *   - **Host registration**: report to the local daemon as soon as the device channel is up (a
  *     hostId plus a monotonically increasing epoch). A daemon recognizes exactly one host, and the
  *     epoch lets a late registration from an old connection be judged stale instead of overwriting
- *     the new one.
+ *     the new one. The daemon may **refuse** — on a machine whose own daemon hosts the executor it
+ *     will — and that refusal is the election: this side then hosts nothing.
  *   - **Configuration changes flowing back**: the moment the account's configuration changes — the
  *     user saving it here, or the daemon delivering a change made on another machine — re-register
  *     so `ready` flips. Otherwise the daemon keeps refusing submissions at submit time and the
@@ -23,10 +29,32 @@
  * **Credentials never travel towards the renderer.** The register/report frames below do go through
  * it — it is the only thing holding a device channel — but the configuration does not: it is read
  * from the daemon's local file here and written from here straight to the centre.
+ *
+ * **Why the host body runs in the main process rather than in a utilityProcess of its own.** The
+ * package is one implementation with two hosts, and on the daemon side the host really is its own
+ * process. Here it cannot be: `utilityProcess` is a main-process-only API, so a host living in one
+ * could not fork the per-task runners, and the `runAsNode: false` fuse rules out `child_process.fork`
+ * as an alternative. Putting the host body here keeps one runner process per task — which is what
+ * makes "stop" a clean kill and a pi crash survivable — at the cost of the host body sharing this
+ * process. The package is still the only copy of it.
  */
 
-import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { utilityProcess } from "electron";
+
+import {
+  createExecutorHostCore,
+  projectCredentialProviders,
+  validateCredentialShape,
+  validateExecutorSelection,
+  type ExecutorCachedSettings,
+  type ExecutorConfigStore,
+  type ExecutorHostInbound,
+  type ExecutorHostOutbound,
+  type ExecutorRunnerOutbound,
+  type ExecutorRuntime,
+  type RunnerHandle,
+} from "@coflux/executor";
 
 import type {
   DesktopExecutorCatalog,
@@ -38,18 +66,17 @@ import type {
   DesktopExecutorTestResult,
 } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
-import { projectCredentialProviders, validateCredentialShape, validateExecutorSelection } from "./executor-catalog";
 import { createExecutorChannelLedger } from "./executor-channel";
-import { EXECUTOR_SYSTEM_PROMPT, type ExecutorConfigStore } from "./executor-config";
 import { executorCancelReason, type ExecutorStopTrigger } from "./executor-lifecycle";
-import { ExecutorManager, type RunnerHandle } from "./executor-manager";
-import type { ExecutorRunnerOutbound } from "./executor-runner-protocol";
-import type { ExecutorRuntime } from "./executor-runtime";
-import type { ExecutorCachedSettings } from "./executor-settings-cache";
 import type { ExecutorSettingsWriter } from "./executor-settings-writer";
 
-/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. */
-export const EXECUTOR_CAPABILITIES = ["executor_run"] as const;
+/**
+ * Where the package's runner entry sits, resolved through the package's own `exports` rather than
+ * built into `out/main`. `utilityProcess.fork` takes a file path, and that path has to be the
+ * published artifact: a second, desktop-private copy of the runner is exactly what this package
+ * exists to remove.
+ */
+const resolveRunnerPath = () => createRequire(import.meta.url).resolve("@coflux/executor/runner");
 
 /**
  * How long to wait for the daemon to hand the saved configuration back. The centre pushes it the
@@ -75,8 +102,8 @@ export type ExecutorHost = {
    * The renderer's view of this machine's device channel. An empty daemonId means there is none.
    * `generation` identifies **this** connection: the same daemon reconnecting produces a new one,
    * and that has to trigger a fresh registration — the daemon forgot the host when the channel
-   * dropped, so keeping quiet because the daemon id is unchanged leaves the agent being told
-   * "Coflux.app is not running" while it plainly is.
+   * dropped, so keeping quiet because the daemon id is unchanged leaves the agent being told this
+   * machine has no executor host while the app is plainly running.
    */
   setChannel(daemonId: string, generation: number): void;
   /**
@@ -91,8 +118,6 @@ export type ExecutorHostOptions = {
   config: ExecutorConfigStore;
   runtime: ExecutorRuntime;
   writer: ExecutorSettingsWriter;
-  /** Absolute path to out/main/executor-runner.js. */
-  runnerPath: string;
   sendToRenderer: (channel: string, payload: unknown) => void;
   log: (message: string) => void;
   /** Injected in tests only. */
@@ -100,43 +125,27 @@ export type ExecutorHostOptions = {
 };
 
 export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
-  const hostId = randomUUID();
   // When to register, and under which epoch. Pure and separately tested — see executor-channel.ts.
   const channel = createExecutorChannelLedger();
 
   const send = (message: DesktopExecutorOutbound) => options.sendToRenderer(IPC.executorOutbound, message);
 
-  const manager = new ExecutorManager({
-    spawnRunner: options.spawnRunner ?? (() => forkRunner(options.runnerPath)),
-    config: () => {
-      const view = options.config.view();
-      const secrets = options.config.secrets();
-      return {
-        ready: view.ready,
-        reason: view.reason,
-        provider: secrets.provider,
-        modelId: secrets.modelId,
-        apiKey: secrets.apiKey,
-        customProviders: secrets.customProviders,
-        systemPrompt: EXECUTOR_SYSTEM_PROMPT,
-        shell: process.env.SHELL || "/bin/zsh",
-      };
+  // The executor proper. Everything below this line is transport and product surface; the job
+  // table, the write lock and the runners are the package's, shared with the daemon's own host.
+  const core = createExecutorHostCore({
+    config: options.config,
+    spawnRunner: options.spawnRunner ?? (() => forkRunner(resolveRunnerPath())),
+    send: (message) => {
+      if (message.type === "log") options.log(`[executor] ${message.message}`);
+      else send(toDesktopOutbound(message));
     },
-    sendReport: (report) => send({ kind: "report", ...report }),
-    log: options.log,
+    log: (message) => options.log(`[executor] ${message}`),
   });
 
   function register(): void {
-    const view = options.config.view();
-    send({
-      kind: "register",
-      hostId,
-      hostEpoch: channel.epoch(),
-      capabilities: [...EXECUTOR_CAPABILITIES],
-      ready: view.ready,
-      notReadyReason: view.reason,
-    });
-    options.log(`[executor] 已向本机 daemon 报到（epoch=${channel.epoch()}，ready=${view.ready}）`);
+    const frame = core.registerFrame(channel.epoch());
+    send(toDesktopOutbound(frame));
+    options.log(`[executor] 已向本机 daemon 报到（epoch=${frame.hostEpoch}，ready=${frame.ready}）`);
   }
 
   function publishSettings(): void {
@@ -146,7 +155,7 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
   /** A configuration change means two things: the job table's admission criteria follow, and
    * re-registering makes the daemon's submit gate follow too. */
   function onConfigChanged(): void {
-    manager.refreshReadiness();
+    core.refreshReadiness();
     publishSettings();
     if (channel.refresh() === "register") register();
     // Keep the main process's own runtime in step, so the settings page and a fresh submission
@@ -255,7 +264,13 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       }
       return {
         ok: true,
-        validated: "已校验：provider、模型与凭据形式都正确",
+        // A save that stored no selection validated the endpoints and the credential shape and
+        // nothing else. Claiming the provider and model were checked would be a lie on exactly the
+        // path this sentence is seen most: adding the first endpoint, before anything is chosen.
+        validated:
+          input.provider && input.modelId
+            ? "已校验：provider、模型与凭据形式都正确"
+            : "已保存到账号：端点与凭据形式都正确",
         // The centre's own warning (an unreadable old ciphertext) outranks "no key yet": it is the
         // less obvious of the two.
         warning: written.warning || verdict.warning,
@@ -269,34 +284,13 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       return result.ok ? { ok: true, tokens: result.tokens, ms: result.ms } : { ok: false, error: result.error };
     },
 
+    /**
+     * A device frame relayed in by the renderer. The refusal branch is the election: the daemon
+     * decides which host this machine has, and when its own is the answer it says so here. Nothing
+     * is started on this side in that case — assignments simply never arrive.
+     */
     inbound(message) {
-      switch (message.kind) {
-        case "assign":
-          manager.onAssign({
-            runId: message.runId,
-            prompt: message.prompt,
-            write: message.write,
-            workspaceId: message.workspaceId,
-            workspaceRoot: message.workspaceRoot,
-            submittedAt: message.submittedAt,
-          });
-          break;
-        case "cancel":
-          manager.onCancel(message.runId);
-          break;
-        case "ack":
-          manager.onAck(message.runId);
-          break;
-        case "registered":
-          if (!message.ok) {
-            // The usual cause is that this channel is not loopback (it went over relay). The daemon
-            // is the authority; this side only records what it was told.
-            options.log(`[executor] 本机 daemon 拒绝了 host 注册：${message.error ?? "未给出原因"}`);
-            break;
-          }
-          manager.onReconcile(message.reconcileRunIds);
-          break;
-      }
+      core.handle(toHostInbound(message));
     },
 
     setChannel(daemonId, generation) {
@@ -311,7 +305,7 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       const reason = executorCancelReason(trigger);
       if (!reason) return;
       options.log(`[executor] ${reason}：正在把未终结的任务落成 cancelled`);
-      manager.cancelAll(reason);
+      core.cancelAll(reason);
     },
 
     dispose() {
@@ -319,6 +313,23 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       options.runtime.dispose();
     },
   };
+}
+
+/**
+ * The package speaks `type`, the desktop bridge speaks `kind`. One contract, two discriminator
+ * names, because the bridge's shape is already part of the preload surface the renderer compiles
+ * against; translating here is cheaper than a rename that reaches the renderer and the protocol
+ * client.
+ */
+function toDesktopOutbound(message: Exclude<ExecutorHostOutbound, { type: "log" }>): DesktopExecutorOutbound {
+  const { type, ...rest } = message;
+  return { kind: type, ...rest } as DesktopExecutorOutbound;
+}
+
+/** The same translation the other way. */
+function toHostInbound(message: DesktopExecutorInbound): ExecutorHostInbound {
+  const { kind, ...rest } = message;
+  return { type: kind, ...rest } as ExecutorHostInbound;
 }
 
 /** The credential edits one save carries: the selected provider's key plus each endpoint's own. */

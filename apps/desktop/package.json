@@ -1,23 +1,23 @@
 {
   "name": "@coflux/desktop",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "productName": "Coflux",
   "private": true,
   "description": "coflux 桌面客户端：Electron 主进程 + React/xterm 工作台渲染层",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "build": "electron-vite build",
+    "dev": "tsc -p ../../packages/executor/tsconfig.build.json && node scripts/dev.mjs",
+    "build": "tsc -p ../../packages/executor/tsconfig.build.json && electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "test": "node --import tsx --test src/main/*.test.ts src/renderer/*.test.ts src/renderer/components/settings/*.test.ts src/renderer/components/workbench/*.test.ts test/*.test.ts",
+    "test": "node --import tsx --test src/main/*.test.ts src/renderer/*.test.ts src/renderer/components/settings/*.test.ts src/renderer/components/workbench/*.test.ts test/*.test.ts ../../packages/executor/src/*.test.ts",
     "stage-daemon": "node scripts/stage-daemon.mjs",
-    "pack": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --dir --publish never",
-    "dist": "node scripts/stage-daemon.mjs && electron-vite build && electron-builder --mac --arm64 --publish never",
+    "pack": "node scripts/stage-daemon.mjs && pnpm build && electron-builder --mac --dir --publish never",
+    "dist": "node scripts/stage-daemon.mjs && pnpm build && electron-builder --mac --arm64 --publish never",
     "icon": "node scripts/export-icon.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@coflux/executor": "workspace:*",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
     "ws": "^8.18.0"

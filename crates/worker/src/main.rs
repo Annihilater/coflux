@@ -9,6 +9,7 @@ mod agents;
 mod conn_state;
 mod creds;
 mod device;
+mod executor_host;
 mod executor_settings;
 mod gateway;
 mod git;
@@ -656,6 +657,15 @@ async fn worker_main() {
         cfg.clone(),
     );
     let tailcat = tailcat::TailcatRuntime::new(device.clone());
+
+    // The daemon's own executor host (plan 20260921-executor-daemon-host). Started only when the
+    // service unit recorded a JS runtime and this is macOS; otherwise this machine simply has no
+    // daemon-side host and Coflux.app's is the one that registers. The child owns its own job table
+    // and survives this worker exiting — see executor_host.rs on why it is not kill_on_drop.
+    if let Some((node, entry)) = executor_host::executor_host_command() {
+        logln!("[executor] 本机 daemon 托管 executor：{node} {entry}");
+        executor_host::supervise(device.clone(), node, entry, cfg.home.clone());
+    }
 
     // hook 事件通道：gateway 收 POST /hook 解析后经此转交，消费侧做 pid→session 反查与上报。
     // gateway 未起（无 local_auth）时 tx 直接掉落，消费任务随之退出。

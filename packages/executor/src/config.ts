@@ -19,7 +19,7 @@ import {
   type ExecutorCachedCustomProvider,
   type ExecutorCachedSettings,
   type ExecutorSettingsCache,
-} from "./executor-settings-cache";
+} from "./settings-cache.js";
 
 /** The configuration shape the renderer can see — **no credential**, only which providers have one. */
 export type ExecutorSettingsView = {

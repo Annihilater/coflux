@@ -8,8 +8,8 @@ import {
   validateCredentialShape,
   validateExecutorSelection,
   type ExecutorCatalog,
-} from "./executor-catalog";
-import { EMPTY_EXECUTOR_CACHE, type ExecutorCachedCustomProvider } from "./executor-settings-cache";
+} from "./catalog.js";
+import { EMPTY_EXECUTOR_CACHE, type ExecutorCachedCustomProvider } from "./settings-cache.js";
 
 const relay: ExecutorCachedCustomProvider = {
   id: "my-relay",
@@ -64,11 +64,30 @@ test("自定义模型补齐 pi 必填的元数据，而这些值是编出来的�
 
 test("保存时的失败原因按成因分开，不合并成一句「配置无效」", () => {
   const base = { credentialProviders: ["anthropic"], customProviders: [relay] };
-  assert.match(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "" }).error, /选一个 provider/);
+  // 两个都空不在这一串里：它现在是合法状态，见下一条。
+  assert.equal(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "" }).ok, true);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "" }).error, /选一个模型/);
+  assert.match(validateExecutorSelection(catalog, { ...base, provider: "", modelId: "claude-sonnet-5" }).error, /选一个 provider/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "nope", modelId: "x" }).error, /provider 不存在/);
   assert.match(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "nope" }).error, /没有这个模型/);
   assert.equal(validateExecutorSelection(catalog, { ...base, provider: "anthropic", modelId: "claude-sonnet-5" }).ok, true);
+});
+
+/**
+ * 两个都空是「还没选」，不是「填错了」：账号可以先有端点、后选模型，`deriveReadiness` 本来就这么表达。
+ * 拒绝它就是这个 bug——加第一个自定义端点时提交的正是一份空选择，于是永远存不进中心。
+ * 只空一半仍然拒绝：那是填了一半的表单，下游解析不出来。
+ */
+test("provider 与模型都还没选，是可以保存的状态，只给警告", () => {
+  const verdict = validateExecutorSelection(catalog, {
+    provider: "",
+    modelId: "",
+    credentialProviders: [],
+    customProviders: [relay],
+  });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.error, "");
+  assert.match(verdict.warning, /还没选 provider 与模型/);
 });
 
 /** 清除 key 就是一次没有 key 的保存；拒绝它等于让清除按钮按不动。状态区已经把「未就绪」说得很响。 */

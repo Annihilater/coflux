@@ -4,12 +4,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ExecutorManager, type ExecutorConfigSnapshot, type RunnerHandle } from "./executor-manager";
-import type { ExecutorRunnerOutbound, ExecutorRunnerStart } from "./executor-runner-protocol";
-import type { ExecutorAssignment } from "./executor-jobs";
+import { ExecutorManager, type ExecutorConfigSnapshot, type RunnerHandle } from "./manager.js";
+import type { ExecutorRunnerOutbound, ExecutorRunnerStart } from "./runner-protocol.js";
+import type { ExecutorAssignment } from "./jobs.js";
 
 // Each run's scratch directory is created under tmpdir(), and the sandbox profile refuses /tmp and
-// /var paths outright because macOS resolves them into /private (see executor-sandbox.ts). macOS's
+// /var paths outright because macOS resolves them into /private (see sandbox.ts). macOS's
 // per-user TMPDIR already resolves clear of that; Linux's plain /tmp does not, so every start would
 // be refused there. Point TMPDIR at a home-directory scratch in that case, so both platforms run
 // these cases against the same code path.

@@ -43,8 +43,8 @@ import {
   type ExecutorCatalog,
   type ExecutorModelOption,
   type ExecutorProviderOption,
-} from "./executor-catalog";
-import type { ExecutorCachedSettings } from "./executor-settings-cache";
+} from "./catalog.js";
+import type { ExecutorCachedSettings } from "./settings-cache.js";
 
 /** The slice of pi this file uses. Narrow on purpose: it is also the seam tests inject through. */
 type PiModelRuntime = {

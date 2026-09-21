@@ -9,8 +9,8 @@ import {
   deriveReadiness,
   EXECUTOR_SYSTEM_PROMPT,
   toExecutorView,
-} from "./executor-config";
-import { EMPTY_EXECUTOR_CACHE, readExecutorSettingsCache, type ExecutorCachedSettings } from "./executor-settings-cache";
+} from "./config.js";
+import { EMPTY_EXECUTOR_CACHE, readExecutorSettingsCache, type ExecutorCachedSettings } from "./settings-cache.js";
 
 function cache(overrides: Partial<ExecutorCachedSettings> = {}): ExecutorCachedSettings {
   return { ...EMPTY_EXECUTOR_CACHE, present: true, ...overrides };
