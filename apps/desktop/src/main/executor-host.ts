@@ -28,6 +28,8 @@
 import { randomUUID } from "node:crypto";
 import { utilityProcess } from "electron";
 
+import { EXECUTOR_HOST_CAPABILITY } from "@coflux/protocol";
+
 import type {
   DesktopExecutorCatalog,
   DesktopExecutorInbound,
@@ -48,8 +50,10 @@ import type { ExecutorRuntime } from "./executor-runtime";
 import type { ExecutorCachedSettings } from "./executor-settings-cache";
 import type { ExecutorSettingsWriter } from "./executor-settings-writer";
 
-/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. */
-export const EXECUTOR_CAPABILITIES = ["executor_run"] as const;
+/** Capabilities are gated **by name**, following daemon-capabilities.ts; no version comparison. The
+ * name comes from the protocol package because the daemon refuses any registration that does not
+ * carry this exact string. */
+export const EXECUTOR_CAPABILITIES = [EXECUTOR_HOST_CAPABILITY] as const;
 
 /**
  * How long to wait for the daemon to hand the saved configuration back. The centre pushes it the
@@ -255,7 +259,13 @@ export function createExecutorHost(options: ExecutorHostOptions): ExecutorHost {
       }
       return {
         ok: true,
-        validated: "已校验：provider、模型与凭据形式都正确",
+        // A save that stored no selection validated the endpoints and the credential shape and
+        // nothing else. Claiming the provider and model were checked would be a lie on exactly the
+        // path this sentence is seen most: adding the first endpoint, before anything is chosen.
+        validated:
+          input.provider && input.modelId
+            ? "已校验：provider、模型与凭据形式都正确"
+            : "已保存到账号：端点与凭据形式都正确",
         // The centre's own warning (an unreadable old ciphertext) outranks "no key yet": it is the
         // less obvious of the two.
         warning: written.warning || verdict.warning,
