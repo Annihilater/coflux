@@ -115,10 +115,19 @@ export type ExecutorSelectionVerdict = {
  * loudly that the executor is not ready. A credential that is present but malformed *is* refused —
  * that is `validateCredentialShape`.
  *
+ * **No selection at all is likewise a warning.** "Endpoints configured, model not chosen yet" is a
+ * state the data model already expresses — `deriveReadiness` names it — and refusing to persist it
+ * is what made the very first custom endpoint impossible to save: that save carries an empty
+ * selection and was rejected before it ever reached the centre. Half a selection stays refused;
+ * nothing downstream can resolve a provider with no model, or a model with no provider.
+ *
  * Whether the model *answers* is a separate, explicit action — see the connection test.
  */
 export function validateExecutorSelection(catalog: ExecutorCatalog, selection: ExecutorSelection): ExecutorSelectionVerdict {
   const refuse = (error: string): ExecutorSelectionVerdict => ({ ok: false, error, warning: "" });
+  if (!selection.provider && !selection.modelId) {
+    return { ok: true, error: "", warning: "还没选 provider 与模型，executor 暂时还不能发任务" };
+  }
   if (!selection.provider) return refuse("先选一个 provider");
   if (!selection.modelId) return refuse("先选一个模型");
   const provider = catalog.providers.find((option) => option.id === selection.provider);
