@@ -13,5 +13,11 @@ export const WORKSPACE_KEY = "coflux_workspace";
 export const SIDEBAR_WIDTH_KEY = "coflux_sidebar_width";
 /** 本机 daemon 接入引导点过「暂不」（plan 113）：按服务器地址分 key，之后只从账号菜单再进 */
 export const DAEMON_ONBOARDING_DISMISSED_KEY = `coflux_daemon_onboarding_dismissed:${SERVER_URL}`;
+/**
+ * Places the ⌘P palette lists under 「最近」 (plan 20260921). Scoped by server address, like the
+ * onboarding flag and the offline catalogue: workspace / task / device ids mean nothing on
+ * another server, and an unscoped key would make the palette offer places that do not exist.
+ */
+export const COMMAND_PALETTE_RECENT_KEY = `coflux_recent_places:${SERVER_URL}`;
 
 export type { AuthCredential } from "@coflux/client";

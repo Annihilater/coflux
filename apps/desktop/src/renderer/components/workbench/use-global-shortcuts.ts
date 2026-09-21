@@ -14,6 +14,12 @@ type GlobalShortcutsOptions = {
   onToggleHelp: () => void;
   /** ⌘, 与应用菜单的「设置…」：开关设置页；挂起期间照样受理 */
   onToggleSettings: () => void;
+  /**
+   * ⌘P and the 「快速跳转…」 menu item: toggle the navigation palette. Handled ahead of the
+   * suspension gate — the palette suspends everything else while it is open, and a shortcut that
+   * suspended itself could not be closed with the same key that opened it.
+   */
+  onTogglePalette: () => void;
   /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，
    * 否则 ⌘T/⌘W/⌘1 会落到一个看不见也点不到的终端上。 */
   isSuspended?: boolean;
@@ -39,6 +45,7 @@ export function useGlobalShortcuts({
   onOpenCreateWorkspaceMenu,
   onToggleHelp,
   onToggleSettings,
+  onTogglePalette,
   isSuspended = false,
 }: GlobalShortcutsOptions) {
   useEffect(() => {
@@ -53,6 +60,16 @@ export function useGlobalShortcuts({
         event.preventDefault();
         event.stopPropagation();
         onToggleSettings();
+        return;
+      }
+
+      // ⌘P sits on the same side of the gate as ⌘,: the palette suspends the whole workbench set
+      // while it is open (⌘[ / ⌘] have to reach its filter tabs), so a ⌘P placed after the gate
+      // could never be pressed a second time to close what it opened.
+      if (event.code === "KeyP") {
+        event.preventDefault();
+        event.stopPropagation();
+        onTogglePalette();
         return;
       }
 
@@ -106,15 +123,19 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, isSuspended]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
     () =>
       desktop.onCommand((command: DesktopCommand) => {
-        // 与键盘同一口径：菜单里的「设置…」任何时候都受理，其余命令在覆盖层打开时挂起。
+        // 与键盘同一口径：菜单里的「设置…」与「快速跳转…」任何时候都受理，其余命令在覆盖层打开时挂起。
         if (command === "open-settings") {
           onToggleSettings();
+          return;
+        }
+        if (command === "toggle-palette") {
+          onTogglePalette();
           return;
         }
         if (isSuspended) return;
@@ -140,6 +161,6 @@ export function useGlobalShortcuts({
             return;
         }
       }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, isSuspended],
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended],
   );
 }

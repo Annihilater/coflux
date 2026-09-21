@@ -235,6 +235,7 @@ export type ConfirmAction = {
 function shortcutRows(): { keys: string[]; description: string }[] {
   const mod = SHORTCUT_MODIFIERS;
   const rows = [
+    { keys: [...mod, "P"], description: "快速跳转到工作区 / 终端 / 设备" },
     { keys: [...mod, "T"], description: "新建终端" },
     { keys: [...mod, "W"], description: "关闭当前终端" },
     { keys: [...mod, "1-9"], description: "切换到第 N 个终端" },
