@@ -313,8 +313,53 @@ otherwise pollutes presence and shell-integration tests into false failures.
 
 ## Maintenance notes
 
-- Record which hot-upgrade ownership was chosen (supervisor-owned vs
-  worker-spawned with re-adopt) and why.
+- **Hot-upgrade ownership: worker-spawned, no `kill_on_drop`, drain on EOF — not
+  supervisor-owned, and not re-adopt.** (`crates/worker/src/executor_host.rs`,
+  `packages/executor/src/host.ts`.)
+  - *Not supervisor-owned*: the supervisor is the component upgraded rarely, and
+    putting the host there would mean the whole worker↔host message contract has
+    to travel through the UDS frame protocol as well. Every change to the executor
+    protocol would then need a supervisor upgrade, which is exactly what that
+    component's upgrade cadence exists to avoid.
+  - *Not the re-adopt path*: it cannot be built over inherited stdio, because a
+    pipe dies with its parent — the successor worker has no way to reattach to the
+    predecessor's pipes, and giving the host a socket to be re-found on would make
+    it a second local server with its own admission problem. It would also buy
+    nothing: the run records live in worker memory, which a hot upgrade discards
+    anyway, so there is nothing for a re-adopted host to be reconciled against.
+  - *What happens instead*: the child is spawned without `kill_on_drop` (the
+    opposite of `tailcat_ipc.rs`, deliberately). The old worker exiting closes the
+    child's stdin; the host stops taking work and waits for the tasks it already
+    has to finish before exiting. A half-written file cannot be un-written, so
+    killing mid-task is strictly worse than losing track of a run. The successor
+    worker starts a fresh host, which blocks on the package's own
+    `$COFLUX_HOME/executor-host.lock` until the draining one is gone — that lock
+    is what keeps two hosts off one workspace during the overlap.
+  - *The residual*: a run in flight across a hot upgrade is no longer pollable —
+    the new ledger has never heard of it. It does not become `Unknown`; the CLI
+    gets "no such run". That is the same loss the desktop host already had, with
+    the work itself preserved rather than killed.
+- **Deviation: on Coflux.app the host body runs in the Electron main process**,
+  importing the package, rather than in a `utilityProcess` of its own. The plan's
+  Direction diagram shows a separate host process on both sides; that is not
+  buildable on the desktop. `utilityProcess` is a main-process-only API, so a host
+  living in one could not fork the per-task runners, and the `runAsNode: false`
+  fuse rules out `child_process.fork` as a substitute. The alternative — relaying
+  every runner message back through the main process — adds a layer that exists
+  only for Electron. The package is still the only copy of the executor; the seam
+  used is the `spawnRunner` injection the manager already had, and the runner
+  entry Coflux.app forks is the package's published file, not a build entry.
+- **Deviation: host↔runner stays a message channel, not stdio JSONL.** Only the
+  worker↔host link needed a new transport, because that peer is Rust. The runner
+  is forked by JS on both sides, so it uses `process.parentPort` under Electron and
+  `child_process.fork`'s IPC channel under node — ten lines of adapter in
+  `packages/executor/src/runner.ts` rather than a second framing implementation.
+- **Release plumbing still owed, and out of this plan's scope.**
+  `@coflux/executor` must be published to npm for `npm i -g cofluxd` to resolve it:
+  that needs a Trusted Publisher binding on npmjs.com and a second publish step in
+  `.github/workflows/npm-publish.yml`, and the package should join
+  `VERSION_FILES` in `scripts/product-version.mjs` so it cannot drift from the
+  product version. None of those files are in this plan's scope.
 - The executor is macOS-only until the Linux sandbox plan lands. The SKILL must
   not promise a kernel sandbox on a platform that has none.
 - `cofluxd` is no longer dependency-free. If its install size becomes a problem,

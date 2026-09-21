@@ -102,8 +102,8 @@ export type ExecutorHost = {
    * The renderer's view of this machine's device channel. An empty daemonId means there is none.
    * `generation` identifies **this** connection: the same daemon reconnecting produces a new one,
    * and that has to trigger a fresh registration — the daemon forgot the host when the channel
-   * dropped, so keeping quiet because the daemon id is unchanged leaves the agent being told
-   * "Coflux.app is not running" while it plainly is.
+   * dropped, so keeping quiet because the daemon id is unchanged leaves the agent being told this
+   * machine has no executor host while the app is plainly running.
    */
   setChannel(daemonId: string, generation: number): void;
   /**

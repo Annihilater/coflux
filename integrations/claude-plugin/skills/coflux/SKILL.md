@@ -433,7 +433,12 @@ to change something, send a new run with a new prompt. So **write the prompt as 
 hint**: the executor gets that one string and nothing else — no conversation history, no way to ask
 you what you meant. Say what done looks like and how to check it.
 
-Its boundaries, enforced by a kernel sandbox — count on them, and tell it what it needs up front:
+**Where it exists: macOS only.** Its boundaries are enforced by the macOS kernel sandbox, and there
+is no equivalent on Linux yet, so a Linux machine has no executor and the command says so. On macOS
+it is hosted either by the daemon the user installed from npm or by the desktop app, whichever that
+machine has — you do not choose, and nothing about the command changes either way.
+
+Its boundaries, enforced by that kernel sandbox — count on them, and tell it what it needs up front:
 
 - **Only the originating workspace is writable.** Writes anywhere outside it are refused by the
   kernel. Reads are not restricted, so it can still see system files, toolchains and the rest of the
@@ -446,12 +451,14 @@ Its boundaries, enforced by a kernel sandbox — count on them, and tell it what
 - **One writing executor per workspace at a time.** A second `--write` in the same workspace is
   refused outright rather than queued; read-only runs may go in parallel up to a small cap.
 
-It runs inside the user's desktop app, so it only exists on the machine that app is on, and a run
-ends if the user quits the app, signs out, or stops the machine's terminals (you get a definite
-failure, never a hang). `--timeout <seconds>` caps how long you wait; the default is 30 minutes and
-a timeout cancels the run before failing. The model comes from the user's desktop settings; if they
-have not configured one, the command says so in one line — relay that to the user instead of
-retrying.
+A run ends if the host it is on goes away — the user quits the desktop app, signs out, or stops the
+machine's terminals — and you get a definite failure, never a hang. `--timeout <seconds>` caps how
+long you wait; the default is 30 minutes and a timeout cancels the run before failing. The model
+comes from the user's account-wide executor settings; if they have not configured one, the command
+says so in one line — relay that to the user instead of retrying.
+
+**Images and other files are not an input.** The prompt is a task description with a size cap, not a
+file channel: point at paths inside the workspace instead of trying to hand anything over.
 
 ### Errors from local commands
 
