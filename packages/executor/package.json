@@ -1,0 +1,48 @@
+{
+  "name": "@coflux/executor",
+  "version": "2.3.0",
+  "description": "The coflux executor: the single implementation of the bounded sub-task runner, hosted by the daemon or by Coflux.app",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./host": {
+      "types": "./src/host.ts",
+      "default": "./dist/host.js"
+    },
+    "./runner": {
+      "types": "./src/runner.ts",
+      "default": "./dist/runner.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/myWsq/coflux#readme",
+  "bugs": "https://github.com/myWsq/coflux/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/myWsq/coflux.git",
+    "directory": "packages/executor"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

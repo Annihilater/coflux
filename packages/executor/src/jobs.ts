@@ -9,7 +9,7 @@
  *
  * This module is a pure state machine: no utilityProcess, no IPC, no view of the outside world
  * beyond the clock. Actually starting processes and killing process groups happens in
- * executor-manager, which executes the `ExecutorEffect`s this module emits. That keeps concurrency
+ * manager.ts, which executes the `ExecutorEffect`s this module emits. That keeps concurrency
  * and terminal states — the parts easiest to get wrong — exhaustively testable.
  *
  * Three invariants:

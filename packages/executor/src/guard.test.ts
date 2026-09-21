@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { guardToolCall, isInsideWorkspace } from "./executor-guard";
+import { guardToolCall, isInsideWorkspace } from "./guard.js";
 
 const ROOT = "/Users/alice/repo";
 

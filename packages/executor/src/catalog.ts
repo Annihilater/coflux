@@ -4,12 +4,12 @@
  *
  * Pure on purpose: the parts that are easy to get wrong — what a custom model may claim about
  * itself, which credential a selection needs, what shape a credential may not have — are decided
- * from data and can be reasoned about without a `ModelRuntime`. `executor-runtime.ts` supplies the
+ * from data and can be reasoned about without a `ModelRuntime`. `runtime.ts` supplies the
  * pi-shaped input and performs the side effects; searching the catalogue happens in the renderer,
  * which is where the query lives.
  */
 
-import type { ExecutorCachedCustomProvider, ExecutorCachedSettings } from "./executor-settings-cache";
+import type { ExecutorCachedCustomProvider, ExecutorCachedSettings } from "./settings-cache.js";
 
 /** The four API shapes this version exposes. pi's `KnownApi` has ten; the rest stay out of the UI. */
 export const EXECUTOR_CUSTOM_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;

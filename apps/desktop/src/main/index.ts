@@ -19,9 +19,8 @@ import { log } from "./log";
 import { buildAppMenu } from "./menu";
 import { setDockBadge, setDockBadgeLabel, showWorkspaceNotification } from "./notifications";
 import { DESKTOP_ORIGIN, rewriteHandshakeHeaders } from "./origin";
-import { createExecutorConfigStore } from "./executor-config";
+import { createExecutorConfigStore, createExecutorRuntime } from "@coflux/executor";
 import { createExecutorHost, type ExecutorHost } from "./executor-host";
-import { createExecutorRuntime } from "./executor-runtime";
 import { createExecutorSettingsWriter } from "./executor-settings-writer";
 import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
@@ -83,7 +82,7 @@ const settingsPath = () => join(app.getPath("userData"), "settings.json");
 const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
 const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
 // executor（plan 20260918）：配置的真相源是账号，不再有本机的 executor.json / executor-key.bin。
-// 读的是本机 daemon 写下的缓存文件（$COFLUX_HOME 下，见 executor-settings-cache.ts）；pi 自己的
+// 读的是本机 daemon 写下的缓存文件（$COFLUX_HOME 下，见 @coflux/executor 的 settings-cache.ts）；pi 自己的
 // 工作目录常驻在 userData 下，与用户的 ~/.pi 严格隔离。
 const executorAgentDir = () => join(app.getPath("userData"), "executor-pi");
 
@@ -239,7 +238,6 @@ if (!app.requestSingleInstanceLock()) {
       config: executorConfig,
       runtime: createExecutorRuntime({ agentDir: executorAgentDir(), log: (message) => log.info(message) }),
       writer: createExecutorSettingsWriter({ serverUrl, token: tokenStore.read }),
-      runnerPath: join(__dirname, "executor-runner.js"),
       sendToRenderer,
       log: (message) => log.info(message),
     });

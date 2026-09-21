@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildSandboxProfile, otherWorktreePaths, sandboxArgv, type SandboxInput } from "./executor-sandbox";
+import { buildSandboxProfile, otherWorktreePaths, sandboxArgv, type SandboxInput } from "./sandbox.js";
 
 function input(over: Partial<SandboxInput> = {}): SandboxInput {
   return {

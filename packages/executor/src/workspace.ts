@@ -1,12 +1,12 @@
 /**
  * The handful of path facts a run's sandbox needs, worked out for one executor task.
  *
- * Split from executor-sandbox on purpose: that module only turns facts into profile text, this one
+ * Split from sandbox.ts on purpose: that module only turns facts into profile text, this one
  * asks git for the facts. Asking means running commands, so `runGit` is injected and the pure part
  * (parsing, deduplication, excluding ourselves) stays unit-testable.
  */
 
-import { otherWorktreePaths } from "./executor-sandbox";
+import { otherWorktreePaths } from "./sandbox.js";
 
 export type GitRunner = (args: readonly string[], cwd: string) => { stdout: string; ok: boolean };
 

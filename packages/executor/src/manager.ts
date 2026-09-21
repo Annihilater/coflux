@@ -2,15 +2,15 @@
  * The executor manager: the glue that actually carries out the effects the job table emits.
  *
  * The split into three is deliberate, so the parts easiest to get wrong stay pure:
- *   - `executor-jobs`: concurrency, the write lock, terminal states, reconciliation. A pure state
+ *   - `jobs.ts`: concurrency, the write lock, terminal states, reconciliation. A pure state
  *     machine, tested exhaustively.
- *   - `executor-sandbox` / `executor-workspace`: profile text and git facts. Pure functions, tested
+ *   - `sandbox.ts` / `workspace.ts`: profile text and git facts. Pure functions, tested
  *     exhaustively.
  *   - This file: starting processes, killing process groups, writing the profile to disk, handing
  *     reports up to be sent. All the side effects live here, testable through injected dependencies.
  *
- * The layer above (the IPC wiring) only has to supply two things: a callback that sends a device
- * frame, and a way to read the configuration and credentials.
+ * The layer above (whichever host is carrying the frames) only has to supply two things: a callback
+ * that sends a report, and a way to read the configuration and credentials.
  */
 
 import { execFileSync } from "node:child_process";
@@ -18,10 +18,16 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ExecutorJobTable, type ExecutorAssignment, type ExecutorEffect, type ExecutorOutcome } from "./executor-jobs";
-import { buildSandboxProfile } from "./executor-sandbox";
-import { collectWorkspaceFacts, type GitRunner } from "./executor-workspace";
-import type { ExecutorRunnerCustomProvider, ExecutorRunnerOutbound, ExecutorRunnerStart } from "./executor-runner-protocol";
+import {
+  ExecutorJobTable,
+  type ExecutorAssignment,
+  type ExecutorEffect,
+  type ExecutorOutcome,
+  type ExecutorRunState,
+} from "./jobs.js";
+import { buildSandboxProfile } from "./sandbox.js";
+import { collectWorkspaceFacts, type GitRunner } from "./workspace.js";
+import type { ExecutorRunnerCustomProvider, ExecutorRunnerOutbound, ExecutorRunnerStart } from "./runner-protocol.js";
 
 /** Wall-clock cap for a task; past it the run is aborted. The executor is for handing over one
  * well-bounded piece of work, not for running indefinitely. */
@@ -49,14 +55,15 @@ export type ExecutorConfigSnapshot = {
 };
 
 export type ExecutorManagerDeps = {
-  /** Spawn a runner child process (the real implementation uses utilityProcess.fork). */
+  /** Spawn a runner child process: `child_process.fork` in the daemon's host, `utilityProcess.fork`
+   * in Coflux.app's. */
   spawnRunner: () => RunnerHandle;
   /** Read the current configuration and credentials. */
   config: () => ExecutorConfigSnapshot;
-  /** Send one frame to the daemon (through the renderer's device channel). */
+  /** Send one report towards the daemon. The carrier is the host's business. */
   sendReport: (report: {
     runId: string;
-    state: string;
+    state: ExecutorRunState;
     note: string;
     summary?: string;
     changedFiles?: string[];
