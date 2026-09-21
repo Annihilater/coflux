@@ -51,15 +51,24 @@ test("a path with XML metacharacters cannot break out of the plist", () => {
   assert.ok(plist.includes("/opt/&lt;x&gt;/host.js"));
 });
 
-test("cofluxd depends on the executor package and can resolve its host entry", () => {
-  // The dependency is what makes `npm i -g cofluxd` self-sufficient: without it the daemon installs
-  // fine and silently has no executor.
+test("cofluxd ships the executor itself and can resolve its host entry", () => {
+  // `@coflux/executor` is workspace-internal and never published, so what makes `npm i -g cofluxd`
+  // self-sufficient is three things together: prepack bundles the host and runner into `executor/`,
+  // the publish manifest carries that directory, and pi — left external by the bundle — is a real
+  // dependency users resolve from the registry. Drop any one and the daemon installs fine and
+  // silently has no executor.
   const manifest = JSON.parse(readFileSync(new URL("../../packages/cli/package.json", import.meta.url), "utf8"));
-  assert.ok(manifest.dependencies?.["@coflux/executor"], "cofluxd 必须依赖 @coflux/executor");
+  assert.ok(manifest.scripts?.prepack?.includes("esbuild"), "prepack 必须把 executor 打进包里");
+  assert.ok(manifest.files.includes("executor"), "发布清单必须带上 executor 产物目录");
   assert.ok(manifest.files.includes("service-unit.mjs"), "发布清单必须带上 service-unit.mjs");
+  assert.ok(
+    manifest.dependencies?.["@earendil-works/pi-coding-agent"],
+    "pi 在 bundle 里是 external，必须是 cofluxd 的真实依赖",
+  );
+  assert.ok(!manifest.dependencies?.["@coflux/executor"], "workspace 内部包不会发布，不能出现在 dependencies 里");
 
   const runtime = executorRuntime();
-  assert.ok(runtime, "@coflux/executor/host 必须能被 cofluxd 解析到");
+  assert.ok(runtime, "executor host 入口必须能被 cofluxd 解析到");
   assert.ok(runtime.node.startsWith("/"));
   assert.ok(runtime.entry.startsWith("/"));
 });

@@ -4,7 +4,8 @@
 // asserted: whether the executor runtime made it into the unit. A missing variable there is silent
 // — the daemon starts, everything works, and the only symptom is `coflux executor run` reporting
 // much later that this machine has no executor host.
-import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /** The two variables the worker reads; kept identical to `packages/executor/src/env.ts` and
  * `crates/worker/src/executor_host.rs`. */
@@ -22,15 +23,19 @@ export const EXECUTOR_ENTRY_ENV = "COFLUX_EXECUTOR_ENTRY";
  * `null` is an ordinary outcome, not an error: the desktop-bundled daemon ships Rust and Go
  * binaries and no JS runtime, and there Coflux.app hosts the executor instead.
  */
-export function executorRuntime(resolver = createRequire(import.meta.url)) {
-  try {
-    const entry = resolver.resolve("@coflux/executor/host");
-    const node = process.execPath;
-    if (!node?.startsWith("/") || !entry.startsWith("/")) return null;
-    return { node, entry };
-  } catch {
-    return null;
+export function executorRuntime() {
+  const node = process.execPath;
+  if (!node?.startsWith("/")) return null;
+  // Two known layouts, in the order they occur. Published: `prepack` bundles the executor next to
+  // this file with esbuild (see package.json), because `@coflux/executor` is workspace-internal and
+  // never published — the tarball carries the build output, not a registry dependency. Source
+  // checkout: the workspace package's own `tsc` output. Neither present means this installation
+  // cannot host an executor, which is an ordinary outcome.
+  for (const candidate of ["./executor/host.js", "../executor/dist/host.js"]) {
+    const entry = fileURLToPath(new URL(candidate, import.meta.url));
+    if (entry.startsWith("/") && existsSync(entry)) return { node, entry };
   }
+  return null;
 }
 
 /** Values interpolated into a plist are XML text; a path may legally contain `&` or `<`. */

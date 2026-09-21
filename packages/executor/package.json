@@ -1,6 +1,8 @@
 {
   "name": "@coflux/executor",
   "version": "2.3.0",
+  "//private": "Workspace-internal on purpose: cofluxd vendors this package's build output at prepack (packages/cli/scripts/vendor-executor.mjs) and depends on pi directly, so nothing here is ever published. Publishing it would add a second npm package nobody installs on its own, a second Trusted Publisher binding, and an ordering constraint between the two.",
+  "private": true,
   "description": "The coflux executor: the single implementation of the bounded sub-task runner, hosted by the daemon or by Coflux.app",
   "type": "module",
   "main": "./dist/index.js",

@@ -181,9 +181,13 @@ importers:
 
   packages/cli:
     dependencies:
-      '@coflux/executor':
-        specifier: workspace:*
-        version: link:../executor
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.85.1
+        version: 0.85.1(ws@8.21.0)(zod@4.5.4)
+    devDependencies:
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
 
   packages/client:
     dependencies:
@@ -4168,7 +4172,7 @@ snapshots:
       env-paths: 3.0.0
       graceful-fs: 4.2.11
       progress: 2.0.3
-      semver: 7.7.4
+      semver: 7.8.0
       sumchecker: 3.0.1
     optionalDependencies:
       undici: 7.29.1
@@ -6881,7 +6885,7 @@ snapshots:
 
   simple-update-notifier@2.0.0:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.0
 
   source-map-js@1.2.1: {}
 

@@ -119,14 +119,28 @@ are built here; Linux registration stays off until that plan lands.
   spawning it without `kill_on_drop` plus a re-adopt path across worker restarts,
   and record which, with the reasoning, in Maintenance notes. Do **not** take a
   dependency on the unmerged `dev/20260918-ptyd-terminal-custody` branch.
-- **`cofluxd` gives up being dependency-free**: it gains one dependency, which
-  transitively pulls pi (~56MB on disk). Rejected: installing the executor package
-  on demand at first use — a network install inside a daemon start path fails in
-  exactly the environments the executor is meant to serve. Rejected:
-  `optionalDependencies` — a silently absent executor turns into "Coflux.app is not
-  running" on the agent's side, which is the error this plan exists to remove.
-  The cost is a larger `npm i -g cofluxd`; state it in the release notes. Based
-  on: `packages/cli/package.json` (no `dependencies` field today).
+- **`cofluxd` gives up being dependency-free**: it gains pi as a direct dependency
+  (~56MB on disk). Rejected: installing the executor on demand at first use — a
+  network install inside a daemon start path fails in exactly the environments the
+  executor is meant to serve. Rejected: `optionalDependencies` — a silently absent
+  executor turns into "Coflux.app is not running" on the agent's side, which is the
+  error this plan exists to remove. The cost is a larger `npm i -g cofluxd`; state
+  it in the release notes. Based on: `packages/cli/package.json` (no `dependencies`
+  field before this plan).
+- **`@coflux/executor` is workspace-internal and never published** *(decided while
+  implementing, 2026-09-21, at the user's request)*: `cofluxd`'s `prepack` bundles
+  the host and runner into `packages/cli/executor/` with esbuild, leaving pi
+  `--external` so users resolve it from the registry like any other dependency.
+  Rejected: publishing it as a second npm package — nobody installs it on its own,
+  and it would add a Trusted Publisher binding that has to be created by hand on
+  npmjs.com plus a publish order between two packages. Rejected: npm's own
+  `bundleDependencies`, which is exactly the mechanism for this and resolves
+  workspace symlinks into the tarball — pnpm refuses it outright
+  (`ERR_PNPM_BUNDLED_DEPENDENCIES_WITHOUT_HOISTED`), and the only way to enable it
+  is switching the whole monorepo to `nodeLinker: hoisted`, trading pnpm's isolated
+  `node_modules` and its protection against phantom dependencies for one publishing
+  detail. Rejected: copying `dist/` by hand — a bundler is the standard tool for
+  this and yields two self-contained files (35K + 14K) instead of a directory.
 - **Image inputs stay outside the executor's contract**: pi's image path needs
   `photon_rs_bg.wasm` beside the executable, and the executor's input is a task
   description, not a file channel (`crates/worker/src/agent_ctl/executor.rs:46`
@@ -354,12 +368,18 @@ otherwise pollutes presence and shell-integration tests into false failures.
   is forked by JS on both sides, so it uses `process.parentPort` under Electron and
   `child_process.fork`'s IPC channel under node — ten lines of adapter in
   `packages/executor/src/runner.ts` rather than a second framing implementation.
-- **Release plumbing still owed, and out of this plan's scope.**
-  `@coflux/executor` must be published to npm for `npm i -g cofluxd` to resolve it:
-  that needs a Trusted Publisher binding on npmjs.com and a second publish step in
-  `.github/workflows/npm-publish.yml`, and the package should join
-  `VERSION_FILES` in `scripts/product-version.mjs` so it cannot drift from the
-  product version. None of those files are in this plan's scope.
+- **Release plumbing is done, by not publishing a second package** (added
+  2026-09-21 after the implementation, at the user's request). `npm i -g cofluxd`
+  is self-sufficient because `prepack` bundles the executor into the tarball; the
+  only npm dependency users resolve is pi. `.github/workflows/npm-publish.yml`
+  therefore installs dependencies before publishing — without esbuild the prepack
+  fails, which is the intended behaviour: a cofluxd published without its executor
+  would install cleanly and then tell every agent this machine has no host.
+  `@coflux/executor` is marked `private`, so it cannot be published by accident,
+  and it stays out of `VERSION_FILES` since an unpublished package has no version
+  anyone can depend on. Verified by packing the tarball: it carries
+  `executor/host.js` and `executor/runner.js`, declares only pi, and contains no
+  `workspace:` specifier.
 - The executor is macOS-only until the Linux sandbox plan lands. The SKILL must
   not promise a kernel sandbox on a platform that has none.
 - `cofluxd` is no longer dependency-free. If its install size becomes a problem,
