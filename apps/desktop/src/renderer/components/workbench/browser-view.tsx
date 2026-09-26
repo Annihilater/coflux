@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import {
+  AppWindow,
   ArrowLeft,
   ArrowRight,
   Camera,
@@ -51,9 +52,10 @@ import {
   toggleBookmark,
   updateHistoryTitle,
   type BrowserSuggestion,
+  type HistoryEntry,
 } from "@/components/workbench/browser-library";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
-import { listForwardedPorts } from "@/components/workbench/port-menu";
+import { listForwardedPorts, type ForwardedPort } from "@/components/workbench/port-menu";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { desktop } from "@/config";
 import type {
@@ -907,38 +909,8 @@ function BrowserView({
         <div ref={webviewHostRef} className="absolute inset-0" />
 
         {blank ? (
-          // A blank new tab: the address bar is focused, and the workspace's forwarded ports are one click away.
-          <div className="absolute inset-0 z-10 flex items-start justify-center overflow-y-auto bg-terminal px-6 pt-[12%]">
-            <div className="flex w-full max-w-sm flex-col items-center text-center">
-              <div className="mb-4 flex size-10 items-center justify-center rounded-lg border border-border text-muted-foreground">
-                <Globe className="size-5" />
-              </div>
-              <h2 className="text-base font-medium text-foreground">新标签页</h2>
-              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
-                在地址栏输入网址、端口号或搜索内容。{isRemote ? "这个工作区在另一台设备上，localhost 指的是那台设备。" : ""}
-              </p>
-              <div className="mt-5 w-full text-left">
-                <div className="mb-1.5 px-1 text-2xs font-medium uppercase tracking-wide text-muted-foreground">转发中的端口</div>
-                {workspacePorts.length === 0 ? (
-                  <p className="px-1 text-xs text-muted-foreground">当前工作区没有转发中的端口。</p>
-                ) : (
-                  <div className="flex flex-col gap-0.5">
-                    {workspacePorts.map((preview) => (
-                      <button
-                        key={preview.url}
-                        type="button"
-                        className="flex min-w-0 items-center gap-3 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-                        onClick={() => navigate(localPortUrl(preview.port))}
-                      >
-                        <span className="shrink-0 tabular-nums text-foreground">localhost:{preview.port}</span>
-                        <span className="min-w-0 truncate text-xs text-muted-foreground">{preview.titles.join("、")}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+          // A blank new tab: the address bar is focused; the workspace's forwarded ports and recent pages are one click away.
+          <NewTabPage ports={workspacePorts} recent={library.history.slice(0, NEW_TAB_RECENT_COUNT)} isRemote={isRemote} onOpen={navigate} />
         ) : null}
 
         {failure ? <FailurePage failure={failure} trusting={trusting} onRetry={retry} onTrust={trustAndRetry} /> : null}
@@ -1011,6 +983,95 @@ function BrowserView({
         </div>
       ) : null}
     </div>
+  );
+}
+
+const NEW_TAB_RECENT_COUNT = 5;
+
+/**
+ * A blank tab's page. Quiet by design (Cursor's new tab is empty): the tab strip already says what it
+ * is and the focused address bar says what to type, so it only lists what is one click away.
+ */
+function NewTabPage({
+  ports,
+  recent,
+  isRemote,
+  onOpen,
+}: {
+  ports: readonly ForwardedPort[];
+  recent: readonly HistoryEntry[];
+  isRemote: boolean;
+  onOpen: (url: string) => void;
+}) {
+  const remoteNote = isRemote ? "这个工作区在另一台设备上，localhost 指向那台设备。" : null;
+
+  if (ports.length === 0 && recent.length === 0) {
+    return (
+      <div className="absolute inset-0 z-10 flex items-center justify-center bg-terminal px-6">
+        <div className="flex max-w-sm flex-col items-center text-center">
+          <Globe className="size-6 text-muted-foreground/50" strokeWidth={1.5} />
+          <p className="mt-3 text-sm text-muted-foreground">输入网址、端口号或搜索内容</p>
+          {remoteNote ? <p className="mt-1 text-xs text-muted-foreground/70">{remoteNote}</p> : null}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="absolute inset-0 z-10 overflow-y-auto bg-terminal px-6">
+      <div className="mx-auto flex w-full max-w-md flex-col gap-5 pb-10 pt-[12vh]">
+        {ports.length > 0 ? (
+          <NewTabSection label="转发中的端口">
+            {ports.map((preview) => (
+              <NewTabRow
+                key={preview.url}
+                icon={<AppWindow className="size-3.5" />}
+                primary={<span className="tabular-nums">localhost:{preview.port}</span>}
+                secondary={preview.titles.join("、")}
+                onClick={() => onOpen(localPortUrl(preview.port))}
+              />
+            ))}
+          </NewTabSection>
+        ) : null}
+        {recent.length > 0 ? (
+          <NewTabSection label="最近访问">
+            {recent.map((entry) => (
+              <NewTabRow
+                key={entry.url}
+                icon={<History className="size-3.5" />}
+                primary={entry.title || displayUrl(entry.url)}
+                secondary={entry.title ? hostLabel(entry.url) : ""}
+                onClick={() => onOpen(entry.url)}
+              />
+            ))}
+          </NewTabSection>
+        ) : null}
+        {remoteNote ? <p className="px-2 text-xs text-muted-foreground/70">{remoteNote}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function NewTabSection({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col">
+      <h3 className="mb-1 px-2 text-2xs font-medium text-muted-foreground">{label}</h3>
+      {children}
+    </section>
+  );
+}
+
+function NewTabRow({ icon, primary, secondary, onClick }: { icon: ReactNode; primary: ReactNode; secondary: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="group flex h-8 min-w-0 items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent"
+      onClick={onClick}
+    >
+      <span className="flex shrink-0 text-muted-foreground transition-colors group-hover:text-foreground">{icon}</span>
+      <span className="min-w-0 truncate text-sm text-foreground">{primary}</span>
+      {secondary ? <span className="ml-auto min-w-0 max-w-[55%] shrink-0 truncate pl-3 text-xs text-muted-foreground">{secondary}</span> : null}
+    </button>
   );
 }
 
