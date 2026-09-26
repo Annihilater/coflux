@@ -719,7 +719,7 @@ function BrowserView({
             aria-label="地址栏"
             spellCheck={false}
             autoComplete="off"
-            className="h-6 w-full rounded-md border border-transparent bg-muted/60 pl-2.5 pr-7 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/50 focus:bg-background"
+            className="h-6 w-full rounded-md bg-muted/60 pl-2.5 pr-7 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
             onFocus={(event) => {
               setAddressText(displayUrl(url));
               setEditing(true);

@@ -212,9 +212,13 @@
   }
 }
 
-:focus-visible {
-  outline: 1px solid var(--ring);
-  outline-offset: 1px;
+/* Default focus ring lives in the base layer so a component's own `outline-none`
+   (utilities layer) and Astryx's focus styles (later layers) can override it. */
+@layer base {
+  :focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 1px;
+  }
 }
 
 /* Astryx 控件自带 focus 边框；全局 outline 会叠在内部 native input 上变成双框 */
