@@ -54,11 +54,16 @@
  * [popover] elements, DOM descendants of wherever the trigger sits, and `-webkit-app-region`
  * is inherited. A menu opened from the tab strip <header> (which is `drag`) therefore counted
  * as window drag area even though it paints in the top layer below the strip: its items were
- * unclickable and pressing on it dragged the window. This rule keeps every layer out of the
- * drag area with no per-call-site discipline; do not remove it. Unlayered on purpose, so it
- * outranks every cascade layer declared above. See the header comment in
- * components/workbench/drag-region.ts. */
-[popover] {
+ * unclickable and pressing on it dragged the window. This rule keeps every layer opened from a
+ * drag region out of the drag area with no per-call-site discipline; do not remove it.
+ *
+ * It must stay scoped to popovers inside a `drag` element. A global `[popover]` (2.6.1–2.8.0)
+ * also caught Astryx's toast viewport, a popover that is always open at the bottom edge, and
+ * turning that always-present box into `no-drag` left the tab strip undraggable. Chromium
+ * serializes the inline `WebkitAppRegion` as `app-region: drag` (`no-drag` does not match).
+ * Unlayered on purpose, so it outranks every cascade layer declared above. See the header
+ * comment in components/workbench/drag-region.ts. */
+[style*="app-region: drag"] [popover] {
   -webkit-app-region: no-drag;
 }
 
