@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, clipboard, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
 
+import type { DesktopCommand } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
 import { APP_ORIGIN, APP_SCHEME, APP_URL, registerAppProtocol } from "./app-protocol";
 import { locateClaudePluginDir, locateDaemonBundle, resolveDaemonBundleDir } from "./daemon-bundle";
@@ -78,6 +79,18 @@ function showMainWindow(): void {
 function sendToRenderer(channel: string, payload: unknown): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send(channel, payload);
+}
+
+/**
+ * App commands (native menu, shortcuts typed inside a built-in browser page) are acted on by the
+ * workbench page, so the keyboard goes back to it first. Otherwise a focused browser page keeps it:
+ * the ＋ menu that ⌘T opens gets DOM focus on its first item but no `:focus` highlight, because
+ * Chromium matches `:focus` only in the focused page, and arrows / Enter go to the browser page.
+ */
+function sendCommand(command: DesktopCommand): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.focus();
+  mainWindow.webContents.send(IPC.command, command);
 }
 
 // userData 下的三份文件：settings.json 是用户手编的配置；session-token.bin 是 safeStorage 加密的会话 token；
@@ -450,7 +463,7 @@ if (!app.requestSingleInstanceLock()) {
       localDaemonId: () => daemon.getState().daemonId ?? null,
       onLocalDaemonChange: (listener) => daemon.onChange(() => listener()),
       sendToRenderer,
-      sendCommand: (command) => sendToRenderer(IPC.command, command),
+      sendCommand,
       openExternal: openExternalIfHttp,
       log: (message, detail) => log.warn(message, detail),
       connectLoopback: loopbackTunnels ? (daemonId, port) => loopbackTunnels.connect(daemonId, port) : undefined,
@@ -463,7 +476,7 @@ if (!app.requestSingleInstanceLock()) {
       buildAppMenu({
         sendCommand: (command) => {
           showMainWindow();
-          sendToRenderer(IPC.command, command);
+          sendCommand(command);
         },
         checkForUpdates: () => {
           showMainWindow();
