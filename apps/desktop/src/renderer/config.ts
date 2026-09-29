@@ -31,8 +31,8 @@ export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
  */
 export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
 /**
- * The built-in browser's bookmarks, bookmarks-bar toggle and history: global on this Mac — every
- * workspace and every server share them — and never synced.
+ * The built-in browser's history: global on this Mac — every workspace and every server share
+ * it — and never synced.
  */
 export const BROWSER_LIBRARY_KEY = "coflux_browser_library";
 

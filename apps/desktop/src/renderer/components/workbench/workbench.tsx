@@ -153,7 +153,7 @@ const TERMINAL_LAYOUT_STORE: TerminalLayoutStore = { storage: localStorage, key:
 
 /**
  * Built-in browser tabs (plan 20260924-desktop-browser-tab): each tab's record (workspace, URL,
- * title), next to the layouts and scoped the same way; and the global bookmarks / history library.
+ * title), next to the layouts and scoped the same way; and the global history library.
  */
 const BROWSER_TAB_STORE: BrowserTabStore = { storage: localStorage, key: BROWSER_TABS_KEY };
 const BROWSER_LIBRARY_STORE: BrowserLibraryStore = { storage: localStorage, key: BROWSER_LIBRARY_KEY };
@@ -1365,10 +1365,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
             client={client}
             entries={browserEntries}
             onPointerFocus={focusPaneGroup}
-            onOpenTab={(workspaceId, url, besideTabId) => {
-              const target = normalizeIncomingUrl(url);
-              if (target) openBrowserTab(workspaceId, target, besideTabId);
-            }}
           />
         </main>
       ) : null}
