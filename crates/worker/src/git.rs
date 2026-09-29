@@ -3,7 +3,7 @@
 use std::process::Stdio;
 use tokio::process::Command;
 
-async fn run_git(args: &[&str]) -> (bool, String, String) {
+pub(crate) async fn run_git(args: &[&str]) -> (bool, String, String) {
     match Command::new("git")
         .args(args)
         .stdin(Stdio::null())
@@ -99,7 +99,7 @@ pub async fn diff_stat(worktree: &str, default_branch: &str) -> DiffStat {
     }
 }
 
-async fn merge_base(worktree: &str, default_branch: &str) -> Option<String> {
+pub(crate) async fn merge_base(worktree: &str, default_branch: &str) -> Option<String> {
     if default_branch.trim().is_empty() {
         return None;
     }
@@ -132,7 +132,7 @@ fn parse_shortstat(out: &str) -> (i32, i32) {
 
 /// untracked 新文件不含尾随换行的末行也算 1 行，对齐 git numstat 语义；空文件 0 行。
 /// 内容含 NUL 字节视为二进制，返回 None（调用方跳过，不计入统计）。
-fn count_untracked_lines(data: &[u8]) -> Option<i32> {
+pub(crate) fn count_untracked_lines(data: &[u8]) -> Option<i32> {
     if data.contains(&0) {
         return None;
     }
@@ -147,6 +147,10 @@ fn count_untracked_lines(data: &[u8]) -> Option<i32> {
     };
     Some(lines as i32)
 }
+
+/// Untracked files larger than this are not read for line counting (shared with `changes`, so the
+/// changes list and the diff stat agree).
+pub(crate) const UNTRACKED_COUNT_MAX_BYTES: u64 = 1_000_000;
 
 /// worker 直接读 untracked 文件统计行数（无需为每个文件起 `git diff --no-index` 子进程）；
 /// 单文件 >1MB 跳过（防大产物文件拖慢轮询）。
@@ -169,7 +173,7 @@ async fn untracked_additions(worktree: &str) -> i32 {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        if !meta.is_file() || meta.len() > 1_000_000 {
+        if !meta.is_file() || meta.len() > UNTRACKED_COUNT_MAX_BYTES {
             continue;
         }
         let Ok(data) = std::fs::read(&path) else {

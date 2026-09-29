@@ -862,6 +862,85 @@ message DeviceSecretAnswerAck {
   SecretAnswerStatus status = 2;
 }
 
+// ===== Workspace changes (plan 20260929-changes-file-tree) =====
+//
+// The desktop changes view asks the worker for the list of changed files in one round trip, then
+// fetches the content of one file at a time. Both are client→worker RPC requests (DEVICE_SCOPE_RPC)
+// keyed by workspace_id; the worker resolves the worktree and default branch itself.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that, arriving on
+// the RPC channel, to their in-flight changes requests and report that the daemon needs updating.
+
+enum DeviceChangeStatus {
+  DEVICE_CHANGE_STATUS_UNSPECIFIED = 0;
+  DEVICE_CHANGE_STATUS_ADDED = 1;
+  DEVICE_CHANGE_STATUS_MODIFIED = 2;
+  DEVICE_CHANGE_STATUS_DELETED = 3;
+  DEVICE_CHANGE_STATUS_RENAMED = 4;
+  // Not tracked by git and not ignored (`git ls-files --others --exclude-standard`).
+  DEVICE_CHANGE_STATUS_UNTRACKED = 5;
+}
+
+message DeviceChangedFile {
+  // Path relative to the worktree root, in the working tree (the new path of a rename).
+  string path = 1;
+  // Set only for renames: the path at the base commit.
+  optional string old_path = 2;
+  DeviceChangeStatus status = 3;
+  uint32 additions = 4;
+  uint32 deletions = 5;
+  // git numstat reports `-\t-`, or an untracked file contains NUL. Line counts are then zero.
+  bool binary = 6;
+  // The larger of the base-side and working-tree sizes, in bytes; the client's large-diff guard.
+  uint64 size = 7;
+}
+
+// client→worker (RPC).
+message DeviceChangesListRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+}
+
+// worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
+// file; the totals equal the workspace's diff stat.
+message DeviceChangesList {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  // The commit every per-file request must compare against: merge-base of the default branch and
+  // HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
+  // untracked files are listed.
+  string base = 4;
+  repeated DeviceChangedFile files = 5;
+}
+
+// client→worker (RPC): the content of one changed file.
+message DeviceChangesFileRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+  // The `base` of the list this file came from (a full commit id, or empty).
+  string base = 3;
+  string path = 4;
+  // The base-side path of a rename.
+  optional string old_path = 5;
+}
+
+// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
+// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+message DeviceChangesFile {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  bool old_exists = 4;
+  bool new_exists = 5;
+  string old_content = 6;
+  string new_content = 7;
+  string patch = 8;
+  // Either side contains NUL; contents are then left empty.
+  bool binary = 9;
+}
+
 message DeviceEnvelope {
   uint32 protocol_version = 1;
   // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
@@ -920,5 +999,9 @@ message DeviceEnvelope {
     DeviceLoopbackClose loopback_close = 85;
     DeviceSecretAnswer secret_answer = 90;
     DeviceSecretAnswerAck secret_answer_ack = 91;
+    DeviceChangesListRequest changes_list_request = 100;
+    DeviceChangesList changes_list = 101;
+    DeviceChangesFileRequest changes_file_request = 102;
+    DeviceChangesFile changes_file = 103;
   }
 }

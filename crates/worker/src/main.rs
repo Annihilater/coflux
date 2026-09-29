@@ -7,6 +7,7 @@
 mod agent_ctl;
 mod agent_socket;
 mod agents;
+mod changes;
 mod conn_state;
 mod creds;
 mod device;

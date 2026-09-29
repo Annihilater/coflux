@@ -420,6 +420,58 @@ public enum Coflux_V1_SecretAnswerStatus: SwiftProtobuf.Enum, Swift.CaseIterable
 
 }
 
+public enum Coflux_V1_DeviceChangeStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case added // = 1
+  case modified // = 2
+  case deleted // = 3
+  case renamed // = 4
+
+  /// Not tracked by git and not ignored (`git ls-files --others --exclude-standard`).
+  case untracked // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .added
+    case 2: self = .modified
+    case 3: self = .deleted
+    case 4: self = .renamed
+    case 5: self = .untracked
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .added: return 1
+    case .modified: return 2
+    case .deleted: return 3
+    case .renamed: return 4
+    case .untracked: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_DeviceChangeStatus] = [
+    .unspecified,
+    .added,
+    .modified,
+    .deleted,
+    .renamed,
+    .untracked,
+  ]
+
+}
+
 /// Native Tailcat candidate transport. These messages are distinct from legacy
 /// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
 public struct Coflux_V1_DeviceTailcatIdentity: Sendable {
@@ -2412,6 +2464,164 @@ public struct Coflux_V1_DeviceSecretAnswerAck: Sendable {
   public init() {}
 }
 
+public struct Coflux_V1_DeviceChangedFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Path relative to the worktree root, in the working tree (the new path of a rename).
+  public var path: String = String()
+
+  /// Set only for renames: the path at the base commit.
+  public var oldPath: String {
+    get {_oldPath ?? String()}
+    set {_oldPath = newValue}
+  }
+  /// Returns true if `oldPath` has been explicitly set.
+  public var hasOldPath: Bool {self._oldPath != nil}
+  /// Clears the value of `oldPath`. Subsequent reads from it will return its default value.
+  public mutating func clearOldPath() {self._oldPath = nil}
+
+  public var status: Coflux_V1_DeviceChangeStatus = .unspecified
+
+  public var additions: UInt32 = 0
+
+  public var deletions: UInt32 = 0
+
+  /// git numstat reports `-\t-`, or an untracked file contains NUL. Line counts are then zero.
+  public var binary: Bool = false
+
+  /// The larger of the base-side and working-tree sizes, in bytes; the client's large-diff guard.
+  public var size: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _oldPath: String? = nil
+}
+
+/// client→worker (RPC).
+public struct Coflux_V1_DeviceChangesListRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
+/// file; the totals equal the workspace's diff stat.
+public struct Coflux_V1_DeviceChangesList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  /// The commit every per-file request must compare against: merge-base of the default branch and
+  /// HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
+  /// untracked files are listed.
+  public var base: String = String()
+
+  public var files: [Coflux_V1_DeviceChangedFile] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
+/// client→worker (RPC): the content of one changed file.
+public struct Coflux_V1_DeviceChangesFileRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  /// The `base` of the list this file came from (a full commit id, or empty).
+  public var base: String = String()
+
+  public var path: String = String()
+
+  /// The base-side path of a rename.
+  public var oldPath: String {
+    get {_oldPath ?? String()}
+    set {_oldPath = newValue}
+  }
+  /// Returns true if `oldPath` has been explicitly set.
+  public var hasOldPath: Bool {self._oldPath != nil}
+  /// Clears the value of `oldPath`. Subsequent reads from it will return its default value.
+  public mutating func clearOldPath() {self._oldPath = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _oldPath: String? = nil
+}
+
+/// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
+/// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+public struct Coflux_V1_DeviceChangesFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var oldExists: Bool = false
+
+  public var newExists: Bool = false
+
+  public var oldContent: String = String()
+
+  public var newContent: String = String()
+
+  public var patch: String = String()
+
+  /// Either side contains NUL; contents are then left empty.
+  public var binary: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
 public struct Coflux_V1_DeviceEnvelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2841,6 +3051,38 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .secretAnswerAck(newValue)}
   }
 
+  public var changesListRequest: Coflux_V1_DeviceChangesListRequest {
+    get {
+      if case .changesListRequest(let v)? = payload {return v}
+      return Coflux_V1_DeviceChangesListRequest()
+    }
+    set {payload = .changesListRequest(newValue)}
+  }
+
+  public var changesList: Coflux_V1_DeviceChangesList {
+    get {
+      if case .changesList(let v)? = payload {return v}
+      return Coflux_V1_DeviceChangesList()
+    }
+    set {payload = .changesList(newValue)}
+  }
+
+  public var changesFileRequest: Coflux_V1_DeviceChangesFileRequest {
+    get {
+      if case .changesFileRequest(let v)? = payload {return v}
+      return Coflux_V1_DeviceChangesFileRequest()
+    }
+    set {payload = .changesFileRequest(newValue)}
+  }
+
+  public var changesFile: Coflux_V1_DeviceChangesFile {
+    get {
+      if case .changesFile(let v)? = payload {return v}
+      return Coflux_V1_DeviceChangesFile()
+    }
+    set {payload = .changesFile(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -2896,6 +3138,10 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case loopbackClose(Coflux_V1_DeviceLoopbackClose)
     case secretAnswer(Coflux_V1_DeviceSecretAnswer)
     case secretAnswerAck(Coflux_V1_DeviceSecretAnswerAck)
+    case changesListRequest(Coflux_V1_DeviceChangesListRequest)
+    case changesList(Coflux_V1_DeviceChangesList)
+    case changesFileRequest(Coflux_V1_DeviceChangesFileRequest)
+    case changesFile(Coflux_V1_DeviceChangesFile)
 
   }
 
@@ -2932,6 +3178,10 @@ extension Coflux_V1_SecretAnswerKind: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_SecretAnswerStatus: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SECRET_ANSWER_STATUS_UNSPECIFIED\0\u{1}SECRET_ANSWER_STATUS_ACCEPTED\0\u{1}SECRET_ANSWER_STATUS_ALREADY_ANSWERED\0\u{1}SECRET_ANSWER_STATUS_EXPIRED\0\u{1}SECRET_ANSWER_STATUS_UNKNOWN_REQUEST\0\u{1}SECRET_ANSWER_STATUS_INVALID\0")
+}
+
+extension Coflux_V1_DeviceChangeStatus: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DEVICE_CHANGE_STATUS_UNSPECIFIED\0\u{1}DEVICE_CHANGE_STATUS_ADDED\0\u{1}DEVICE_CHANGE_STATUS_MODIFIED\0\u{1}DEVICE_CHANGE_STATUS_DELETED\0\u{1}DEVICE_CHANGE_STATUS_RENAMED\0\u{1}DEVICE_CHANGE_STATUS_UNTRACKED\0")
 }
 
 extension Coflux_V1_DeviceTailcatIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -6769,9 +7019,290 @@ extension Coflux_V1_DeviceSecretAnswerAck: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
+extension Coflux_V1_DeviceChangedFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceChangedFile"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{3}old_path\0\u{1}status\0\u{1}additions\0\u{1}deletions\0\u{1}binary\0\u{1}size\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self._oldPath) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.status) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.additions) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.deletions) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.binary) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.size) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    try { if let v = self._oldPath {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 2)
+    } }()
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 3)
+    }
+    if self.additions != 0 {
+      try visitor.visitSingularUInt32Field(value: self.additions, fieldNumber: 4)
+    }
+    if self.deletions != 0 {
+      try visitor.visitSingularUInt32Field(value: self.deletions, fieldNumber: 5)
+    }
+    if self.binary != false {
+      try visitor.visitSingularBoolField(value: self.binary, fieldNumber: 6)
+    }
+    if self.size != 0 {
+      try visitor.visitSingularUInt64Field(value: self.size, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceChangedFile, rhs: Coflux_V1_DeviceChangedFile) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs._oldPath != rhs._oldPath {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.additions != rhs.additions {return false}
+    if lhs.deletions != rhs.deletions {return false}
+    if lhs.binary != rhs.binary {return false}
+    if lhs.size != rhs.size {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceChangesListRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceChangesListRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceChangesListRequest, rhs: Coflux_V1_DeviceChangesListRequest) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceChangesList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}base\0\u{1}files\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.base) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.files) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    if !self.base.isEmpty {
+      try visitor.visitSingularStringField(value: self.base, fieldNumber: 4)
+    }
+    if !self.files.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.files, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceChangesList, rhs: Coflux_V1_DeviceChangesList) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.base != rhs.base {return false}
+    if lhs.files != rhs.files {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFileRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}base\0\u{1}path\0\u{3}old_path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.base) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._oldPath) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    if !self.base.isEmpty {
+      try visitor.visitSingularStringField(value: self.base, fieldNumber: 3)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 4)
+    }
+    try { if let v = self._oldPath {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceChangesFileRequest, rhs: Coflux_V1_DeviceChangesFileRequest) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.base != rhs.base {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs._oldPath != rhs._oldPath {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFile"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}old_exists\0\u{3}new_exists\0\u{3}old_content\0\u{3}new_content\0\u{1}patch\0\u{1}binary\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.oldExists) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.newExists) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.oldContent) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.newContent) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.patch) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.binary) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    if self.oldExists != false {
+      try visitor.visitSingularBoolField(value: self.oldExists, fieldNumber: 4)
+    }
+    if self.newExists != false {
+      try visitor.visitSingularBoolField(value: self.newExists, fieldNumber: 5)
+    }
+    if !self.oldContent.isEmpty {
+      try visitor.visitSingularStringField(value: self.oldContent, fieldNumber: 6)
+    }
+    if !self.newContent.isEmpty {
+      try visitor.visitSingularStringField(value: self.newContent, fieldNumber: 7)
+    }
+    if !self.patch.isEmpty {
+      try visitor.visitSingularStringField(value: self.patch, fieldNumber: 8)
+    }
+    if self.binary != false {
+      try visitor.visitSingularBoolField(value: self.binary, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceChangesFile, rhs: Coflux_V1_DeviceChangesFile) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.oldExists != rhs.oldExists {return false}
+    if lhs.newExists != rhs.newExists {return false}
+    if lhs.oldContent != rhs.oldContent {return false}
+    if lhs.newContent != rhs.newContent {return false}
+    if lhs.patch != rhs.patch {return false}
+    if lhs.binary != rhs.binary {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7457,6 +7988,58 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .secretAnswerAck(v)
         }
       }()
+      case 100: try {
+        var v: Coflux_V1_DeviceChangesListRequest?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .changesListRequest(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .changesListRequest(v)
+        }
+      }()
+      case 101: try {
+        var v: Coflux_V1_DeviceChangesList?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .changesList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .changesList(v)
+        }
+      }()
+      case 102: try {
+        var v: Coflux_V1_DeviceChangesFileRequest?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .changesFileRequest(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .changesFileRequest(v)
+        }
+      }()
+      case 103: try {
+        var v: Coflux_V1_DeviceChangesFile?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .changesFile(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .changesFile(v)
+        }
+      }()
       default: break
       }
     }
@@ -7681,6 +8264,22 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .secretAnswerAck?: try {
       guard case .secretAnswerAck(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 91)
+    }()
+    case .changesListRequest?: try {
+      guard case .changesListRequest(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 100)
+    }()
+    case .changesList?: try {
+      guard case .changesList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 101)
+    }()
+    case .changesFileRequest?: try {
+      guard case .changesFileRequest(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 102)
+    }()
+    case .changesFile?: try {
+      guard case .changesFile(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 103)
     }()
     case nil: break
     }
