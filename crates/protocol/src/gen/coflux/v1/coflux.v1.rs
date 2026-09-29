@@ -2039,6 +2039,13 @@ pub struct ScreenVideoFrame {
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="9")]
     pub last: bool,
+    /// Position of this chunk within the frame (0-based) and the frame's chunk count, so a receiver
+    /// detects a missing chunk instead of assembling a frame with a hole: any gap discards the frame
+    /// and asks for a keyframe. `last` == (chunk_index + 1 == chunk_count).
+    #[prost(uint32, tag="10")]
+    pub chunk_index: u32,
+    #[prost(uint32, tag="11")]
+    pub chunk_count: u32,
 }
 /// A key by physical position: `code` is the DOM KeyboardEvent.code ("KeyA", "MetaLeft", "Digit1",
 /// "ArrowUp"…), mapped to a macOS virtual key code on the remote, so neither side's layout or input
@@ -2051,6 +2058,10 @@ pub struct ScreenKeyEvent {
     pub down: bool,
     #[prost(uint32, tag="3")]
     pub modifiers: u32,
+    /// An auto-repeat of a held key (DOM KeyboardEvent.repeat); the remote posts it as an autorepeat
+    /// key-down (kCGKeyboardEventAutorepeat) so held arrows and Delete repeat as they would locally.
+    #[prost(bool, tag="4")]
+    pub repeat: bool,
 }
 /// Pointer in display points, origin top-left of the virtual display. button: 0 left, 1 right,
 /// 2 middle, 3+ other. click_count is macOS's click count (1 single, 2 double…).
@@ -2209,9 +2220,17 @@ pub struct ScreenHelperChannelClosed {
     #[prost(string, tag="1")]
     pub channel_id: ::prost::alloc::string::String,
 }
+/// worker→helper: this helper is not the one the runtime ships (its version or protocol differs
+/// from what the worker expects, typically after a desktop update). The helper stops listening at
+/// once — closes and unlinks its socket so the current binary can take the path — and exits as soon
+/// as it holds no session: immediately when none, otherwise when the session ends (a session whose
+/// worker is gone runs out its orphan grace, as it would anyway).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenHelperRetire {
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ScreenHelperFrame {
-    #[prost(oneof="screen_helper_frame::Payload", tags="1, 2, 3, 4")]
+    #[prost(oneof="screen_helper_frame::Payload", tags="1, 2, 3, 4, 5")]
     pub payload: ::core::option::Option<screen_helper_frame::Payload>,
 }
 /// Nested message and enum types in `ScreenHelperFrame`.
@@ -2226,6 +2245,8 @@ pub mod screen_helper_frame {
         ChannelClosed(super::ScreenHelperChannelClosed),
         #[prost(message, tag="4")]
         Envelope(super::DeviceEnvelope),
+        #[prost(message, tag="5")]
+        Retire(super::ScreenHelperRetire),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2907,14 +2928,17 @@ impl AnnotationImageKind {
 //    - the client grants credit in ScreenVideoAttach.credit_bytes and ScreenVideoCredit.bytes;
 //    - the helper never has more frame bytes in flight than it has credit; a captured frame that
 //      does not fit is dropped (never queued) and the next frame delivered is a keyframe;
-//    - the client returns the bytes of every frame it received once handed to its decoder, whether
+//    - the client returns the bytes of every chunk it received once handed to its decoder, whether
 //      or not it decoded it;
 //    - one message carries at most 256 KiB of data (SCREEN_VIDEO_CHUNK_BYTES); a larger frame is
-//      split into messages sharing frame_seq, `last` set on the final one;
+//      split into messages sharing frame_seq, numbered by chunk_index / chunk_count, `last` set on
+//      the final one; a receiver that sees a gap discards the frame and asks for a keyframe;
 //    - a client starts with 2 MiB of credit on a relayed path and 8 MiB on a direct one.
-// The worker keeps at most 64 records of a screen channel queued to the transport helper (a
-// quarter of the helper's shared 256-record queue, the loopback tunnel's budget) and the credit
-// bounds what is queued in the channel's own sink.
+// Nothing between the helper and the client drops a video chunk: the worker clamps a lane's credit
+// to 64 chunks (a quarter of the transport helper's shared 256-record queue, the loopback tunnel's
+// budget), so the credit itself bounds the records queued in the channel's sink, and a chunk the
+// sink still cannot take closes the lane like any other payload (the client reopens and resyncs).
+// Only cursor updates are dropped under backpressure: the next one supersedes a lost one.
 //
 // Holder: the helper keeps at most one session per device, with a holder_epoch starting at 1. A
 // ScreenSessionOpen while another client holds the session is refused with code "held" unless

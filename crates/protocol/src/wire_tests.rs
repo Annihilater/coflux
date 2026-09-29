@@ -673,6 +673,8 @@ fn screen_payloads_round_trip_through_device_and_helper_envelopes() {
             codec: ScreenVideoCodec::H264 as i32,
             data: vec![0, 0, 0, 1, 0x67, 0xff],
             last: false,
+            chunk_index: 0,
+            chunk_count: 3,
         })),
     };
     let helper = ScreenHelperFrame {
@@ -690,6 +692,7 @@ fn screen_payloads_round_trip_through_device_and_helper_envelopes() {
     assert_eq!(video.pts_us, 1 << 40);
     assert_eq!(video.codec(), ScreenVideoCodec::H264);
     assert!(!video.last);
+    assert_eq!((video.chunk_index, video.chunk_count), (0, 3));
 
     let hello = ScreenHelperFrame {
         payload: Some(screen_helper_frame::Payload::Hello(ScreenHelperHello {
@@ -710,6 +713,7 @@ fn screen_payloads_round_trip_through_device_and_helper_envelopes() {
                 code: "MetaLeft".into(),
                 down: true,
                 modifiers: 8,
+                repeat: false,
             })),
         })),
     };

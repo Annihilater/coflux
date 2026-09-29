@@ -3836,6 +3836,13 @@ public struct Coflux_V1_ScreenVideoFrame: Sendable {
 
   public var last: Bool = false
 
+  /// Position of this chunk within the frame (0-based) and the frame's chunk count, so a receiver
+  /// detects a missing chunk instead of assembling a frame with a hole: any gap discards the frame
+  /// and asks for a keyframe. `last` == (chunk_index + 1 == chunk_count).
+  public var chunkIndex: UInt32 = 0
+
+  public var chunkCount: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -3854,6 +3861,10 @@ public struct Coflux_V1_ScreenKeyEvent: Sendable {
   public var down: Bool = false
 
   public var modifiers: UInt32 = 0
+
+  /// An auto-repeat of a held key (DOM KeyboardEvent.repeat); the remote posts it as an autorepeat
+  /// key-down (kCGKeyboardEventAutorepeat) so held arrows and Delete repeat as they would locally.
+  public var `repeat`: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4158,6 +4169,21 @@ public struct Coflux_V1_ScreenHelperChannelClosed: Sendable {
   public init() {}
 }
 
+/// worker→helper: this helper is not the one the runtime ships (its version or protocol differs
+/// from what the worker expects, typically after a desktop update). The helper stops listening at
+/// once — closes and unlinks its socket so the current binary can take the path — and exits as soon
+/// as it holds no session: immediately when none, otherwise when the session ends (a session whose
+/// worker is gone runs out its orphan grace, as it would anyway).
+public struct Coflux_V1_ScreenHelperRetire: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_ScreenHelperFrame: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -4197,6 +4223,14 @@ public struct Coflux_V1_ScreenHelperFrame: Sendable {
     set {payload = .envelope(newValue)}
   }
 
+  public var retire: Coflux_V1_ScreenHelperRetire {
+    get {
+      if case .retire(let v)? = payload {return v}
+      return Coflux_V1_ScreenHelperRetire()
+    }
+    set {payload = .retire(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -4204,6 +4238,7 @@ public struct Coflux_V1_ScreenHelperFrame: Sendable {
     case helloAck(Coflux_V1_ScreenHelperHelloAck)
     case channelClosed(Coflux_V1_ScreenHelperChannelClosed)
     case envelope(Coflux_V1_DeviceEnvelope)
+    case retire(Coflux_V1_ScreenHelperRetire)
 
   }
 
@@ -10945,7 +10980,7 @@ extension Coflux_V1_ScreenKeyframeRequest: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ScreenVideoFrame"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}frame_seq\0\u{1}keyframe\0\u{3}pts_us\0\u{3}width_pixels\0\u{3}height_pixels\0\u{1}codec\0\u{1}data\0\u{1}last\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}frame_seq\0\u{1}keyframe\0\u{3}pts_us\0\u{3}width_pixels\0\u{3}height_pixels\0\u{1}codec\0\u{1}data\0\u{1}last\0\u{3}chunk_index\0\u{3}chunk_count\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10962,6 +10997,8 @@ extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._Mess
       case 7: try { try decoder.decodeSingularEnumField(value: &self.codec) }()
       case 8: try { try decoder.decodeSingularBytesField(value: &self.data) }()
       case 9: try { try decoder.decodeSingularBoolField(value: &self.last) }()
+      case 10: try { try decoder.decodeSingularUInt32Field(value: &self.chunkIndex) }()
+      case 11: try { try decoder.decodeSingularUInt32Field(value: &self.chunkCount) }()
       default: break
       }
     }
@@ -10995,6 +11032,12 @@ extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.last != false {
       try visitor.visitSingularBoolField(value: self.last, fieldNumber: 9)
     }
+    if self.chunkIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkIndex, fieldNumber: 10)
+    }
+    if self.chunkCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkCount, fieldNumber: 11)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -11008,6 +11051,8 @@ extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.codec != rhs.codec {return false}
     if lhs.data != rhs.data {return false}
     if lhs.last != rhs.last {return false}
+    if lhs.chunkIndex != rhs.chunkIndex {return false}
+    if lhs.chunkCount != rhs.chunkCount {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -11015,7 +11060,7 @@ extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Coflux_V1_ScreenKeyEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ScreenKeyEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}down\0\u{1}modifiers\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}down\0\u{1}modifiers\0\u{1}repeat\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11026,6 +11071,7 @@ extension Coflux_V1_ScreenKeyEvent: SwiftProtobuf.Message, SwiftProtobuf._Messag
       case 1: try { try decoder.decodeSingularStringField(value: &self.code) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.down) }()
       case 3: try { try decoder.decodeSingularUInt32Field(value: &self.modifiers) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.`repeat`) }()
       default: break
       }
     }
@@ -11041,6 +11087,9 @@ extension Coflux_V1_ScreenKeyEvent: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if self.modifiers != 0 {
       try visitor.visitSingularUInt32Field(value: self.modifiers, fieldNumber: 3)
     }
+    if self.`repeat` != false {
+      try visitor.visitSingularBoolField(value: self.`repeat`, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -11048,6 +11097,7 @@ extension Coflux_V1_ScreenKeyEvent: SwiftProtobuf.Message, SwiftProtobuf._Messag
     if lhs.code != rhs.code {return false}
     if lhs.down != rhs.down {return false}
     if lhs.modifiers != rhs.modifiers {return false}
+    if lhs.`repeat` != rhs.`repeat` {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -11625,9 +11675,28 @@ extension Coflux_V1_ScreenHelperChannelClosed: SwiftProtobuf.Message, SwiftProto
   }
 }
 
+extension Coflux_V1_ScreenHelperRetire: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperRetire"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperRetire, rhs: Coflux_V1_ScreenHelperRetire) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ScreenHelperFrame"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}hello\0\u{3}hello_ack\0\u{3}channel_closed\0\u{1}envelope\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}hello\0\u{3}hello_ack\0\u{3}channel_closed\0\u{1}envelope\0\u{1}retire\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11687,6 +11756,19 @@ extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._Mes
           self.payload = .envelope(v)
         }
       }()
+      case 5: try {
+        var v: Coflux_V1_ScreenHelperRetire?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .retire(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .retire(v)
+        }
+      }()
       default: break
       }
     }
@@ -11713,6 +11795,10 @@ extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._Mes
     case .envelope?: try {
       guard case .envelope(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .retire?: try {
+      guard case .retire(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
     }()
     case nil: break
     }
