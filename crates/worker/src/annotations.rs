@@ -12,9 +12,20 @@
 //! <workspaceId>/<annotationId>/<imageId>.<ext>   one file per image
 //! ```
 //!
-//! Every write replaces its file atomically ([`crate::atomic_file`]); deleting an annotation deletes
-//! its image directory. The store keys by workspace id only: it never needs the worker's workspace
-//! table (which is filled from the center and not persisted) to read or list annotations.
+//! Every write replaces its file atomically ([`crate::atomic_file`]). The store keys by workspace id
+//! only: it never needs the worker's workspace table (which is filled from the center and not
+//! persisted) to read or list annotations.
+//!
+//! One annotation points at one or more elements, optionally narrowed to a dragged region (plan
+//! 20260929-annotation-polish): `targets[0]` is the anchor, the region is stored relative to it.
+//!
+//! Deleting is undoable (plan 20260929-annotation-polish): a delete, confirm or clear-resolved moves
+//! the records to the index's `deleted` list — gone at once from every listing, count and agent
+//! output — and keeps them (image files included) restorable for [`UNDO_WINDOW_MS`]. Expired ones
+//! are purged lazily, whenever a workspace's index is loaded or accessed.
+//!
+//! Index format version 2. An index of any other version (v1 predates targets) is discarded with
+//! its images on first access: compatibility with older stores is explicitly not kept.
 //!
 //! Content never leaves toward the center: what the center receives is the metadata-only
 //! [`wire::AnnotationsSummary`] (per workspace a revision and two counts), published as a full
@@ -40,7 +51,7 @@ use tokio::sync::{mpsc, watch};
 use crate::WsOut;
 
 const INDEX_FILE: &str = "index.json";
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 /// Annotations kept per workspace; a runaway client cannot fill the disk with records.
 pub const MAX_ANNOTATIONS: usize = 500;
@@ -60,6 +71,10 @@ const MAX_VALUE_CHARS: usize = 500;
 const MAX_LIST_ITEMS: usize = 24;
 const MAX_MAP_ITEMS: usize = 40;
 const MAX_FOLLOW_UPS: usize = 50;
+/// Elements one annotation points at (a shift-click selection, or a region's inner elements).
+const MAX_TARGETS: usize = 24;
+/// How long a deleted annotation stays restorable (「撤销」); comfortably longer than the toast.
+pub const UNDO_WINDOW_MS: f64 = 60_000.0;
 /// Workspaces listed in one summary; the center applies the same cap.
 const MAX_SUMMARY_WORKSPACES: usize = 1024;
 
@@ -79,8 +94,9 @@ pub struct StoredAnnotation {
     pub page_url: String,
     pub page_title: String,
     pub comment: String,
-    pub element: StoredElement,
-    pub source: StoredSource,
+    /// At least one; `targets[0]` is the anchor (see the module comment).
+    pub targets: Vec<StoredTarget>,
+    pub region: Option<StoredRegion>,
     pub images: Vec<StoredImage>,
     pub resolution_note: String,
     pub follow_ups: Vec<StoredFollowUp>,
@@ -89,6 +105,34 @@ pub struct StoredAnnotation {
     pub resolved_at: f64,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StoredTarget {
+    pub element: StoredElement,
+    pub source: StoredSource,
+}
+
+impl StoredTarget {
+    fn source_json(&self) -> serde_json::Value {
+        let source = &self.source;
+        if source.framework.is_empty() && source.components.is_empty() && source.file.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(source).unwrap_or_default()
+        }
+    }
+}
+
+/// A dragged region, in CSS pixels relative to `targets[0]`'s top-left corner.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StoredRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -135,15 +179,34 @@ pub struct StoredFollowUp {
     pub created_at: f64,
 }
 
+/// A deleted annotation kept restorable until `deleted_at + UNDO_WINDOW_MS`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct DeletedAnnotation {
+    deleted_at: f64,
+    annotation: StoredAnnotation,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct WorkspaceIndex {
     version: u32,
     revision: u32,
     next_number: u32,
+    /// The live annotations: the only ones listing, counting, editing and agents ever see.
     annotations: Vec<StoredAnnotation>,
+    /// Deleted within the undo window; see [`UNDO_WINDOW_MS`].
+    deleted: Vec<DeletedAnnotation>,
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Only the header of an index file, read before trusting the rest of it.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct IndexHeader {
+    version: u32,
+    revision: u32,
 }
 
 impl WorkspaceIndex {
@@ -234,6 +297,65 @@ fn finite(value: f64) -> f64 {
         value
     } else {
         0.0
+    }
+}
+
+fn finite_signed(value: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
+}
+
+fn targets_from_wire(targets: &[wire::AnnotationTarget]) -> Vec<StoredTarget> {
+    targets
+        .iter()
+        .take(MAX_TARGETS)
+        .map(|target| StoredTarget {
+            element: element_from_wire(target.element.as_ref()),
+            source: source_from_wire(target.source.as_ref()),
+        })
+        .collect()
+}
+
+fn region_from_wire(region: Option<&wire::AnnotationRegion>) -> Option<StoredRegion> {
+    let region = region?;
+    let width = finite(region.width);
+    let height = finite(region.height);
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(StoredRegion {
+        x: finite_signed(region.x),
+        y: finite_signed(region.y),
+        width,
+        height,
+    })
+}
+
+fn element_to_wire(element: &StoredElement) -> wire::AnnotationElement {
+    wire::AnnotationElement {
+        selector: element.selector.clone(),
+        dom_path: element.dom_path.clone(),
+        tag: element.tag.clone(),
+        text: element.text.clone(),
+        element_id: element.element_id.clone(),
+        classes: element.classes.clone(),
+        attributes: element.attributes.clone().into_iter().collect(),
+        styles: element.styles.clone().into_iter().collect(),
+        width: element.width,
+        height: element.height,
+    }
+}
+
+fn source_to_wire(source: &StoredSource) -> wire::AnnotationSource {
+    wire::AnnotationSource {
+        framework: source.framework.clone(),
+        components: source.components.clone(),
+        file: source.file.clone(),
+        line: source.line,
+        column: source.column,
     }
 }
 
@@ -338,18 +460,41 @@ impl AnnotationStore {
         self.annotation_dir(workspace_id, annotation_id).join(&image.file)
     }
 
-    fn read_index(&self, workspace_id: &str) -> Result<WorkspaceIndex, String> {
-        let path = self.workspace_dir(workspace_id).join(INDEX_FILE);
-        match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|error| format!("annotation index {} is unreadable: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(WorkspaceIndex {
-                version: INDEX_VERSION,
-                next_number: 1,
-                ..WorkspaceIndex::default()
-            }),
-            Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    fn empty_index(revision: u32) -> WorkspaceIndex {
+        WorkspaceIndex {
+            version: INDEX_VERSION,
+            revision,
+            next_number: 1,
+            ..WorkspaceIndex::default()
         }
+    }
+
+    fn read_index(&self, workspace_id: &str) -> Result<WorkspaceIndex, String> {
+        let dir = self.workspace_dir(workspace_id);
+        let path = dir.join(INDEX_FILE);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::empty_index(0)),
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+        };
+        let header: IndexHeader = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("annotation index {} is unreadable: {error}", path.display()))?;
+        if header.version != INDEX_VERSION {
+            // Another format (v1 predates targets): no conversion, by design. Drop it with its
+            // images; the revision carries on so desktops still see a change.
+            logln!(
+                "[annotations] discarding workspace {workspace_id}'s annotations: index version {} is not {INDEX_VERSION}",
+                header.version
+            );
+            if let Err(error) = fs::remove_dir_all(&dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    logln!("[annotations] cannot delete {}: {error}", dir.display());
+                }
+            }
+            return Ok(Self::empty_index(header.revision));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("annotation index {} is unreadable: {error}", path.display()))
     }
 
     fn write_index(&self, workspace_id: &str, index: &WorkspaceIndex) -> Result<(), String> {
@@ -360,7 +505,7 @@ impl AnnotationStore {
             .map_err(|error| format!("cannot write the annotation index: {error}"))
     }
 
-    /// The cached index of a workspace, loaded on first use.
+    /// The cached index of a workspace, loaded on first use; expired deletions are purged here.
     fn index<'a>(&self, inner: &'a mut Inner, workspace_id: &str) -> Result<&'a mut WorkspaceIndex, String> {
         if !valid_segment(workspace_id) {
             return Err("invalid workspace id".into());
@@ -369,7 +514,27 @@ impl AnnotationStore {
             let index = self.read_index(workspace_id)?;
             inner.workspaces.insert(workspace_id.to_string(), index);
         }
-        Ok(inner.workspaces.get_mut(workspace_id).unwrap())
+        let index = inner.workspaces.get_mut(workspace_id).unwrap();
+        self.purge_expired(workspace_id, index, now_ms());
+        Ok(index)
+    }
+
+    /// Drops deletions whose undo window has passed, with their image files. Invisible to readers
+    /// (they were already gone), so the revision does not change and nothing is published.
+    fn purge_expired(&self, workspace_id: &str, index: &mut WorkspaceIndex, now: f64) {
+        let expired = |entry: &DeletedAnnotation| now - entry.deleted_at >= UNDO_WINDOW_MS;
+        if !index.deleted.iter().any(expired) {
+            return;
+        }
+        let (gone, kept): (Vec<DeletedAnnotation>, Vec<DeletedAnnotation>) =
+            std::mem::take(&mut index.deleted).into_iter().partition(expired);
+        index.deleted = kept;
+        if let Err(error) = self.write_index(workspace_id, index) {
+            logln!("[annotations] {error}");
+        }
+        for entry in gone {
+            self.remove_annotation_files(workspace_id, &entry.annotation.id);
+        }
     }
 
     /// Loads every workspace directory once, so a summary covers what is on disk.
@@ -390,7 +555,8 @@ impl AnnotationStore {
                 continue;
             }
             match self.read_index(&name) {
-                Ok(index) => {
+                Ok(mut index) => {
+                    self.purge_expired(&name, &mut index, now_ms());
                     inner.workspaces.insert(name, index);
                 }
                 Err(error) => logln!("[annotations] {error}"),
@@ -470,6 +636,10 @@ impl AnnotationStore {
         let comment = clip(&incoming.comment, MAX_COMMENT_CHARS);
         if comment.is_empty() && put.add_images.is_empty() && incoming.annotation_id.is_empty() {
             return Err("an annotation needs a comment".into());
+        }
+        let targets = targets_from_wire(&incoming.targets);
+        if incoming.annotation_id.is_empty() && targets.is_empty() {
+            return Err("an annotation needs at least one element".into());
         }
         let mut inner = self.inner.lock().unwrap();
         let mut index = self.index(&mut inner, workspace_id)?.clone();
@@ -564,11 +734,10 @@ impl AnnotationStore {
             annotation.page_url = clip(&incoming.page_url, MAX_URL_CHARS);
             annotation.page_title = clip(&incoming.page_title, MAX_TITLE_CHARS);
         }
-        if incoming.element.is_some() {
-            annotation.element = element_from_wire(incoming.element.as_ref());
-        }
-        if incoming.source.is_some() {
-            annotation.source = source_from_wire(incoming.source.as_ref());
+        // Targets and region change together; an edit that sends no targets keeps both.
+        if !targets.is_empty() {
+            annotation.targets = targets;
+            annotation.region = region_from_wire(incoming.region.as_ref());
         }
         annotation.updated_at = now;
         let stored = annotation.clone();
@@ -589,42 +758,70 @@ impl AnnotationStore {
         }
     }
 
-    /// Deletes annotations and their image files. Unknown ids are ignored (already deleted elsewhere).
-    pub fn delete(&self, workspace_id: &str, annotation_ids: &[String]) -> Result<u32, String> {
+    /// Deletes the annotations matching `pick` under one lock: they leave the live list at once and
+    /// stay restorable for the undo window. Returns the revision and exactly the ids removed.
+    fn remove_where(
+        &self,
+        workspace_id: &str,
+        pick: impl Fn(&StoredAnnotation) -> bool,
+    ) -> Result<(u32, Vec<String>), String> {
         let mut inner = self.inner.lock().unwrap();
         let mut index = self.index(&mut inner, workspace_id)?.clone();
-        let before = index.annotations.len();
-        let mut gone = Vec::new();
-        index.annotations.retain(|annotation| {
-            let remove = annotation_ids.contains(&annotation.id);
-            if remove {
-                gone.push(annotation.id.clone());
-            }
-            !remove
-        });
-        if index.annotations.len() == before {
-            return Ok(index.revision);
+        let now = now_ms();
+        let (gone, kept): (Vec<StoredAnnotation>, Vec<StoredAnnotation>) =
+            std::mem::take(&mut index.annotations).into_iter().partition(|annotation| pick(annotation));
+        index.annotations = kept;
+        if gone.is_empty() {
+            return Ok((index.revision, Vec::new()));
         }
+        let removed: Vec<String> = gone.iter().map(|annotation| annotation.id.clone()).collect();
+        index.deleted.extend(gone.into_iter().map(|annotation| DeletedAnnotation {
+            deleted_at: now,
+            annotation,
+        }));
         let revision = self.commit(&mut inner, workspace_id, index)?;
-        for annotation_id in gone {
-            self.remove_annotation_files(workspace_id, &annotation_id);
-        }
-        Ok(revision)
+        Ok((revision, removed))
+    }
+
+    /// Deletes (or confirms) annotations. Unknown ids are ignored (already deleted elsewhere).
+    pub fn delete(&self, workspace_id: &str, annotation_ids: &[String]) -> Result<(u32, Vec<String>), String> {
+        self.remove_where(workspace_id, |annotation| annotation_ids.contains(&annotation.id))
     }
 
     /// Deletes every resolved annotation (「清除全部已完成」).
-    pub fn clear_resolved(&self, workspace_id: &str) -> Result<u32, String> {
-        let resolved: Vec<String> = {
-            let mut inner = self.inner.lock().unwrap();
-            let index = self.index(&mut inner, workspace_id)?;
-            index
-                .annotations
+    pub fn clear_resolved(&self, workspace_id: &str) -> Result<(u32, Vec<String>), String> {
+        self.remove_where(workspace_id, |annotation| annotation.status == STATUS_RESOLVED)
+    }
+
+    /// 「撤销」: brings deleted annotations back exactly as they were, within the undo window.
+    /// Returns the revision and the ids restored.
+    pub fn restore(&self, workspace_id: &str, annotation_ids: &[String]) -> Result<(u32, Vec<String>), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut index = self.index(&mut inner, workspace_id)?.clone();
+        let (back, kept): (Vec<DeletedAnnotation>, Vec<DeletedAnnotation>) = std::mem::take(&mut index.deleted)
+            .into_iter()
+            .partition(|entry| annotation_ids.contains(&entry.annotation.id));
+        index.deleted = kept;
+        if back.is_empty() {
+            let already_live = annotation_ids
                 .iter()
-                .filter(|annotation| annotation.status == STATUS_RESOLVED)
-                .map(|annotation| annotation.id.clone())
-                .collect()
-        };
-        self.delete(workspace_id, &resolved)
+                .all(|id| index.annotations.iter().any(|annotation| &annotation.id == id));
+            if already_live {
+                return Ok((index.revision, Vec::new()));
+            }
+            return Err("these annotations can no longer be restored (the undo window has passed)".into());
+        }
+        if index.annotations.len() + back.len() > MAX_ANNOTATIONS {
+            return Err(format!(
+                "this workspace already has {MAX_ANNOTATIONS} annotations; confirm or delete some first"
+            ));
+        }
+        let restored: Vec<String> = back.iter().map(|entry| entry.annotation.id.clone()).collect();
+        index.annotations.extend(back.into_iter().map(|entry| entry.annotation));
+        // Numbers are never reused, so number order is creation order.
+        index.annotations.sort_by_key(|annotation| annotation.number);
+        let revision = self.commit(&mut inner, workspace_id, index)?;
+        Ok((revision, restored))
     }
 
     fn remove_annotation_files(&self, workspace_id: &str, annotation_id: &str) {
@@ -735,24 +932,19 @@ impl AnnotationStore {
             page_url: annotation.page_url.clone(),
             page_title: annotation.page_title.clone(),
             comment: annotation.comment.clone(),
-            element: Some(wire::AnnotationElement {
-                selector: annotation.element.selector.clone(),
-                dom_path: annotation.element.dom_path.clone(),
-                tag: annotation.element.tag.clone(),
-                text: annotation.element.text.clone(),
-                element_id: annotation.element.element_id.clone(),
-                classes: annotation.element.classes.clone(),
-                attributes: annotation.element.attributes.clone().into_iter().collect(),
-                styles: annotation.element.styles.clone().into_iter().collect(),
-                width: annotation.element.width,
-                height: annotation.element.height,
-            }),
-            source: Some(wire::AnnotationSource {
-                framework: annotation.source.framework.clone(),
-                components: annotation.source.components.clone(),
-                file: annotation.source.file.clone(),
-                line: annotation.source.line,
-                column: annotation.source.column,
+            targets: annotation
+                .targets
+                .iter()
+                .map(|target| wire::AnnotationTarget {
+                    element: Some(element_to_wire(&target.element)),
+                    source: Some(source_to_wire(&target.source)),
+                })
+                .collect(),
+            region: annotation.region.as_ref().map(|region| wire::AnnotationRegion {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
             }),
             images: annotation
                 .images
@@ -798,21 +990,26 @@ impl AnnotationStore {
                 })
             })
             .collect();
-        let source = &annotation.source;
-        let has_source = !source.framework.is_empty() || !source.components.is_empty() || !source.file.is_empty();
-        let source = if has_source {
-            serde_json::to_value(source).unwrap_or_default()
-        } else {
-            serde_json::Value::Null
-        };
+        // targets[0] is the anchor: the picked element, the first of a selection, or the element
+        // containing the region; for a region the others are the elements inside it.
+        let targets: Vec<serde_json::Value> = annotation
+            .targets
+            .iter()
+            .map(|target| {
+                serde_json::json!({
+                    "element": target.element,
+                    "source": target.source_json(),
+                })
+            })
+            .collect();
         serde_json::json!({
             "id": annotation.id,
             "number": annotation.number,
             "status": annotation.status,
             "comment": annotation.comment,
             "page": { "url": annotation.page_url, "title": annotation.page_title },
-            "element": annotation.element,
-            "source": source,
+            "targets": targets,
+            "region": annotation.region,
             "images": images,
             "followUps": annotation.follow_ups,
             "resolutionNote": annotation.resolution_note,
@@ -835,16 +1032,27 @@ mod tests {
         (AnnotationStore::new(&home.to_string_lossy(), tx), home, rx)
     }
 
+    fn target(selector: &str, tag: &str, components: &[&str]) -> wire::AnnotationTarget {
+        wire::AnnotationTarget {
+            element: Some(wire::AnnotationElement {
+                selector: selector.into(),
+                tag: tag.into(),
+                ..Default::default()
+            }),
+            source: Some(wire::AnnotationSource {
+                framework: if components.is_empty() { String::new() } else { "react".into() },
+                components: components.iter().map(|name| name.to_string()).collect(),
+                ..Default::default()
+            }),
+        }
+    }
+
     fn put_new(comment: &str, images: usize) -> wire::AnnotationPut {
         wire::AnnotationPut {
             annotation: Some(wire::Annotation {
                 comment: comment.into(),
                 page_url: "http://localhost:3000/".into(),
-                element: Some(wire::AnnotationElement {
-                    selector: "#save".into(),
-                    tag: "BUTTON".into(),
-                    ..Default::default()
-                }),
+                targets: vec![target("#save", "BUTTON", &[])],
                 ..Default::default()
             }),
             add_images: (0..images)
@@ -864,7 +1072,7 @@ mod tests {
         let (_, first) = store.put("ws-1", put_new("make it blue", 1)).unwrap();
         let (_, second) = store.put("ws-1", put_new("bigger", 0)).unwrap();
         assert_eq!((first.number, second.number), (1, 2));
-        assert_eq!(first.element.tag, "button");
+        assert_eq!(first.targets[0].element.tag, "button");
         let (tx, _rx2) = mpsc::channel(4);
         let reopened = AnnotationStore::new(&home.to_string_lossy(), tx);
         let (revision, list) = reopened.list("ws-1").unwrap();
@@ -876,8 +1084,17 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    /// Moves every deletion of the workspace `by_ms` into the past, as if that much time passed.
+    fn age_deletions(store: &AnnotationStore, workspace_id: &str, by_ms: f64) {
+        let mut inner = store.inner.lock().unwrap();
+        let index = inner.workspaces.get_mut(workspace_id).unwrap();
+        for entry in &mut index.deleted {
+            entry.deleted_at -= by_ms;
+        }
+    }
+
     #[test]
-    fn delete_removes_image_files_and_resolve_reopen_cycle() {
+    fn resolve_reopen_cycle_then_clear_resolved_hides_at_once_and_purges_after_the_window() {
         let (store, home, _rx) = store();
         let (_, annotation) = store.put("ws-1", put_new("fix", 2)).unwrap();
         let dir = store.annotation_dir("ws-1", &annotation.id);
@@ -888,9 +1105,129 @@ mod tests {
         assert_eq!(reopened.status, STATUS_PENDING);
         assert_eq!(reopened.follow_ups[0].previous_note, "done");
         store.resolve("ws-1", &annotation.id, "now blue").unwrap();
-        store.clear_resolved("ws-1").unwrap();
-        assert!(!dir.exists());
+        let (_, removed) = store.clear_resolved("ws-1").unwrap();
+        assert_eq!(removed, vec![annotation.id.clone()]);
         assert!(store.list("ws-1").unwrap().1.is_empty());
+        assert_eq!(store.summary()[0].resolved, 0);
+        assert!(store.resolve("ws-1", "#1", "again").is_err());
+        assert!(store.read_image("ws-1", &annotation.id, &annotation.images[0].id).is_err());
+        // Still restorable: the files stay until the window passes.
+        assert!(dir.is_dir());
+        age_deletions(&store, "ws-1", UNDO_WINDOW_MS + 1.0);
+        assert!(store.list("ws-1").unwrap().1.is_empty());
+        assert!(!dir.exists());
+        assert!(store.restore("ws-1", &removed).is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn delete_then_restore_within_the_window_brings_back_everything() {
+        let (store, home, _rx) = store();
+        let (_, first) = store.put("ws-1", put_new("first", 1)).unwrap();
+        let (_, second) = store.put("ws-1", put_new("second", 0)).unwrap();
+        store.resolve("ws-1", "#2", "done").unwrap();
+        let (_, removed) = store.delete("ws-1", &[first.id.clone(), second.id.clone(), "ann-gone".into()]).unwrap();
+        assert_eq!(removed, vec![first.id.clone(), second.id.clone()]);
+        assert!(store.list("ws-1").unwrap().1.is_empty());
+        // A new annotation meanwhile takes a fresh number, never a deleted one's.
+        let (_, third) = store.put("ws-1", put_new("third", 0)).unwrap();
+        assert_eq!(third.number, 3);
+        // The deletion survives a worker restart (persisted), and so does the restorable copy.
+        let (tx, _rx2) = mpsc::channel(64);
+        let reopened = AnnotationStore::new(&home.to_string_lossy(), tx);
+        assert_eq!(reopened.list("ws-1").unwrap().1.len(), 1);
+        let (_, restored) = reopened.restore("ws-1", &removed).unwrap();
+        assert_eq!(restored, removed);
+        let (_, list) = reopened.list("ws-1").unwrap();
+        let numbers: Vec<u32> = list.iter().map(|annotation| annotation.number).collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
+        assert_eq!(list[0].id, first.id);
+        assert_eq!(list[0].comment, "first");
+        assert_eq!(list[1].status, STATUS_RESOLVED);
+        assert_eq!(list[1].resolution_note, "done");
+        let (_, data) = reopened.read_image("ws-1", &first.id, &first.images[0].id).unwrap();
+        assert_eq!(data, vec![1, 2, 3]);
+        // Restoring twice is a no-op, not an error.
+        assert!(reopened.restore("ws-1", &removed).unwrap().1.is_empty());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn targets_and_region_round_trip() {
+        let (store, home, _rx) = store();
+        let mut put = put_new("tighten this area", 0);
+        let annotation = put.annotation.as_mut().unwrap();
+        annotation.targets = vec![
+            target("header", "HEADER", &["Header", "App"]),
+            target("#logo", "IMG", &["Logo"]),
+            target("nav", "NAV", &[]),
+        ];
+        annotation.region = Some(wire::AnnotationRegion {
+            x: 12.0,
+            y: -4.0,
+            width: 320.0,
+            height: 80.0,
+        });
+        store.put("ws-1", put).unwrap();
+        let (tx, _rx2) = mpsc::channel(4);
+        let reopened = AnnotationStore::new(&home.to_string_lossy(), tx);
+        let (_, list) = reopened.list("ws-1").unwrap();
+        let stored = &list[0];
+        assert_eq!(stored.targets.len(), 3);
+        assert_eq!(stored.targets[0].source.components, vec!["Header", "App"]);
+        assert_eq!(stored.targets[1].element.tag, "img");
+        assert_eq!(
+            stored.region,
+            Some(StoredRegion { x: 12.0, y: -4.0, width: 320.0, height: 80.0 })
+        );
+        let wire = reopened.to_wire("ws-1", stored);
+        assert_eq!(wire.targets.len(), 3);
+        assert_eq!(wire.region.as_ref().unwrap().width, 320.0);
+        let json = reopened.agent_json("ws-1", stored);
+        assert_eq!(json["targets"][0]["source"]["components"][1], "App");
+        assert!(json["targets"][2]["source"].is_null());
+        assert_eq!(json["region"]["height"], 80.0);
+        // An edit without targets keeps them; an edit with a plain pick drops the region.
+        let mut edit = wire::AnnotationPut {
+            annotation: Some(wire::Annotation {
+                annotation_id: stored.id.clone(),
+                comment: "tighter".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_, edited) = reopened.put("ws-1", edit.clone()).unwrap();
+        assert_eq!(edited.targets.len(), 3);
+        assert!(edited.region.is_some());
+        edit.annotation.as_mut().unwrap().targets = vec![target("#x", "DIV", &[])];
+        let (_, edited) = reopened.put("ws-1", edit).unwrap();
+        assert_eq!(edited.targets.len(), 1);
+        assert!(edited.region.is_none());
+        // A new annotation needs an element.
+        let mut empty = put_new("no element", 0);
+        empty.annotation.as_mut().unwrap().targets.clear();
+        assert!(reopened.put("ws-1", empty).is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_version_1_store_is_discarded_with_its_images() {
+        let (store, home, _rx) = store();
+        let dir = store.workspace_dir("ws-1");
+        fs::create_dir_all(dir.join("ann-old")).unwrap();
+        fs::write(dir.join("ann-old").join("img-1.png"), [1u8]).unwrap();
+        fs::write(
+            dir.join(INDEX_FILE),
+            r#"{"version":1,"revision":7,"nextNumber":2,"annotations":[{"id":"ann-old","number":1,"status":"pending","comment":"old","element":{"tag":"a"},"source":{}}]}"#,
+        )
+        .unwrap();
+        let (revision, list) = store.list("ws-1").unwrap();
+        assert!(list.is_empty());
+        assert_eq!(revision, 7);
+        assert!(!dir.join("ann-old").exists());
+        let (_, fresh) = store.put("ws-1", put_new("new", 0)).unwrap();
+        assert_eq!(fresh.number, 1);
+        assert_eq!(store.list("ws-1").unwrap().0, 8);
         let _ = fs::remove_dir_all(&home);
     }
 

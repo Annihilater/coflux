@@ -1585,6 +1585,30 @@ pub struct AnnotationSource {
     #[prost(uint32, tag="5")]
     pub column: u32,
 }
+/// One element an annotation points at (plan 20260929-annotation-polish): its page context and
+/// its own framework source identity.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationTarget {
+    #[prost(message, optional, tag="1")]
+    pub element: ::core::option::Option<AnnotationElement>,
+    #[prost(message, optional, tag="2")]
+    pub source: ::core::option::Option<AnnotationSource>,
+}
+/// A rectangle the user dragged on the live page, stored relative to the border box of the
+/// annotation's target 0 (the innermost element containing it) so it follows scrolling and reflow.
+/// When only <body> contains it, it is a fixed document position.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct AnnotationRegion {
+    /// CSS pixels from target 0's top-left corner when the region was drawn.
+    #[prost(double, tag="1")]
+    pub x: f64,
+    #[prost(double, tag="2")]
+    pub y: f64,
+    #[prost(double, tag="3")]
+    pub width: f64,
+    #[prost(double, tag="4")]
+    pub height: f64,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AnnotationImage {
     /// Assigned by the worker.
@@ -1627,10 +1651,6 @@ pub struct Annotation {
     pub page_title: ::prost::alloc::string::String,
     #[prost(string, tag="6")]
     pub comment: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="7")]
-    pub element: ::core::option::Option<AnnotationElement>,
-    #[prost(message, optional, tag="8")]
-    pub source: ::core::option::Option<AnnotationSource>,
     #[prost(message, repeated, tag="9")]
     pub images: ::prost::alloc::vec::Vec<AnnotationImage>,
     /// The agent's note from `coflux annotations resolve`.
@@ -1644,6 +1664,14 @@ pub struct Annotation {
     pub updated_at: f64,
     #[prost(double, tag="14")]
     pub resolved_at: f64,
+    /// The elements the annotation points at, at least one. Target 0 is the anchor: the clicked
+    /// element, the first of a shift-click selection, or the element containing `region`. For a
+    /// region annotation the other targets are the top-level elements inside the region.
+    #[prost(message, repeated, tag="15")]
+    pub targets: ::prost::alloc::vec::Vec<AnnotationTarget>,
+    /// Set when the user dragged a region instead of picking elements.
+    #[prost(message, optional, tag="16")]
+    pub region: ::core::option::Option<AnnotationRegion>,
 }
 /// An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1655,8 +1683,8 @@ pub struct AnnotationImageUpload {
     #[prost(bytes="vec", tag="3")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
-/// Create (empty annotation_id) or edit an annotation. On edit only the comment, the element
-/// context, the source and the images change; status and numbering are the worker's.
+/// Create (empty annotation_id) or edit an annotation. On edit only the comment, the targets, the
+/// region and the images change; status and numbering are the worker's.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AnnotationPut {
     #[prost(message, optional, tag="1")]
@@ -1666,9 +1694,17 @@ pub struct AnnotationPut {
     #[prost(string, repeated, tag="3")]
     pub remove_image_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-/// Confirm (or delete) annotations: their image files are deleted with them.
+/// Confirm (or delete) annotations. They disappear at once; the worker keeps them (images
+/// included) restorable for a short grace window, then purges them.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AnnotationDelete {
+    #[prost(string, repeated, tag="1")]
+    pub annotation_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Undo a delete, confirm or clear-resolved within the grace window: the annotations come back
+/// exactly as they were (id, number, status, images, follow-ups). Ids already purged are skipped.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationRestore {
     #[prost(string, repeated, tag="1")]
     pub annotation_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
@@ -1713,7 +1749,7 @@ pub struct DeviceAnnotationsMutate {
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub workspace_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_annotations_mutate::Action", tags="3, 4, 5, 6")]
+    #[prost(oneof="device_annotations_mutate::Action", tags="3, 4, 5, 6, 7")]
     pub action: ::core::option::Option<device_annotations_mutate::Action>,
 }
 /// Nested message and enum types in `DeviceAnnotationsMutate`.
@@ -1728,6 +1764,8 @@ pub mod device_annotations_mutate {
         Reopen(super::AnnotationReopen),
         #[prost(message, tag="6")]
         ClearResolved(super::AnnotationClearResolved),
+        #[prost(message, tag="7")]
+        Restore(super::AnnotationRestore),
     }
 }
 /// worker→client (SESSION_CONTROL): the outcome; `annotation` is the stored result of a put or reopen.
@@ -1743,6 +1781,9 @@ pub struct DeviceAnnotationsMutated {
     pub revision: u32,
     #[prost(message, optional, tag="5")]
     pub annotation: ::core::option::Option<Annotation>,
+    /// For a delete or clear-resolved: exactly the ids it removed, which one restore brings back.
+    #[prost(string, repeated, tag="6")]
+    pub removed_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// client→worker (SESSION_CONTROL): one image file of an annotation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
