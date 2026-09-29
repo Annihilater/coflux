@@ -46,6 +46,9 @@ public final class HelperServer {
         }
     }
 
+    /// Stop listening and drop the connection. Idempotent, and the socket file is unlinked only by
+    /// the call that owned it: a retired helper stops early, and the replacement binds the same
+    /// path — a second stop must never remove the successor's socket.
     public func stop() {
         queue.sync {
             current?.close()
@@ -55,8 +58,8 @@ public final class HelperServer {
             if listenFD >= 0 {
                 Darwin.close(listenFD)
                 listenFD = -1
+                unlink(path)
             }
-            unlink(path)
         }
     }
 

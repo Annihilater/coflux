@@ -59,7 +59,9 @@ public final class CursorTracker {
     private func tick() {
         guard let event = CGEvent(source: nil) else { return }
         let position = event.location
-        let visible = CGCursorIsVisible() != 0
+        // `CGCursorIsVisible` is gone from macOS; a hidden cursor (a game, a video player) is drawn
+        // anyway — the client hides it only while the picture has no cursor shape.
+        let visible = true
         var shape: Shape?
         if shapeAvailable, let cursor = NSCursor.currentSystem, let tiff = cursor.image.tiffRepresentation {
             let hash = Data(SHA256.hash(data: tiff))

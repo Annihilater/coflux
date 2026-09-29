@@ -43,13 +43,17 @@ export function createScreenRuntime(options: {
   const sessions = new Map<string, ScreenSession>();
   const handlers = new Map<string, { focus: () => void }>();
   const pendingFocus = new Set<string>();
+  // Tabs the user just opened: their first open takes the session over; restored tabs never do.
+  const fresh = new Set<string>();
 
   return {
     tabs,
     createTab(id, record) {
+      fresh.add(id);
       tabs.setState((state) => ({ tabs: { ...state.tabs, [id]: record } }));
     },
     removeTab(id) {
+      fresh.delete(id);
       const session = sessions.get(id);
       sessions.delete(id);
       session?.close();
@@ -71,6 +75,7 @@ export function createScreenRuntime(options: {
         desktop: options.desktop,
         deviceOnline: context.deviceOnline,
         transportMode: context.transportMode,
+        takeOverOnOpen: fresh.delete(tabId),
       });
       sessions.set(tabId, session);
       return session;

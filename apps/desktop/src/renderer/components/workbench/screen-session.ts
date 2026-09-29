@@ -78,6 +78,12 @@ export type ScreenSessionOptions = {
   deviceOnline: () => boolean;
   /** "relay" lowers the starting video credit; anything else is treated as direct. */
   transportMode: () => string;
+  /**
+   * The first open is a user action (a 屏幕 tab just opened, 「打开屏幕」): it takes the session over
+   * from any other client. Automatic opens — a restored tab after restart, a reconnect after a lane
+   * closed, a resume — never take over; a tab that was taken over only reconnects through 「重新接管」.
+   */
+  takeOverOnOpen: boolean;
 };
 
 const MODIFIER_SHIFT = 1;
@@ -95,7 +101,8 @@ const OPEN_TIMEOUT_MS = 20_000;
 const INITIAL_CURSOR: ScreenCursorState = { x: 0, y: 0, visible: false, shapeUrl: null, hotspotX: 0, hotspotY: 0, widthPoints: 0, heightPoints: 0 };
 
 /** DOM modifier state → the wire's ScreenModifier bits. */
-export function modifierBits(event: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean; getModifierState?: (key: string) => boolean }): number {
+// Method syntax on purpose: React's typed `getModifierState(key: ModifierKey)` is only assignable to a bivariant method.
+export function modifierBits(event: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean; getModifierState?(key: string): boolean }): number {
   let bits = 0;
   if (event.shiftKey) bits |= MODIFIER_SHIFT;
   if (event.ctrlKey) bits |= MODIFIER_CONTROL;
@@ -144,7 +151,11 @@ export class ScreenSession {
   private decoder: VideoDecoder | null = null;
   private decoderSize: { width: number; height: number } | null = null;
   private needKeyframe = true;
-  private partial: { seq: bigint; keyframe: boolean; chunks: Uint8Array[]; bytes: number } | null = null;
+  private partial: { seq: bigint; keyframe: boolean; chunks: Uint8Array[]; bytes: number; count: number } | null = null;
+  /** Keys (by physical code) and mouse buttons the remote was told are down; released together on focus loss. */
+  private heldKeys = new Set<string>();
+  private heldButtons = new Set<number>();
+  private lastPointer = { x: 0, y: 0 };
   private pendingCredit = 0;
   private creditTimer: number | undefined;
   private shapeUrl: string | null = null;
@@ -157,6 +168,7 @@ export class ScreenSession {
     this.daemonId = options.daemonId;
     this.desktop = options.desktop;
     this.options = options;
+    this.forceNext = options.takeOverOnOpen;
     this.state = { phase: "connecting", error: null, permissions: null, locked: false, display: null, cursor: INITIAL_CURSOR, framesDrawn: 0 };
   }
 
@@ -179,6 +191,8 @@ export class ScreenSession {
     if (this.disposed || this.closed) return;
     this.visible = visible;
     if (visible) {
+      // A taken-over tab stays as it is until 「重新接管」.
+      if (this.state.phase === "detached") return;
       if (!this.port) void this.connect();
       else if (!this.lanes && !this.reopenTimer) this.requestReopen(0);
       else if (this.opened) {
@@ -189,6 +203,7 @@ export class ScreenSession {
         if (this.state.phase === "paused") this.update({ phase: "streaming" });
       }
     } else if (this.opened) {
+      this.releaseAll();
       this.sendControl({ case: "screenSessionPause", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch } });
       this.post({ type: "clipboard-watch", on: false });
       if (this.state.phase === "streaming") this.update({ phase: "paused" });
@@ -215,20 +230,46 @@ export class ScreenSession {
     this.needKeyframe = true;
   }
 
-  /** 「重新接管」: reopen with force. */
+  /** 「重新接管」: the one way back from `detached` — reopen with force. */
   takeOver() {
     if (this.disposed || this.closed) return;
     this.forceNext = true;
+    this.update({ phase: "connecting", error: null });
     if (this.lanes && this.laneUp.control) this.sendOpen();
+    else if (!this.port) void this.connect();
     else this.requestReopen(0);
   }
 
-  /** Retry after an error or an offline device. */
+  /** Retry after an error or an offline device (never after a takeover: that is 「重新接管」's). */
   retry() {
-    if (this.disposed || this.closed) return;
+    if (this.disposed || this.closed || this.state.phase === "detached") return;
     this.update({ phase: "connecting", error: null });
     if (!this.port) void this.connect();
     else this.requestReopen(0);
+  }
+
+  /**
+   * Release on the remote everything this client pressed and has not released: every held key
+   * (modifiers last) and mouse button. Called when the picture loses focus, the window deactivates,
+   * the tab is hidden, and the session detaches or ends, so ⌘ pressed before a ⌘Tab the local OS ate
+   * never stays down over there.
+   */
+  releaseAll() {
+    if (!this.opened || !this.laneUp.control) {
+      this.heldKeys.clear();
+      this.heldButtons.clear();
+      return;
+    }
+    const keys = [...this.heldKeys].sort((left, right) => Number(isModifierCode(left)) - Number(isModifierCode(right)));
+    this.heldKeys.clear();
+    for (const code of keys) {
+      this.sendControl({ case: "screenInput", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch, event: { case: "key", value: { code, down: false, modifiers: 0, repeat: false } } } });
+    }
+    const buttons = [...this.heldButtons];
+    this.heldButtons.clear();
+    for (const button of buttons) {
+      this.sendControl({ case: "screenInput", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch, event: { case: "pointer", value: { action: ScreenPointerAction.UP, x: this.lastPointer.x, y: this.lastPointer.y, button, modifiers: 0, clickCount: 1 } } } });
+    }
   }
 
   /** Immersive mode entered or left: lets the remote display follow the new size at once. */
@@ -240,6 +281,7 @@ export class ScreenSession {
   /** The tab was closed: end the remote session (the virtual display goes away), then let go. */
   close() {
     if (this.closed) return;
+    this.releaseAll();
     this.closed = true;
     if (this.opened && this.laneUp.control) {
       this.sendControl({ case: "screenSessionClose", value: { requestId: `close-${Date.now()}`, sessionId: this.sessionId, holderEpoch: this.holderEpoch } });
@@ -319,6 +361,8 @@ export class ScreenSession {
     this.reopenTimer = window.setTimeout(() => {
       this.reopenTimer = undefined;
       if (this.disposed || this.closed || !this.visible) return;
+      // Only 「重新接管」 (takeOver, which arms forceNext) reconnects a taken-over tab.
+      if (this.state.phase === "detached" && !this.forceNext) return;
       if (!this.options.deviceOnline()) {
         this.update({ phase: "offline", error: null });
         this.requestReopen(REOPEN_MAX_MS);
@@ -362,7 +406,10 @@ export class ScreenSession {
         this.lanes = null;
         this.laneUp = { control: false, video: false };
         this.opened = false;
+        this.heldKeys.clear();
+        this.heldButtons.clear();
         this.closeDecoder();
+        if (this.state.phase === "detached") return;
         if (this.visible) {
           this.update({ phase: this.options.deviceOnline() ? "connecting" : "offline" });
           this.requestReopen(this.reopenDelay);
@@ -445,13 +492,18 @@ export class ScreenSession {
     return this.opened && this.laneUp.control && this.state.phase === "streaming" && (this.state.permissions?.accessibility ?? false);
   }
 
-  sendKey(code: string, down: boolean, modifiers: number) {
+  sendKey(code: string, down: boolean, modifiers: number, repeat = false) {
     if (!this.controllable || !code) return;
-    this.sendControl({ case: "screenInput", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch, event: { case: "key", value: { code, down, modifiers } } } });
+    if (down) this.heldKeys.add(code);
+    else this.heldKeys.delete(code);
+    this.sendControl({ case: "screenInput", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch, event: { case: "key", value: { code, down, modifiers, repeat: down && repeat } } } });
   }
 
   sendPointer(action: "move" | "down" | "up", x: number, y: number, button: number, modifiers: number, clickCount: number) {
     if (!this.controllable) return;
+    this.lastPointer = { x, y };
+    if (action === "down") this.heldButtons.add(button);
+    else if (action === "up") this.heldButtons.delete(button);
     const wire = action === "down" ? ScreenPointerAction.DOWN : action === "up" ? ScreenPointerAction.UP : ScreenPointerAction.MOVE;
     this.sendControl({ case: "screenInput", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch, event: { case: "pointer", value: { action: wire, x, y, button, modifiers, clickCount } } } });
   }
@@ -537,12 +589,17 @@ export class ScreenSession {
       }
       case "screenSessionDetached":
         if (payload.value.sessionId !== this.sessionId) return;
+        // The new holder owns the input now; what this client held is released by the helper.
+        this.heldKeys.clear();
+        this.heldButtons.clear();
         this.opened = false;
         this.closeDecoder();
         this.update({ phase: "detached", error: payload.value.reason ?? null });
         return;
       case "screenSessionEnded":
         if (payload.value.sessionId !== this.sessionId) return;
+        this.heldKeys.clear();
+        this.heldButtons.clear();
         this.opened = false;
         this.closeDecoder();
         if (this.closed) return;
@@ -613,20 +670,34 @@ export class ScreenSession {
     }
   }
 
-  private onVideoFrame(frame: { sessionId: string; frameSeq: bigint; keyframe: boolean; widthPixels: number; heightPixels: number; codec: ScreenVideoCodec; data: Uint8Array; last: boolean }) {
+  private onVideoFrame(frame: { sessionId: string; frameSeq: bigint; keyframe: boolean; widthPixels: number; heightPixels: number; codec: ScreenVideoCodec; data: Uint8Array; last: boolean; chunkIndex: number; chunkCount: number }) {
     if (frame.sessionId !== this.sessionId) return;
     // Credit is returned for every chunk received, decoded or not.
     this.returnCredit(frame.data.byteLength);
     if (frame.codec !== ScreenVideoCodec.H264 && frame.codec !== ScreenVideoCodec.UNSPECIFIED) return;
     if (this.partial && this.partial.seq !== frame.frameSeq) {
-      // A chunk went missing (dropped under backpressure): the frame is lost, ask for a keyframe.
+      // The previous frame never completed: it is lost, ask for a keyframe.
       this.partial = null;
       this.requestKeyframe();
     }
-    if (!this.partial) this.partial = { seq: frame.frameSeq, keyframe: frame.keyframe, chunks: [], bytes: 0 };
+    // A hole inside a frame (a chunk missing or out of order) is never decoded around: the frame is
+    // dropped and the stream resyncs on a keyframe. chunk_count 0 is a helper without numbering.
+    const numbered = frame.chunkCount > 0;
+    if (!this.partial) {
+      if (numbered && frame.chunkIndex !== 0) {
+        this.requestKeyframe();
+        return;
+      }
+      this.partial = { seq: frame.frameSeq, keyframe: frame.keyframe, chunks: [], bytes: 0, count: frame.chunkCount };
+    } else if (numbered && (frame.chunkIndex !== this.partial.chunks.length || frame.chunkCount !== this.partial.count)) {
+      this.partial = null;
+      this.requestKeyframe();
+      return;
+    }
     this.partial.chunks.push(frame.data);
     this.partial.bytes += frame.data.byteLength;
-    if (!frame.last) return;
+    const complete = numbered ? this.partial.chunks.length === this.partial.count : frame.last;
+    if (!complete) return;
     const whole = this.partial;
     this.partial = null;
     if (this.needKeyframe && !whole.keyframe) {
@@ -717,6 +788,10 @@ export class ScreenSession {
     this.state.framesDrawn += 1;
     if (this.state.framesDrawn === 1) this.update({ framesDrawn: 1 });
   }
+}
+
+function isModifierCode(code: string): boolean {
+  return code === "MetaLeft" || code === "MetaRight" || code === "ControlLeft" || code === "ControlRight" || code === "AltLeft" || code === "AltRight" || code === "ShiftLeft" || code === "ShiftRight" || code === "CapsLock" || code === "Fn";
 }
 
 function concat(chunks: Uint8Array[], bytes: number): Uint8Array {

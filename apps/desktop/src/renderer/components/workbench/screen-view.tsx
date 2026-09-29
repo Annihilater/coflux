@@ -137,12 +137,20 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
     if (session && immersive !== undefined) session.flushSize();
   }, [session, immersive]);
 
-  // Focus handling: what the shortcut listener and main need to know.
+  // Focus handling: what the shortcut listener and main need to know. Losing focus releases every key
+  // and button the remote still holds, so ⌘ before a ⌘Tab the local OS ate never sticks over there.
   function focusPicture(focused: boolean) {
+    if (!focused) session?.releaseAll();
     setPictureFocused(focused);
     desktop.screenFocus(focused);
     onFocusChange(tabId, focused);
   }
+  useEffect(() => {
+    if (!pictureFocused || !session) return;
+    const release = () => session.releaseAll();
+    window.addEventListener("blur", release);
+    return () => window.removeEventListener("blur", release);
+  }, [pictureFocused, session]);
   useEffect(() => () => {
     if (pictureFocused) {
       desktop.screenFocus(false);
@@ -182,8 +190,8 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
     }
     event.preventDefault();
     event.stopPropagation();
-    if (event.repeat) return;
-    session.sendKey(event.code, true, modifierBits(event));
+    // Auto-repeats go through as such: posted CGEvents do not repeat on their own.
+    session.sendKey(event.code, true, modifierBits(event), event.repeat);
   }
 
   function onKeyUp(event: ReactKeyboardEvent<HTMLDivElement>) {

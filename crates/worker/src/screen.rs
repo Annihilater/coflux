@@ -18,10 +18,16 @@
 //! Budgets. The client bounds video with byte credit (drop-at-source in the helper); the worker
 //! clamps the credit a lane may grant so that at most [`SCREEN_CHANNEL_RECORD_BUDGET`] chunks of
 //! [`SCREEN_VIDEO_CHUNK_BYTES`] can be in flight — a quarter of the transport helper's shared
-//! 256-record queue, the loopback tunnel's budget. Cursor and video frames are additionally
-//! *droppable*: when a lane's sink already holds that many records they are discarded instead of
-//! queued (the client re-requests a keyframe on a gap), so a saturated screen can never close the
-//! terminal lanes sharing the device.
+//! 256-record queue, the loopback tunnel's budget — so the credit itself bounds what a video lane
+//! queues, and a saturated screen can never close the terminal lanes sharing the device. Video
+//! chunks are never dropped here: a dropped chunk would consume credit the client never returns.
+//! Only cursor updates are *droppable*: when a lane's sink already holds the budget they are
+//! discarded instead of queued, the next one superseding the lost one.
+//!
+//! Versions. The helper the runtime ships is named by [`HELPER_ENV`] and its version by
+//! [`HELPER_VERSION_ENV`]; a helper answering the socket with another version or protocol (the one
+//! of a previous desktop build, still alive with a session) is told to retire — it stops listening
+//! at once and exits when it has no session — and the current binary is started in its place.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +39,7 @@ use std::time::Duration;
 use coflux_protocol::logln;
 use coflux_protocol::wire::{
     device_envelope, screen_helper_frame, DeviceEnvelope, ScreenHelperChannelClosed,
-    ScreenHelperFrame, ScreenHelperHello, ScreenSessionEnded,
+    ScreenHelperFrame, ScreenHelperHello, ScreenHelperRetire, ScreenSessionEnded,
 };
 use coflux_protocol::{
     write_record, RecordParser, SCREEN_CHANNEL_RECORD_BUDGET, SCREEN_HELPER_PROTOCOL_VERSION,
@@ -46,6 +52,8 @@ use tokio::sync::{mpsc, Notify};
 
 /// Absolute path of the `coflux-screen` binary, set by Coflux Desktop on the runtime it starts.
 pub const HELPER_ENV: &str = "COFLUX_SCREEN_HELPER";
+/// The version that binary reports in its hello; a helper reporting another one is stale.
+pub const HELPER_VERSION_ENV: &str = "COFLUX_SCREEN_VERSION";
 /// The helper's socket, inside the worker's `$COFLUX_HOME/ipc` directory (0700).
 pub const SOCKET_FILE: &str = "screen.sock";
 /// Worker → helper frames waiting for the socket. Input events are small and frequent; a full
@@ -60,6 +68,8 @@ const SPAWN_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
 const FIRST_HELLO_WAIT: Duration = Duration::from_secs(6);
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// After telling a stale helper to retire, how long to wait for its socket to go away.
+const RETIRE_WAIT: Duration = Duration::from_secs(5);
 /// The most video credit one lane may grant: the record budget in chunks.
 pub const MAX_VIDEO_CREDIT_BYTES: u64 =
     (SCREEN_CHANNEL_RECORD_BUDGET * SCREEN_VIDEO_CHUNK_BYTES) as u64;
@@ -105,13 +115,27 @@ pub fn is_screen_payload(payload: &device_envelope::Payload) -> bool {
 }
 
 /// Helper-originated payloads that may be dropped under backpressure without breaking the
-/// session: the client re-requests a keyframe when video goes missing, and the cursor's next
-/// update supersedes a lost one.
+/// session: only cursor updates, whose next one supersedes a lost one. Video chunks are never
+/// dropped (their credit would leak), and every other payload is state the client must see.
 pub fn is_droppable_payload(payload: &device_envelope::Payload) -> bool {
-    matches!(
-        payload,
-        device_envelope::Payload::ScreenVideoFrame(_) | device_envelope::Payload::ScreenCursor(_)
-    )
+    matches!(payload, device_envelope::Payload::ScreenCursor(_))
+}
+
+/// Why a helper connection ended.
+#[derive(Debug, PartialEq, Eq)]
+enum ServeError {
+    /// The helper is not the one this runtime ships (version or protocol): it was told to retire.
+    Stale(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stale(message) => write!(formatter, "stale helper: {message}"),
+            Self::Failed(message) => write!(formatter, "{message}"),
+        }
+    }
 }
 
 /// One channel's hold on the helper: dropped with the channel entry, which is every removal path,
@@ -146,12 +170,13 @@ impl Bridge {
     /// handshake usually already carries the capability.
     pub async fn start(
         helper: PathBuf,
+        expected_version: Option<String>,
         home: String,
         worker_version: String,
         outlet: Arc<dyn Outlet>,
     ) -> Arc<Self> {
         let (bridge, rx) = Self::new(Some(outlet));
-        tokio::spawn(bridge.clone().run(helper, home, worker_version, rx));
+        tokio::spawn(bridge.clone().run(helper, expected_version, home, worker_version, rx));
         let _ = tokio::time::timeout(FIRST_HELLO_WAIT, bridge.first_attempt.notified()).await;
         bridge
     }
@@ -285,6 +310,7 @@ impl Bridge {
     async fn run(
         self: Arc<Self>,
         helper: PathBuf,
+        expected_version: Option<String>,
         home: String,
         worker_version: String,
         mut rx: mpsc::Receiver<ScreenHelperFrame>,
@@ -293,12 +319,24 @@ impl Bridge {
         loop {
             match connect_or_start(&helper, &home).await {
                 Ok(stream) => {
-                    let outcome = self.serve(stream, &mut rx, &worker_version).await;
+                    let outcome = self
+                        .serve(stream, &mut rx, &worker_version, expected_version.as_deref())
+                        .await;
                     let was_ready = self.ready();
                     self.disconnected();
                     self.settle_first_attempt();
                     match outcome {
                         Ok(()) => logln!("[screen] helper connection closed"),
+                        Err(ServeError::Stale(message)) => {
+                            // Not a reconnect loop: the stale helper was told to retire and gives
+                            // up its socket at once; the next attempt starts the current binary.
+                            logln!("[screen] {message}; replacing it with the shipped helper");
+                            if socket_gone(&home).await {
+                                backoff = RECONNECT_MIN;
+                                continue;
+                            }
+                            logln!("[screen] the stale helper still holds its socket; retrying later");
+                        }
                         Err(error) => logln!("[screen] helper connection failed: {error}"),
                     }
                     if was_ready {
@@ -315,20 +353,22 @@ impl Bridge {
         }
     }
 
-    /// Hello, then pump both directions until either side goes away.
+    /// Hello, then pump both directions until either side goes away. A helper whose protocol or
+    /// version is not the runtime's is told to retire and the connection ends as `Stale`.
     async fn serve(
         &self,
         mut stream: UnixStream,
         rx: &mut mpsc::Receiver<ScreenHelperFrame>,
         worker_version: &str,
-    ) -> Result<(), String> {
+        expected_version: Option<&str>,
+    ) -> Result<(), ServeError> {
         let hello = ScreenHelperFrame {
             payload: Some(screen_helper_frame::Payload::Hello(ScreenHelperHello {
                 protocol_version: SCREEN_HELPER_PROTOCOL_VERSION,
                 worker_version: worker_version.to_string(),
             })),
         };
-        write_frame(&mut stream, &hello).await?;
+        write_frame(&mut stream, &hello).await.map_err(ServeError::Failed)?;
         let mut parser = RecordParser::new();
         let mut buf = vec![0u8; 64 * 1024];
         let mut inbound: Vec<ScreenHelperFrame> = Vec::new();
@@ -337,9 +377,9 @@ impl Bridge {
         loop {
             tokio::select! {
                 read = stream.read(&mut buf) => {
-                    let n = read.map_err(|error| error.to_string())?;
+                    let n = read.map_err(|error| ServeError::Failed(error.to_string()))?;
                     if n == 0 {
-                        return if greeted { Ok(()) } else { Err("closed before hello".into()) };
+                        return if greeted { Ok(()) } else { Err(ServeError::Failed("closed before hello".into())) };
                     }
                     parser
                         .push(&buf[..n], |record| {
@@ -348,18 +388,33 @@ impl Bridge {
                                 Err(error) => logln!("[screen] malformed helper frame: {error}"),
                             }
                         })
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| ServeError::Failed(error.to_string()))?;
                     for frame in inbound.drain(..) {
                         match frame.payload {
                             Some(screen_helper_frame::Payload::HelloAck(ack)) => {
-                                if ack.protocol_version != SCREEN_HELPER_PROTOCOL_VERSION || !ack.ok {
-                                    return Err(format!(
+                                let stale = if ack.protocol_version != SCREEN_HELPER_PROTOCOL_VERSION || !ack.ok {
+                                    Some(format!(
                                         "helper {} refused hello (protocol {}, ours {}): {}",
                                         ack.helper_version,
                                         ack.protocol_version,
                                         SCREEN_HELPER_PROTOCOL_VERSION,
-                                        ack.error.unwrap_or_default()
-                                    ));
+                                        ack.error.clone().unwrap_or_default()
+                                    ))
+                                } else if expected_version.is_some_and(|expected| expected != ack.helper_version) {
+                                    Some(format!(
+                                        "helper {} answered but this runtime ships {}",
+                                        ack.helper_version,
+                                        expected_version.unwrap_or_default()
+                                    ))
+                                } else {
+                                    None
+                                };
+                                if let Some(message) = stale {
+                                    let retire = ScreenHelperFrame {
+                                        payload: Some(screen_helper_frame::Payload::Retire(ScreenHelperRetire {})),
+                                    };
+                                    let _ = write_frame(&mut stream, &retire).await;
+                                    return Err(ServeError::Stale(message));
                                 }
                                 let permissions = ack.permissions.unwrap_or_default();
                                 logln!(
@@ -385,10 +440,10 @@ impl Bridge {
                     let Some(frame) = frame else {
                         return Ok(());
                     };
-                    write_frame(&mut stream, &frame).await?;
+                    write_frame(&mut stream, &frame).await.map_err(ServeError::Failed)?;
                 }
                 _ = tokio::time::sleep_until(hello_deadline), if !greeted => {
-                    return Err("hello timed out".into());
+                    return Err(ServeError::Failed("hello timed out".into()));
                 }
             }
         }
@@ -456,6 +511,28 @@ async fn connect_or_start(helper: &Path, home: &str) -> Result<UnixStream, Strin
     }
 }
 
+/// After a retire: wait until nothing answers on the socket any more (the stale helper unlinked
+/// it), up to [`RETIRE_WAIT`]. `false` when it still answers.
+async fn socket_gone(home: &str) -> bool {
+    let socket = Path::new(home)
+        .join(crate::secret::socket::SOCKET_DIR)
+        .join(SOCKET_FILE);
+    let deadline = tokio::time::Instant::now() + RETIRE_WAIT;
+    loop {
+        let answering = matches!(
+            tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(&socket)).await,
+            Ok(Ok(_))
+        );
+        if !answering {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(SPAWN_CONNECT_INTERVAL).await;
+    }
+}
+
 async fn connect_as(socket: &Path, owner_uid: u32) -> Result<UnixStream, String> {
     let stream = tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(socket))
         .await
@@ -518,7 +595,8 @@ mod tests {
         assert!(!is_screen_payload(&Payload::ScreenVideoFrame(Default::default())));
         assert!(!is_screen_payload(&Payload::ScreenSessionOpened(Default::default())));
         assert!(!is_screen_payload(&Payload::LoopbackOpen(Default::default())));
-        assert!(is_droppable_payload(&Payload::ScreenVideoFrame(Default::default())));
+        // Video is never droppable: a dropped chunk would consume credit the client never returns.
+        assert!(!is_droppable_payload(&Payload::ScreenVideoFrame(Default::default())));
         assert!(is_droppable_payload(&Payload::ScreenCursor(Default::default())));
         assert!(!is_droppable_payload(&Payload::ScreenSessionState(Default::default())));
         assert!(!is_droppable_payload(&Payload::ScreenClipboardChanged(Default::default())));
@@ -608,11 +686,13 @@ mod tests {
                 ..Default::default()
             }),
         ));
+        bridge.deliver(envelope("control", device_envelope::Payload::ScreenCursor(Default::default())));
         {
             let delivered = outlet.delivered.lock().unwrap();
-            assert_eq!(delivered.len(), 2);
+            assert_eq!(delivered.len(), 3);
             assert!(!delivered[0].2, "attached is never droppable");
-            assert!(delivered[1].2, "video is droppable");
+            assert!(!delivered[1].2, "video is never droppable");
+            assert!(delivered[2].2, "cursor is droppable");
         }
         assert!(rx.try_recv().is_err(), "a delivered frame releases nothing");
 
@@ -664,7 +744,7 @@ mod tests {
         let (bridge, mut rx) = Bridge::new(Some(outlet.clone()));
         let served = {
             let bridge = bridge.clone();
-            tokio::spawn(async move { bridge.serve(worker_side, &mut rx, "builtin").await })
+            tokio::spawn(async move { bridge.serve(worker_side, &mut rx, "builtin", Some("test")).await })
         };
         // The helper reads the hello…
         let mut parser = RecordParser::new();
@@ -721,5 +801,47 @@ mod tests {
         assert_eq!(outlet.delivered.lock().unwrap().len(), 1);
         drop(helper_side);
         assert_eq!(served.await.unwrap(), Ok(()));
+    }
+
+    /// A helper of another version is told to retire and the connection ends as stale, so the
+    /// worker replaces it instead of reconnecting to it forever.
+    #[tokio::test]
+    async fn a_helper_of_another_version_is_told_to_retire() {
+        let (worker_side, mut helper_side) = UnixStream::pair().unwrap();
+        let (bridge, mut rx) = Bridge::new(Some(Arc::new(FakeOutlet::default())));
+        let served = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.serve(worker_side, &mut rx, "builtin", Some("v2.12.0")).await })
+        };
+        let mut parser = RecordParser::new();
+        let mut buf = [0u8; 4096];
+        let mut frames = Vec::new();
+        while frames.is_empty() {
+            let n = helper_side.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            parser.push(&buf[..n], |record| frames.push(ScreenHelperFrame::decode(record).unwrap())).unwrap();
+        }
+        let ack = ScreenHelperFrame {
+            payload: Some(screen_helper_frame::Payload::HelloAck(
+                coflux_protocol::wire::ScreenHelperHelloAck {
+                    protocol_version: SCREEN_HELPER_PROTOCOL_VERSION,
+                    helper_version: "v2.11.0".into(),
+                    ok: true,
+                    error: None,
+                    permissions: None,
+                    session_active: true,
+                },
+            )),
+        };
+        helper_side.write_all(&write_record(&ack.encode_to_vec()).unwrap()).await.unwrap();
+        frames.clear();
+        while frames.is_empty() {
+            let n = helper_side.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            parser.push(&buf[..n], |record| frames.push(ScreenHelperFrame::decode(record).unwrap())).unwrap();
+        }
+        assert!(matches!(frames[0].payload, Some(screen_helper_frame::Payload::Retire(_))));
+        assert!(matches!(served.await.unwrap(), Err(ServeError::Stale(_))));
+        assert!(!bridge.ready());
     }
 }

@@ -48,9 +48,10 @@ coflux-worker: crates/worker/src/screen.rs                             per sessi
 
 - Video credit in bytes of `ScreenVideoFrame.data`, drop-at-source in the helper; the client starts
   with 2 MiB on a relayed path and 8 MiB direct, returns credit for every chunk received.
-- Chunks are at most 256 KiB; the worker clamps a lane's credit to 64 chunks (a quarter of the
-  transport helper's 256-record queue) and drops video/cursor payloads once a lane's sink holds that
-  many records, so a saturated screen cannot close the device's terminal lanes.
+- Chunks are at most 256 KiB and numbered (`chunk_index` / `chunk_count`): a gap discards the frame
+  and asks for a keyframe. The worker clamps a lane's credit to 64 chunks (a quarter of the transport
+  helper's 256-record queue), so the credit bounds what a video lane queues; video is never dropped
+  in the worker (its credit would leak) — only cursor updates are, once a lane's sink holds the budget.
 - Bitrate adapts from the credit window and drops (`BitrateController`), starting lower on relay.
 
 ## Keyboard
@@ -66,6 +67,12 @@ physical `KeyboardEvent.code` and are mapped to macOS virtual key codes on the r
   environment has no helper path before that). Headless `cofluxd` installs never offer it.
 - A session left open when the app quits keeps its virtual display and power assertions for the
   helper's 10-minute orphan grace.
+- Takeover: a user-initiated open (a new 屏幕 tab, 「打开屏幕」, 「重新接管」) takes the session over;
+  automatic reconnects (restore after restart, lane reopen, resume) never do, and a taken-over tab
+  stays detached until 「重新接管」.
+- A helper of another version or protocol answering the socket (left by a previous desktop build)
+  is told to retire (`ScreenHelperRetire`): it stops listening at once and exits when it holds no
+  session; the worker then starts the shipped binary.
 - Cursor shapes come from `NSCursor.currentSystem`; when unreadable the helper falls back to
   cursor-in-video.
 - Not measured: a Mac with no physical display at all; decode throughput at 2880×1800@60.

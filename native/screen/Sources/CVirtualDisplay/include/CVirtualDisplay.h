@@ -42,7 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface CGVirtualDisplay : NSObject
 @property(readonly, nonatomic) CGDirectDisplayID displayID;
-- (instancetype)initWithDescriptor:(CGVirtualDisplayDescriptor *)descriptor;
+- (nullable instancetype)initWithDescriptor:(CGVirtualDisplayDescriptor *)descriptor;
 - (BOOL)applySettings:(CGVirtualDisplaySettings *)settings;
 @end
 

@@ -474,6 +474,8 @@ export function WorkspaceTerminal({
   dockWidth,
   actions,
   browser,
+  screens,
+  canOpenScreen,
   newTabMenuGroupId,
 }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));

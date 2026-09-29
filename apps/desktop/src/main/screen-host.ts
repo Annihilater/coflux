@@ -20,7 +20,7 @@
  * session itself lives on the remote helper across all of it.
  */
 import { randomUUID, createHash } from "node:crypto";
-import { clipboard, ipcMain, nativeImage, MessageChannelMain, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
+import { clipboard, ClipboardItem, ipcMain, MessageChannelMain, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
 
 import { DeviceScope } from "@coflux/protocol";
 import type { DesktopScreenLane, DesktopScreenLaneKind, DesktopScreenPortMessage, DesktopScreenPortRequest } from "../shared/desktop-bridge";
@@ -67,6 +67,7 @@ export function createScreenHost(options: ScreenHostOptions) {
   const sessions = new Map<string, Session>();
   let clipboardTimer: ReturnType<typeof setInterval> | undefined;
   let clipboardHash = "";
+  let clipboardPolling = false;
   let focused = false;
 
   // `MessagePortMain.postMessage` structured-clones the message (its transfer list is for ports
@@ -133,36 +134,45 @@ export function createScreenHost(options: ScreenHostOptions) {
     }
   }
 
-  function readLocalClipboard(): { text?: string; png?: ArrayBuffer; hash: string } | null {
-    const text = clipboard.readText();
+  // Electron 44's clipboard is the async W3C-style API (readText / read / write with ClipboardItem).
+  async function readLocalClipboard(): Promise<{ text?: string; png?: ArrayBuffer; hash: string } | null> {
+    const text = await clipboard.readText();
     if (text) {
       if (Buffer.byteLength(text, "utf8") > MAX_CLIPBOARD_BYTES) return null;
       return { text, hash: createHash("sha256").update("t:").update(text).digest("hex") };
     }
-    const image = clipboard.readImage();
-    if (image.isEmpty()) return null;
-    const png = image.toPNG();
-    if (png.byteLength === 0 || png.byteLength > MAX_CLIPBOARD_BYTES) return null;
-    return { png: png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, hash: createHash("sha256").update("p:").update(png).digest("hex") };
+    for (const item of await clipboard.read()) {
+      if (!item.types.includes("image/png")) continue;
+      const blob = (await item.getType("image/png")) as Blob;
+      const png = await blob.arrayBuffer();
+      if (png.byteLength === 0 || png.byteLength > MAX_CLIPBOARD_BYTES) return null;
+      return { png, hash: createHash("sha256").update("p:").update(Buffer.from(png)).digest("hex") };
+    }
+    return null;
   }
 
-  function pollClipboard() {
+  async function pollClipboard() {
     const watchers = [...sessions.values()].filter((session) => session.watchClipboard && !session.closed);
     if (watchers.length === 0) {
       clearInterval(clipboardTimer);
       clipboardTimer = undefined;
       return;
     }
-    let current: ReturnType<typeof readLocalClipboard>;
+    if (clipboardPolling) return;
+    clipboardPolling = true;
+    let current: Awaited<ReturnType<typeof readLocalClipboard>>;
     try {
-      current = readLocalClipboard();
+      current = await readLocalClipboard();
     } catch (error) {
       options.log("clipboard read failed", error);
       return;
+    } finally {
+      clipboardPolling = false;
     }
     if (!current || current.hash === clipboardHash) return;
     clipboardHash = current.hash;
     for (const session of watchers) {
+      if (session.closed || !session.watchClipboard) continue;
       if (current.text !== undefined) post(session, { type: "clipboard", text: current.text });
       else if (current.png) post(session, { type: "clipboard", png: current.png });
     }
@@ -172,27 +182,24 @@ export function createScreenHost(options: ScreenHostOptions) {
     session.watchClipboard = on;
     if (on) {
       // Start from the current value: what is on the clipboard now was not copied for the remote.
-      try { clipboardHash = readLocalClipboard()?.hash ?? ""; } catch { clipboardHash = ""; }
-      if (!clipboardTimer) clipboardTimer = setInterval(pollClipboard, CLIPBOARD_POLL_MS);
+      void readLocalClipboard().then((current) => { clipboardHash = current?.hash ?? ""; }).catch(() => { clipboardHash = ""; });
+      if (!clipboardTimer) clipboardTimer = setInterval(() => void pollClipboard(), CLIPBOARD_POLL_MS);
     } else if (![...sessions.values()].some((item) => item.watchClipboard)) {
       clearInterval(clipboardTimer);
       clipboardTimer = undefined;
     }
   }
 
-  function applyRemoteClipboard(request: { text?: string; png?: ArrayBuffer }) {
+  async function applyRemoteClipboard(request: { text?: string; png?: ArrayBuffer }) {
     if (typeof request.text === "string") {
       if (Buffer.byteLength(request.text, "utf8") > MAX_CLIPBOARD_BYTES) return;
       clipboardHash = createHash("sha256").update("t:").update(request.text).digest("hex");
-      clipboard.writeText(request.text);
+      await clipboard.writeText(request.text);
       return;
     }
     if (request.png instanceof ArrayBuffer && request.png.byteLength > 0 && request.png.byteLength <= MAX_CLIPBOARD_BYTES) {
-      const png = Buffer.from(request.png);
-      const image = nativeImage.createFromBuffer(png);
-      if (image.isEmpty()) return;
-      clipboardHash = createHash("sha256").update("p:").update(image.toPNG()).digest("hex");
-      clipboard.writeImage(image);
+      clipboardHash = createHash("sha256").update("p:").update(Buffer.from(request.png)).digest("hex");
+      await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(request.png)], { type: "image/png" }) })]);
     }
   }
 
@@ -216,7 +223,7 @@ export function createScreenHost(options: ScreenHostOptions) {
         void openLanes(session);
         return;
       case "clipboard-set":
-        try { applyRemoteClipboard(request); } catch (error) { options.log("clipboard write failed", error); }
+        applyRemoteClipboard(request).catch((error) => options.log("clipboard write failed", error));
         return;
       case "clipboard-watch":
         setClipboardWatch(session, request.on === true);

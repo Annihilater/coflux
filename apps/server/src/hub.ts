@@ -196,8 +196,9 @@ interface DaemonInfoData {
    * to clients so a device-side feature such as the remote screen is offered only where its helper
    * answered). Required, not optional, so that every hand-written DaemonInfo literal must decide it:
    * the client replaces its copy of the device wholesale on daemonUpdated, and one emission that
-   * omitted it would make the feature vanish until the next handshake. Empty for offline rows. */
-  capabilities: readonly string[];
+   * omitted it would make the feature vanish until the next handshake. Empty for offline rows.
+   * A mutable array: the value is handed to protobuf-es as a nested MessageInit. */
+  capabilities: string[];
 }
 
 /** agent presence 条目（plan 073）：不用生成的 SessionAgentRef 消息类型（无需 $typeName）——
@@ -3329,10 +3330,10 @@ export class Hub {
         if (!d || d.accountId !== client.accountId) return void answer({ ok: false, error: "daemon 不在线或不属于本账号" });
         if (!value.path.trim()) return void answer({ ok: false, error: "工作区目录路径为空" });
         await this.withDeviceEffectGuard(value.daemonId, async (effectGuard) => {
-          const result = await this.store.transaction(async (tx) => {
+          const result = await this.store.transaction(async (tx): Promise<{ ok: false; error: string } | { ok: true; workspace: Workspace; createdWorkspace: boolean }> => {
             const device = await tx.claimActiveDevice(value.daemonId, client.accountId!);
-            if (!device) return { error: "daemon 不存在、已撤销或不属于本账号" } as const;
-            let workspace = (await tx.listWorkspacesByDaemon(value.daemonId))
+            if (!device) return { ok: false, error: "daemon 不存在、已撤销或不属于本账号" };
+            let workspace: Workspace | undefined = (await tx.listWorkspacesByDaemon(value.daemonId))
               .filter((candidate) => candidate.accountId === client.accountId && isDirWorkspace(candidate))
               .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0];
             let createdWorkspace = false;
@@ -3351,9 +3352,9 @@ export class Hub {
               await tx.createWorkspace(workspace);
               createdWorkspace = true;
             }
-            return { workspace, createdWorkspace } as const;
+            return { ok: true, workspace, createdWorkspace };
           });
-          if ("error" in result) return void answer({ ok: false, error: result.error });
+          if (!result.ok) return void answer({ ok: false, error: result.error });
           if (effectGuard.cancelled) return void answer({ ok: false, error: "设备已删除，工作区创建已取消" });
           if (result.createdWorkspace) {
             this.broadcast(result.workspace.accountId, { case: "workspaceCreated", value: { workspace: result.workspace } });

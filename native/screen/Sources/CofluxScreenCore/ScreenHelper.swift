@@ -31,6 +31,8 @@ public final class ScreenHelper: HelperServerDelegate {
     private var exitTimer: DispatchSourceTimer?
     private var permissionTimer: DispatchSourceTimer?
     private let provider: VirtualDisplayProvider
+    /// Told by the worker that this binary is stale: no longer listening, exiting once the session ends.
+    private var retiring = false
 
     public init(server: HelperServer, version: String, provider: VirtualDisplayProvider = CGVirtualDisplayProvider(), log: @escaping (String) -> Void) {
         self.server = server
@@ -86,6 +88,13 @@ public final class ScreenHelper: HelperServerDelegate {
             log("hello from worker \(hello.workerVersion): \(ack.ok ? "ok" : "refused")")
         case .channelClosed(let closed)?:
             laneClosed(closed.channelID)
+        case .retire?:
+            // A newer desktop build shipped another helper: give up the socket now so it can take
+            // the path, and exit as soon as no session is held.
+            log("retire requested by worker; this helper is stale")
+            retiring = true
+            server.stop()
+            exitIfRetired()
         case .envelope(let envelope)?:
             guard greeted else { return }
             handle(envelope)
@@ -156,7 +165,7 @@ public final class ScreenHelper: HelperServerDelegate {
             guard permissions.accessibility else { return }
             switch input.event {
             case .key(let key)?:
-                session.input.key(code: key.code, down: key.down, modifiers: key.modifiers)
+                session.input.key(code: key.code, down: key.down, modifiers: key.modifiers, repeat: key.`repeat`)
             case .pointer(let pointer)?:
                 let action: InputInjector.PointerAction
                 switch pointer.action {
@@ -219,8 +228,13 @@ public final class ScreenHelper: HelperServerDelegate {
             if let existing = self.session, existing.id == open.sessionID {
                 session = existing
                 session.controlLane = lane
-                // A preempting or reconnecting holder starts with a fresh video lane.
-                if detachedLane != nil { stopCapture(session); session.videoLane = nil }
+                // A preempting or reconnecting holder starts with a fresh video lane; whatever the
+                // previous holder still held down is released.
+                if detachedLane != nil {
+                    stopCapture(session)
+                    session.videoLane = nil
+                    session.input.releaseAll()
+                }
             } else {
                 if let existing = self.session { tearDown(existing, restore: false) }
                 session = Session(id: open.sessionID, controlLane: lane, geometry: geometry)
@@ -285,6 +299,7 @@ public final class ScreenHelper: HelperServerDelegate {
         self.session = nil
         closed.ok = true
         send(lane, .screenSessionClosed(closed))
+        exitIfRetired()
         if let videoLane, videoLane != lane {
             var ended = Coflux_V1_ScreenSessionEnded()
             ended.sessionID = close.sessionID
@@ -302,7 +317,10 @@ public final class ScreenHelper: HelperServerDelegate {
             session.videoLane = nil
             stopCapture(session)
         }
-        if session.controlLane == lane { session.controlLane = nil }
+        if session.controlLane == lane {
+            session.controlLane = nil
+            session.input.releaseAll()
+        }
         if arbiter.laneClosed(lane) {
             startGrace()
         }
@@ -329,6 +347,7 @@ public final class ScreenHelper: HelperServerDelegate {
             self.tearDown(session, restore: true)
             self.arbiter.end()
             self.session = nil
+            self.exitIfRetired()
             if self.connection == nil { self.scheduleIdleExit() }
         }
         timer.resume()
@@ -511,7 +530,8 @@ public final class ScreenHelper: HelperServerDelegate {
         }
         guard session.credit.trySend(bytes: output.data.count) else { return }
         session.frameSeq += 1
-        for chunk in AnnexB.chunks(output.data, chunkBytes: Self.videoChunkBytes) {
+        let chunks = AnnexB.chunks(output.data, chunkBytes: Self.videoChunkBytes)
+        for (index, chunk) in chunks.enumerated() {
             var frame = Coflux_V1_ScreenVideoFrame()
             frame.sessionID = session.id
             frame.frameSeq = session.frameSeq
@@ -522,6 +542,8 @@ public final class ScreenHelper: HelperServerDelegate {
             frame.codec = .h264
             frame.data = chunk.data
             frame.last = chunk.last
+            frame.chunkIndex = UInt32(index)
+            frame.chunkCount = UInt32(chunks.count)
             send(lane, .screenVideoFrame(frame))
         }
     }
@@ -645,6 +667,13 @@ public final class ScreenHelper: HelperServerDelegate {
             self.session = nil
         }
         server.stop()
+    }
+
+    /// Stale and holding nothing: leave now (the socket is already gone).
+    private func exitIfRetired() {
+        guard retiring, session == nil else { return }
+        log("retired; exiting")
+        exit(0)
     }
 
     private func scheduleIdleExit() {

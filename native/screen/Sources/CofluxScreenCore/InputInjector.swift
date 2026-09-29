@@ -7,6 +7,8 @@ import Foundation
 public final class InputInjector {
     private let source = CGEventSource(stateID: .hidSystemState)
     private var heldButtons: Set<UInt32> = []
+    /// Virtual keys the client pressed and has not released, so a lost client never leaves them down.
+    private var heldKeys: Set<UInt16> = []
 
     public init() {}
 
@@ -22,13 +24,17 @@ public final class InputInjector {
         return flags
     }
 
-    public func key(code: String, down: Bool, modifiers: UInt32) {
+    public func key(code: String, down: Bool, modifiers: UInt32, repeat isRepeat: Bool = false) {
         guard let virtualKey = KeyCodes.virtualKey(for: code),
               let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: down)
         else { return }
         if KeyCodes.isModifier(code) {
             event.type = .flagsChanged
+        } else if down && isRepeat {
+            // Posted events do not auto-repeat; the client forwards its repeats flagged as such.
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
         }
+        if down { heldKeys.insert(virtualKey) } else { heldKeys.remove(virtualKey) }
         event.flags = Self.flags(modifiers)
         event.post(tap: .cghidEventTap)
     }
@@ -93,8 +99,15 @@ public final class InputInjector {
         event.post(tap: .cghidEventTap)
     }
 
-    /// Release anything still held when the session ends, so the remote is not left dragging.
+    /// Release anything still held when the holder goes away (detached, lane lost, session ended),
+    /// so the remote is left neither dragging nor with a modifier down.
     public func releaseAll() {
+        for virtualKey in heldKeys {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else { continue }
+            event.flags = []
+            event.post(tap: .cghidEventTap)
+        }
+        heldKeys.removeAll()
         for button in heldButtons {
             pointer(.up, x: 0, y: 0, button: button, modifiers: 0, clickCount: 1)
         }

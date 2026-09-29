@@ -685,6 +685,7 @@ async fn worker_main() {
     if let Some(helper) = screen::helper_path() {
         let bridge = screen::Bridge::start(
             helper,
+            std::env::var(screen::HELPER_VERSION_ENV).ok(),
             cfg.home.clone(),
             cfg.worker_version.clone(),
             device.screen_outlet(),

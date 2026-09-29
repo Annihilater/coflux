@@ -16,14 +16,15 @@ public final class PowerAssertions {
 
     public func acquire() {
         guard displayAssertion == 0 else { return }
+        // The assertion type names spelled out: the kIOPMAssertionType* macros import unevenly.
         IOPMAssertionCreateWithName(
-            kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+            "PreventUserIdleDisplaySleep" as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
             "Coflux remote screen session" as CFString,
             &displayAssertion
         )
         IOPMAssertionCreateWithName(
-            kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+            "PreventUserIdleSystemSleep" as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
             "Coflux remote screen session" as CFString,
             &systemAssertion
