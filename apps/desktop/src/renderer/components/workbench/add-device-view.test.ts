@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { DesktopDaemonState } from "@/desktop-bridge";
 import {
   advanceBaselineTracker,
-  desktopDownloadUrl,
+  DESKTOP_DOWNLOAD_URL,
   headlessAgentPrompt,
   joinKeyMinutesLeft,
   manualInstallCommand,
@@ -15,8 +15,8 @@ import {
 
 const KEY = "cf_join_Ab3-x_Yz09";
 
-test("download URL is pinned to the running app's version", () => {
-  assert.equal(desktopDownloadUrl("2.4.0"), "https://github.com/myWsq/coflux/releases/download/v2.4.0/coflux-2.4.0-arm64.dmg");
+test("download URL is the version-less DMG alias on the R2 mirror", () => {
+  assert.equal(DESKTOP_DOWNLOAD_URL, "https://dl.coflux.dev/desktop/coflux-arm64.dmg");
 });
 
 test("manual command carries --server with the daemon URL and the join key", () => {

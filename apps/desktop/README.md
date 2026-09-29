@@ -95,6 +95,6 @@ Renderer dependencies are bundled by Vite and normally belong in `devDependencie
 
 ## Releases
 
-The unified `vX.Y.Z` workflow calls `desktop-release.yml` to build, Developer ID sign, notarize, and verify the app. Desktop and runtime artifacts are published to the same GitHub release before the stable `desktop-updates` feed advances. See [RELEASING.md](../../docs/RELEASING.md).
+The unified `vX.Y.Z` workflow calls `desktop-release.yml` to build, Developer ID sign, notarize, and verify the app. For a stable tag, desktop and runtime artifacts are uploaded to the R2 download mirror at `dl.coflux.dev` and published to the same GitHub release; only then do the update feeds advance. The app's updater reads `https://dl.coflux.dev/desktop/latest-mac.yml`, while builds from before the mirror keep reading the `desktop-updates` branch, which is still pushed. Both feeds download the zip from R2. See [RELEASING.md](../../docs/RELEASING.md#r2-download-mirror-dlcofluxdev).
 
 Read [design guidelines](../../docs/design-guidelines.md) before changing UI behavior and [architecture](../../docs/architecture.md) before changing runtime ownership.
