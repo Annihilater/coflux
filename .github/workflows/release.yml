@@ -14,6 +14,17 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  # The GitHub Release asset set, used verbatim by the `release` job. The R2 download mirror upload
+  # (`mirror-upload`) derives its set from the same globs minus the .dmg, which the mirror serves only
+  # under a version-less alias, so the two can never drift apart.
+  RELEASE_FILES: |
+    signed-release/artifacts/*
+    desktop-assets/*.dmg
+    desktop-assets/*.zip
+    desktop-assets/*.blockmap
+    desktop-assets/latest-mac.yml
+
 jobs:
   metadata:
     name: 校验 release tag
@@ -272,9 +283,100 @@ jobs:
             artifacts/
             release-notes.md
 
+  # Phase 1 of the R2 download mirror (plan 20260930-r2-download-mirror): the versioned objects of a
+  # stable tag must be on R2 before the GitHub Release exists, because the server pushes worker
+  # upgrades (whose manifest URLs point at dl.coflux.dev) as soon as it sees the Release.
+  # No job-level `if`: `release` needs this job and a skipped dependency would skip `release` too, so
+  # the job always runs and every step is a no-op for a prerelease, which is never mirrored.
+  mirror-upload:
+    name: Upload the release to the R2 download mirror
+    needs: [metadata, sign, desktop]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Prereleases are not mirrored
+        if: ${{ needs.metadata.outputs.prerelease != 'false' }}
+        run: echo "::notice::${GITHUB_REF_NAME} is a prerelease; nothing is uploaded to the R2 download mirror"
+
+      - name: R2 credentials must be complete (a missing value fails explicitly)
+        if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::release-signing environment is missing ${name}"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ]
+
+      - if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-release-assets
+          path: signed-release
+      - if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-release-assets
+          path: desktop-assets
+
+      # Overwrite gate: once the GitHub Release exists, the server and `cofluxd --version` may already
+      # consume these objects, so their bytes must never change (docs/RELEASING.md: no full re-run
+      # after publication). Only "release not found" means unpublished; any other error fails.
+      - name: Is the GitHub Release already published?
+        id: published
+        if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if output=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1); then
+            exists=true
+          elif printf '%s' "$output" | grep -q 'release not found'; then
+            exists=false
+          else
+            echo "::error::cannot tell whether GitHub Release ${RELEASE_TAG} exists: ${output}"
+            exit 1
+          fi
+          echo "::notice::GitHub Release ${RELEASE_TAG} published: ${exists}"
+          echo "exists=${exists}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload releases/<tag>/ (refused for a published tag unless every object is identical)
+        if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_EXISTS: ${{ steps.published.outputs.exists }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Unquoted on purpose: word-split RELEASE_FILES into its globs and expand them.
+          files=($RELEASE_FILES)
+          node scripts/release-mirror.mjs upload "$RELEASE_TAG" "$RELEASE_EXISTS" "${files[@]}"
+
   release:
     name: 发布 GitHub Release
-    needs: [metadata, sign, desktop]
+    needs: [metadata, sign, desktop, mirror-upload]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -323,12 +425,7 @@ jobs:
           # 不传 target_commitish：tag 已存在且上一步已校验它绑定事件 SHA；action-gh-release v3 会把它原样带进
           # create-release 请求，撞上 v* tag 的不可变 ruleset 后 GITHUB_TOKEN 拿到 403（v0.32.0 首次发版实测）。
           name: Coflux ${{ github.ref_name }}
-          files: |
-            signed-release/artifacts/*
-            desktop-assets/*.dmg
-            desktop-assets/*.zip
-            desktop-assets/*.blockmap
-            desktop-assets/latest-mac.yml
+          files: ${{ env.RELEASE_FILES }}
           # 自建 note 取代 generate_release_notes：本仓库直接 push main，GitHub 的自动汇总
           # 只认 PR，产出永远是光秃秃一行 compare 链接。
           body_path: signed-release/release-notes.md
@@ -369,3 +466,58 @@ jobs:
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -q -m "Coflux ${VERSION}: latest-mac.yml"
           git push -q origin desktop-updates
+
+  # Phase 2 of the R2 download mirror: only after the GitHub Release succeeded (its tag-drift check
+  # can still abort after the upload), and only for stable tags — the same gate as desktop-updates.
+  # It also waits for desktop-updates, so the branch feed that installed apps read has moved to this
+  # release before the previous release's zip is pruned. A failure here fails the run and therefore
+  # blocks npm-publish, which is triggered only by a successful release run.
+  mirror-pointers:
+    name: Point the R2 download mirror at this release and prune older ones
+    needs: [metadata, release, desktop-updates]
+    if: ${{ needs.metadata.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - name: R2 credentials must be complete (a missing value fails explicitly)
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::release-signing environment is missing ${name}"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-release-assets
+          path: desktop-assets
+      - name: Write the DMG alias, desktop/latest-mac.yml and releases/latest.json, then prune
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(desktop-assets/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one desktop DMG, found ${#dmgs[@]}"
+            exit 1
+          fi
+          node scripts/release-mirror.mjs point "$RELEASE_TAG" desktop-assets/latest-mac.yml "${dmgs[0]}"
