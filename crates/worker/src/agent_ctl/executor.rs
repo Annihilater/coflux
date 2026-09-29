@@ -452,7 +452,7 @@ impl ExecutorLedger {
                     std::mem::take(&mut current),
                     omitted && first,
                     None,
-                    if first { &prompt } else { "" },
+                    if first { prompt.as_str() } else { "" },
                 ));
                 current_bytes = 0;
             }
@@ -463,7 +463,7 @@ impl ExecutorLedger {
         // nothing older exists (or was dropped), and gets the prompt.
         if !current.is_empty() || effects.is_empty() {
             let first = effects.is_empty();
-            effects.push(batch(current, omitted && first, None, if first { &prompt } else { "" }));
+            effects.push(batch(current, omitted && first, None, if first { prompt.as_str() } else { "" }));
         }
         effects
     }

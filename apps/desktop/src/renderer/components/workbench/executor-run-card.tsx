@@ -228,7 +228,8 @@ function ExecutorRunCard({
   if (!retainAfterEnd({ live, expanded })) return null;
 
   const state: CardState = ended
-    ? { kind: "ended", terminal: transcript.end?.terminal ?? "unknown" }
+    // An empty terminal = the center dropped the run before (or without) the worker's end frame.
+    ? { kind: "ended", terminal: transcript.end?.terminal ?? "" }
     : run.hostLost
       ? { kind: "host-lost" }
       : run.phase === "running"
@@ -281,6 +282,8 @@ function StateGlyph({ state }: { state: CardState }) {
     case "ended":
       return state.terminal === "succeeded" ? (
         <Check className="size-3 shrink-0 text-success" aria-label={terminalLabel(state.terminal)} />
+      ) : state.terminal === "" ? (
+        <Check className="size-3 shrink-0 text-muted-foreground" aria-label={terminalLabel(state.terminal)} />
       ) : (
         <CircleAlert className="size-3 shrink-0 text-destructive" aria-label={terminalLabel(state.terminal)} />
       );
