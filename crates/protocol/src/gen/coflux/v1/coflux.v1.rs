@@ -2220,13 +2220,18 @@ pub struct ScreenHelperChannelClosed {
     #[prost(string, tag="1")]
     pub channel_id: ::prost::alloc::string::String,
 }
-/// worker→helper: this helper is not the one the runtime ships (its version or protocol differs
-/// from what the worker expects, typically after a desktop update). The helper stops listening at
-/// once — closes and unlinks its socket so the current binary can take the path — and exits as soon
-/// as it holds no session: immediately when none, otherwise when the session ends (a session whose
-/// worker is gone runs out its orphan grace, as it would anyway).
+/// worker→helper: this helper is not the one the runtime ships (typically after a desktop update).
+/// The helper stops listening at once — closes and unlinks its socket so the current binary can take
+/// the path — while the connection this arrived on stays up. Without `tear_down` (a compatible
+/// helper of another version) it keeps serving the session it holds over that connection and exits
+/// once that session ends (close or orphan grace) or at once when it holds none; the worker's normal
+/// reconnect then starts the shipped binary. With `tear_down` (a protocol the worker cannot serve
+/// through) it ends its session immediately — virtual display removed, arrangement restored, no
+/// grace — and exits. Either way two helpers never hold virtual displays at the same time.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ScreenHelperRetire {
+    #[prost(bool, tag="1")]
+    pub tear_down: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ScreenHelperFrame {
