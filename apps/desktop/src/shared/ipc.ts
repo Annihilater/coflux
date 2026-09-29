@@ -66,6 +66,8 @@ export const IPC = {
   browserTrustCertificate: "desktop:browser-trust-certificate",
   /** Why a remote workspace's loopback load failed (plan 20260924-remote-localhost-tunnel). */
   browserTunnelFailure: "desktop:browser-tunnel-failure",
+  /** Browser annotations (plan 20260929-browser-annotations): the page's annotate mode, pins and anchor. */
+  browserAnnotatorSync: "desktop:browser-annotator-sync",
   /** 主进程 → 渲染层：browser events (focus, keys, popups, favicons, history, downloads, mode). */
   browserEvent: "desktop:browser-event",
   /** 主进程 → 渲染层 */

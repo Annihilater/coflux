@@ -150,6 +150,58 @@ export type DesktopBrowserCertificate = {
 };
 
 /**
+ * Browser annotations (plan 20260929-browser-annotations). The main process instruments a page
+ * guest over CDP in an isolated world (hover highlight, hit-testing, rects, numbered pins); the
+ * renderer owns the comment card, the attachments and the side panel. Coordinates are CSS pixels
+ * of the page's viewport, which the renderer scales onto its webview.
+ */
+export type DesktopAnnotatorLocator = {
+  selector: string;
+  domPath: string;
+  tag: string;
+  text: string;
+  elementId: string;
+  classes: string[];
+};
+
+/** An annotation shown on the page: a numbered pin (a check once resolved) on its element. */
+export type DesktopAnnotatorPin = DesktopAnnotatorLocator & { id: string; number: number; resolved: boolean };
+
+/** What the page outlines and reports the rectangle of: the element just picked, or an annotation. */
+export type DesktopAnnotatorAnchor = { kind: "pick"; token: string } | { kind: "pin"; id: string; scroll: boolean } | null;
+
+/** The renderer's whole wish for one page guest; main re-applies it after every navigation. */
+export type DesktopAnnotatorState = { mode: boolean; pins: DesktopAnnotatorPin[]; anchor: DesktopAnnotatorAnchor };
+
+export type DesktopAnnotatorElement = DesktopAnnotatorLocator & {
+  attributes: Record<string, string>;
+  styles: Record<string, string>;
+  width: number;
+  height: number;
+};
+
+/** Framework source identity read from the page's development data; best effort. */
+export type DesktopAnnotatorSource = { framework: string; components: string[]; file: string; line: number; column: number };
+
+/** A rectangle in CSS pixels of the page's viewport, and that viewport's size. */
+export type DesktopAnnotatorBox = { x: number; y: number; width: number; height: number };
+export type DesktopAnnotatorViewport = { width: number; height: number };
+
+/** An element the user clicked in annotate mode. */
+export type DesktopAnnotatorPick = {
+  token: string;
+  url: string;
+  title: string;
+  rect: DesktopAnnotatorBox;
+  viewport: DesktopAnnotatorViewport;
+  element: DesktopAnnotatorElement;
+  /** Null when the page exposes none or reading it failed. */
+  source: DesktopAnnotatorSource | null;
+  /** The element's screenshot as a `data:` URL; null when capturing failed. */
+  screenshot: string | null;
+};
+
+/**
  * Main → renderer. Page guests are named by their webContents id (`<webview>.getWebContentsId()`),
  * which the renderer maps back to its tab.
  */
@@ -168,7 +220,18 @@ export type DesktopBrowserEvent =
   /** A download from any browser page landed in the Downloads folder (or did not). */
   | { kind: "download"; filename: string; state: "completed" | "cancelled" | "interrupted" }
   /** A workspace's `localhost` changed meaning (the local daemon registered after the tab was prepared). */
-  | { kind: "mode"; workspaceId: string; mode: DesktopBrowserMode };
+  | { kind: "mode"; workspaceId: string; mode: DesktopBrowserMode }
+  /** Browser annotations: an element was picked in annotate mode. */
+  | { kind: "annotator-pick"; guestId: number; pick: DesktopAnnotatorPick }
+  /** Where the anchored element is now (it follows scrolling); null when it is gone or off the page. */
+  | { kind: "annotator-anchor"; guestId: number; rect: DesktopAnnotatorBox | null; viewport: DesktopAnnotatorViewport }
+  | { kind: "annotator-pin-click"; guestId: number; annotationId: string }
+  /** Pins whose element the current page does not have (「元素未找到」). */
+  | { kind: "annotator-pins"; guestId: number; url: string; missing: string[] }
+  /** Esc inside the page in annotate mode. */
+  | { kind: "annotator-exit"; guestId: number }
+  /** Whether the page can be instrumented right now. */
+  | { kind: "annotator-status"; guestId: number; available: boolean };
 
 /** Sign-in providers the desktop may offer (plan 20260923); the server says which are enabled. */
 export type DesktopLoginProvider = "github" | "google";
@@ -311,6 +374,8 @@ export type DesktopBridge = {
    */
   browserTunnelFailure(guestId: number, url: string): Promise<DesktopBrowserTunnelFailure | null>;
   onBrowserEvent(listener: (event: DesktopBrowserEvent) => void): () => void;
+  /** Browser annotations: what the page should show and do; main instruments the guest on demand. */
+  browserAnnotatorSync(guestId: number, state: DesktopAnnotatorState): void;
 };
 
 /** 一个自定义端点的定义。**不含凭据**——它单独走 `apiKey` 字段，且只往主进程去。 */

@@ -6,6 +6,13 @@
 import type { DesktopBridge } from "../shared/desktop-bridge";
 
 export type {
+  DesktopAnnotatorBox,
+  DesktopAnnotatorElement,
+  DesktopAnnotatorPick,
+  DesktopAnnotatorPin,
+  DesktopAnnotatorSource,
+  DesktopAnnotatorState,
+  DesktopAnnotatorViewport,
   DesktopBridge,
   DesktopBrowserCertificate,
   DesktopBrowserClearTarget,
