@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   cliReleaseStatement,
+  ptydReleaseStatement,
   transportReleaseStatement,
   supervisorReleaseStatement,
   workerReleaseStatement,
@@ -36,16 +37,17 @@ function releaseFixture(withCli = false, withTransport = false) {
   // macOS 正向路径会在验签后执行真实 ad-hoc codesign；用一个可签名/可执行的本机 Mach-O
   // fixture（Linux 上同样是小型 ELF），避免测试靠跳过安全步骤获得假绿灯。
   const executable = readFileSync("/usr/bin/true");
-  const artifacts = { supervisor: executable, worker: executable, cli: executable, transport: executable };
+  // ptyd（PTY 托管进程）是每个 release 的必备件：fixture 一律带上，cofluxd 见到 manifest.ptyd 就下载验签。
+  const artifacts = { supervisor: executable, worker: executable, cli: executable, transport: executable, ptyd: executable };
   const manifest = { schemaVersion: 2, version: VERSION, worker: {}, supervisor: {} };
-  for (const component of ["supervisor", "worker", ...(withCli ? ["cli"] : []), ...(withTransport ? ["transport"] : [])]) {
+  for (const component of ["supervisor", "worker", "ptyd", ...(withCli ? ["cli"] : []), ...(withTransport ? ["transport"] : [])]) {
     manifest[component] ??= {};
     const data = artifacts[component];
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const metadata = { version: VERSION, target, sha256, size: data.byteLength };
     const releaseStatement = component === "worker"
       ? workerReleaseStatement(metadata)
-      : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
+      : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : component === "ptyd" ? ptydReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
     manifest[component][target] = {
       url: `https://example.invalid/${component}`,
       target,
@@ -70,6 +72,7 @@ async function serveRelease(fixture) {
       [`${prefix}/coflux-worker-${fixture.target}`, fixture.artifacts.worker],
       [`${prefix}/coflux-cli-${fixture.target}`, fixture.artifacts.cli],
       [`${prefix}/coflux-transport-${fixture.target}`, fixture.artifacts.transport],
+      [`${prefix}/coflux-ptyd-${fixture.target}`, fixture.artifacts.ptyd],
       [`${prefix}/coflux-transport-NOTICES-${fixture.target}.txt`, Buffer.from("test dependency notices")],
     ]);
     const body = routes.get(req.url);
@@ -135,6 +138,8 @@ test("cofluxd：两个远端二进制全部验签后才替换", async () => {
       assert.notEqual(readFileSync(installed, "utf8"), `old ${name.slice("coflux-".length)}\n`);
       assert.equal(spawnSync(installed).status, 0, `${name} 应保持可执行`);
     }
+    // ptyd 随同一次安装落盘：没有它 supervisor 会拒绝启动（组件表就是它加入安装路径的地方）。
+    assert.equal(spawnSync(join(home, "bin", "coflux-ptyd")).status, 0, "coflux-ptyd 应已安装且可执行");
     assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION);
   } finally {
     await endpoint.close();

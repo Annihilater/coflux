@@ -80,6 +80,53 @@ ${entries}
 `;
 }
 
+/**
+ * ptyd (plan 20260918-ptyd-terminal-custody) runs under its own label: the supervisor's SIGTERM
+ * leaves sessions in ptyd, so `launchctl unload/load com.coflux.daemon` touches only the supervisor,
+ * and KeepAlive brings ptyd back on its own if it crashes.
+ */
+export function ptydPlistXml({ ptydBin, home, logFile }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.coflux.ptyd</string>
+  <key>ProgramArguments</key>
+  <array><string>${xml(ptydBin)}</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COFLUX_HOME</key><string>${xml(home)}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${xml(logFile)}</string>
+  <key>StandardErrorPath</key><string>${xml(logFile)}</string>
+</dict>
+</plist>
+`;
+}
+
+/**
+ * systemd: ptyd has its own unit and the supervisor's unit Requires/After it. `systemctl restart
+ * coflux-daemon` restarts only the supervisor's cgroup; ptyd's is not part of it, so terminals are
+ * untouched. Stopping ptyd (down) also stops the supervisor (Requires).
+ */
+export function ptydSystemdUnit({ ptydBin, home }) {
+  const environment = oneLine(home) ? `Environment=COFLUX_HOME=${home}\n` : "";
+  return `[Unit]
+Description=coflux ptyd (terminal custody)
+
+[Service]
+${environment}ExecStart=${ptydBin}
+Restart=always
+RestartSec=2
+KillMode=process
+
+[Install]
+WantedBy=default.target
+`;
+}
+
 export function systemdUnit({ supervisorBin, home, executor }) {
   const variables = [["COFLUX_HOME", home]];
   if (executor) {
@@ -91,8 +138,9 @@ export function systemdUnit({ supervisorBin, home, executor }) {
     .join("\n");
   return `[Unit]
 Description=coflux daemon (supervisor)
-After=network-online.target
+After=network-online.target coflux-ptyd.service
 Wants=network-online.target
+Requires=coflux-ptyd.service
 
 [Service]
 ${environment}

@@ -55,6 +55,7 @@ export type IpcActions = {
   getDaemonState: () => DesktopDaemonState;
   daemonEnroll: () => void;
   daemonRestart: () => void;
+  daemonUpdatePtyd: () => void;
   daemonStop: () => void;
   daemonRemove: () => void;
   daemonOpenFdaGuide: () => void;
@@ -167,6 +168,7 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
   const daemonVerbs: [string, () => void][] = [
     [IPC.daemonEnroll, actions.daemonEnroll],
     [IPC.daemonRestart, actions.daemonRestart],
+    [IPC.daemonUpdatePtyd, actions.daemonUpdatePtyd],
     [IPC.daemonStop, actions.daemonStop],
     [IPC.daemonRemove, actions.daemonRemove],
     [IPC.daemonOpenFdaGuide, actions.daemonOpenFdaGuide],

@@ -1,5 +1,6 @@
 //! 桌面应用的本机生命周期通道。只在应用显式启动时启用，不依赖中心或 worker。
 //! home 的独占锁防止更新接续时启动第二个托管进程；0600 的 UDS 只接受同一系统用户。
+//! op：`status` / `stop`（结束本机全部终端）/ `leave`（替换 supervisor：终端留在 ptyd 里）。
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -109,19 +110,28 @@ impl RuntimeControl {
                     continue;
                 };
                 let stopping = request.op == "stop" && request.instance_id == self.instance_id;
+                // `leave`（plan 20260918-ptyd-terminal-custody）：替换 supervisor 用。杀 worker 后退出，
+                // shell 留在 ptyd 里。与 `stop`（结束本机全部终端）**不共用**代码路径：stop 让 ptyd 杀掉
+                // 每个 shell，leave 一个都不碰。
+                let leaving = request.op == "leave" && request.instance_id == self.instance_id;
                 let response = if request.op == "status" {
                     json!({"ok":true,"protocol":1,"instanceId":self.instance_id,
                         "runtimeId":self.runtime_id,"version":crate::SUPERVISOR_VERSION,
+                        // 本 supervisor 的 PTY 在 ptyd 里，因此支持 leave；旧 supervisor 没有这个字段。
+                        "custody":"ptyd",
                         "sessions":sessions.desktop_sessions()})
                 } else if stopping {
                     manager.shutdown();
                     sessions.shutdown();
                     json!({"ok":true})
+                } else if leaving {
+                    manager.shutdown();
+                    json!({"ok":true})
                 } else {
                     json!({"ok":false,"error":"unsupported operation or stale instance"})
                 };
                 let _ = writeln!(stream, "{response}");
-                if stopping {
+                if stopping || leaving {
                     let _ = std::fs::remove_file(&self.path);
                     let _ = std::fs::remove_file(&worker_socket);
                     std::process::exit(0);

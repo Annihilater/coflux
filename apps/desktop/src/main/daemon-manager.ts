@@ -10,9 +10,15 @@ import type { DaemonBundle } from "./daemon-bundle";
 import { buildDaemonSettings, daemonSettingsJson, parseCredentialsDaemonId, parseFdaStatus, parsePendingAuth, parseSupervisorVersion } from "./daemon-files";
 import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
-import { bundleRuntimeId, runtimeStatus, stageRuntime, startRuntime, stopRuntime, type RuntimeStatus } from "./desktop-runtime";
+import { bundlePtydId, bundleRuntimeId, leaveRuntime, ptydStatus, runtimeStatus, runtimeSupportsLeave, stageRuntime, startPtyd, startRuntime, stopPtyd, stopRuntime, type PtydStatus, type RuntimeStatus } from "./desktop-runtime";
+import { replaceSupervisor, shouldRestartSupervisor } from "./runtime-replace";
 
-export type StopReason = "quit" | "logout" | "stop" | "restart" | "migrate";
+/**
+ * 会结束本机终端的操作：退出 / 退出登录 / 停止 / 迁移旧 LaunchAgent / 更新 ptyd 本身，以及
+ * 一种例外——在跑的 supervisor 早于 ptyd（没有 leave），这一次更新仍要结束终端（"最后一次痛"）。
+ * 普通的 supervisor 更新与重启**不在**这里：终端留在 ptyd 里，不需要确认。
+ */
+export type StopReason = "quit" | "logout" | "stop" | "restart" | "migrate" | "update-ptyd";
 export type DaemonCommands = {
   exec: (file: string, args: readonly string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
   openExternal: (url: string) => void;
@@ -52,7 +58,10 @@ export type DaemonManager = {
    */
   verifyAccount: (check: () => Promise<void>) => Promise<boolean>;
   enroll: () => Promise<void>;
+  /** 重启 / 更新 supervisor：终端留在 ptyd 里，不确认；新版起不来自动回滚到上一版 */
   restart: () => Promise<void>;
+  /** 更新 ptyd 本身：会结束终端，确认后停掉两者再从内置版本起 */
+  updatePtyd: () => Promise<void>;
   stop: () => Promise<void>;
   remove: () => Promise<void>;
   stopForExit: (reason: "quit" | "logout") => Promise<boolean>;
@@ -76,20 +85,37 @@ function appFdaStatus(): DesktopDaemonFda {
   }
 }
 
-/** 桌面拥有生命周期，托管实例可跨更新存活。旧 LaunchAgent 仅用于有确认的迁移。 */
+/** 两次自动拉起 supervisor 之间的最短间隔：起不来就别每 1.5 秒撞一次。 */
+const SUPERVISOR_RESTART_BACKOFF_MS = 10_000;
+
+/**
+ * 桌面拥有生命周期，托管实例可跨更新存活。旧 LaunchAgent 仅用于有确认的迁移。
+ *
+ * plan 20260918-ptyd-terminal-custody：两个进程——ptyd（持 PTY，长生）与 supervisor（可随时换）。
+ * "运行中"与"几个终端"两个事实来自 ptyd，不只来自 supervisor：supervisor 缺席的那几秒里面板不能翻成
+ * 「已停止」去引诱用户起第二个实例。supervisor 崩了由看门狗自动拉起；更新 supervisor 不确认、不结束终端。
+ */
 export function createDaemonManager(options: DaemonManagerOptions): DaemonManager {
   const { paths, bundle, commands, log } = options;
   const desiredId = bundle ? bundleRuntimeId(bundle) : null;
+  const desiredPtydId = bundle ? bundlePtydId(bundle) : null;
   const marker = join(paths.home, "desktop-runtime");
+  const runtimeDir = (id: string) => join(paths.home, "desktop-runtimes", id);
   const listeners = new Set<(state: DesktopDaemonState) => void>();
   let runtime: RuntimeStatus | null = null;
+  let ptyd: PtydStatus | null = null;
   let busy: DesktopDaemonBusy | undefined;
   let error: DaemonFacts["error"];
   let refreshError: DaemonFacts["error"];
   let disposed = false;
   let action: Promise<void> | null = null;
+  let lastAutoRestartFailureAt: number | null = null;
   let state = derive();
 
+  function liveTerminals(): number {
+    if (ptyd) return ptyd.sessions.filter((session) => !session.exited).length;
+    return runtime?.sessions.length ?? 0;
+  }
   function derive(): DesktopDaemonState {
     const registered = existsSync(paths.credentials);
     const installed = existsSync(marker);
@@ -98,21 +124,47 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       installationExists: installed, supervisorExists: installed, workerExists: installed,
       registered, daemonId: registered ? parseCredentialsDaemonId(readText(paths.credentials)) : null,
       pendingAuth: registered ? null : parsePendingAuth(readText(paths.pendingAuth)),
-      running: runtime !== null,
+      // ptyd 活着就是"在跑"：supervisor 正在被替换 / 被看门狗拉起的窗口里终端一个都没少。
+      running: runtime !== null || ptyd !== null,
       fda: options.platform === "darwin" ? appFdaStatus() : parseFdaStatus(readText(paths.fdaStatus)),
       runningVersion: runtime?.version ?? parseSupervisorVersion(readText(paths.supervisorVersion)),
       binDir: paths.binDir,
       updateReadyOverride: !!(runtime && desiredId && runtime.runtimeId !== desiredId),
       ...(busy ? { busy } : {}), ...((error ?? refreshError) ? { error: error ?? refreshError } : {}),
     };
-    return { ...deriveDaemonState(facts), runningTerminals: runtime?.sessions.length ?? 0,
-      legacyInstallation: !installed && existsSync(paths.plist) };
+    return {
+      ...deriveDaemonState(facts),
+      runningTerminals: liveTerminals(),
+      legacyInstallation: !installed && existsSync(paths.plist),
+      // ptyd 的身份单独比：只换 supervisor 的更新不清这个标志，也不会把旧 ptyd 当成已更新。
+      ptydUpdateReady: !!(ptyd && desiredPtydId && ptyd.identity !== desiredPtydId),
+    };
   }
   function emit(): void { if (!disposed) { state = derive(); for (const listener of listeners) listener(state); } }
   async function refresh(): Promise<void> {
     try { runtime = await runtimeStatus(paths.home); refreshError = undefined; }
     catch (failure) { refreshError = { action: "start", message: failure instanceof Error ? failure.message : String(failure) }; }
+    try { ptyd = await ptydStatus(paths.home); }
+    catch (failure) { log.warn("读取本机终端托管进程状态失败", String(failure)); ptyd = null; }
     emit();
+    watchdog();
+  }
+  /** supervisor 崩了（ptyd 还在、标记还在、没有动作在跑）：从标记指向的目录把它拉起来，不停在「已停止」等人点。 */
+  function watchdog(): void {
+    if (disposed) return;
+    const facts = {
+      ptydAlive: ptyd !== null, supervisorAlive: runtime !== null, installed: existsSync(marker), busy: action !== null,
+      lastFailureAt: lastAutoRestartFailureAt, now: Date.now(), backoffMs: SUPERVISOR_RESTART_BACKOFF_MS,
+    };
+    if (!shouldRestartSupervisor(facts)) return;
+    log.info("本机运行组件不在而终端托管进程仍在，自动拉起 supervisor");
+    void run("start", async () => {
+      const id = readText(marker)?.trim();
+      if (!id || !existsSync(runtimeDir(id))) throw new Error("找不到本机运行组件目录，请重新接入");
+      try { runtime = await startRuntime(paths.home, runtimeDir(id), id, paths.logFile); }
+      catch (failure) { lastAutoRestartFailureAt = Date.now(); throw failure; }
+      lastAutoRestartFailureAt = null;
+    });
   }
   async function run(kind: DesktopDaemonBusy, body: () => Promise<void>): Promise<void> {
     if (action) return action;
@@ -124,7 +176,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       catch (failure) {
         error = { action: kind, message: failure instanceof Error ? failure.message : String(failure) };
         log.warn("本机操作失败", { action: kind, message: error.message });
-      } finally { busy = undefined; await refresh(); action = null; }
+      } finally { busy = undefined; action = null; await refresh(); }
     })();
     return action;
   }
@@ -175,12 +227,9 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       rmSync(join(paths.binDir, "cofluxd"), { force: true });
     } finally { rmSync(temporary, { force: true }); }
   }
-  async function start(): Promise<void> {
-    // 先验证真实运行实例，不因版本变化杀掉它或重写它使用的插件/CLI。
-    runtime = await runtimeStatus(paths.home);
-    if (runtime) { installCli(); return; }
+  /** 落盘配置、内容寻址目录、CLI；返回新目录。 */
+  function prepare(): string {
     if (!bundle || !desiredId) throw new Error("此安装包不完整，请重新安装 Coflux");
-    if (!await migrateLegacy()) return;
     mkdirSync(paths.home, { recursive: true, mode: 0o700 });
     chmodSync(paths.home, 0o700);
     let previous: unknown;
@@ -190,20 +239,75 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     })), { mode: 0o600 });
     const directory = stageRuntime(paths.home, bundle, desiredId);
     installCli();
-    writeFileSync(marker, `${desiredId}\n`, { mode: 0o600 });
+    return directory;
+  }
+  function writeMarker(id: string): void { writeFileSync(marker, `${id}\n`, { mode: 0o600 }); }
+  async function start(): Promise<void> {
+    // 先验证真实运行实例，不因版本变化杀掉它或重写它使用的插件/CLI。
+    runtime = await runtimeStatus(paths.home);
+    ptyd = await ptydStatus(paths.home);
+    if (runtime) { installCli(); return; }
+    if (!bundle || !desiredId || !desiredPtydId) throw new Error("此安装包不完整，请重新安装 Coflux");
+    if (!await migrateLegacy()) return;
+    const directory = prepare();
+    // ptyd 先于 supervisor：supervisor 连不上它会直接退出。ptyd 已在跑（看门狗 / 上次更新留下的）就沿用——
+    // 它的身份与内置不同时面板另给「更新终端组件」动作，绝不在这里悄悄换掉它。
+    if (!ptyd) ptyd = await startPtyd(paths.home, directory, desiredPtydId, paths.logFile);
+    writeMarker(desiredId);
     runtime = await startRuntime(paths.home, directory, desiredId, paths.logFile);
   }
+  /**
+   * 重启 / 更新 supervisor：leave → 起内置版本 → 标记指向新目录；起不来就把上一版目录再起一次、标记回退，
+   * 并把「更新未能应用」报到面板。终端全程留在 ptyd 里。在跑的 supervisor 早于 ptyd 时没有 leave，
+   * 这一次只能走有确认的停止 + 启动（发行说明里写明的那"最后一次痛"）。
+   */
+  async function restartSupervisor(): Promise<void> {
+    runtime = await runtimeStatus(paths.home);
+    ptyd = await ptydStatus(paths.home);
+    if (!runtime) { await start(); return; }
+    if (!runtimeSupportsLeave(runtime) || !ptyd) {
+      if (await stopConfirmed("restart")) await start();
+      return;
+    }
+    if (!bundle || !desiredId) throw new Error("此安装包不完整，请重新安装 Coflux");
+    const previousId = readText(marker)?.trim() || runtime.runtimeId;
+    const previousDir = runtimeDir(previousId);
+    const nextDir = prepare();
+    const current = runtime;
+    const outcome = await replaceSupervisor<RuntimeStatus>({
+      leave: () => leaveRuntime(paths.home, current),
+      startNext: () => startRuntime(paths.home, nextDir, desiredId, paths.logFile),
+      startPrevious: () => existsSync(previousDir)
+        ? startRuntime(paths.home, previousDir, previousId, paths.logFile)
+        : Promise.reject(new Error("上一版本目录已不存在")),
+      writeMarker,
+      nextId: desiredId,
+      previousId,
+    });
+    if (outcome.ok) { runtime = outcome.status; return; }
+    runtime = await runtimeStatus(paths.home);
+    if (outcome.rolledBack) throw new Error(`更新未能应用，已恢复上一版本，终端未受影响：${outcome.error.message}`);
+    throw new Error(`更新未能应用，且上一版本也未能重新启动：${outcome.error.message}（${outcome.rollbackError?.message ?? ""}）`);
+  }
+  /**
+   * 结束本机全部终端：先让 supervisor 走 stop（它让 ptyd 杀掉每个 shell），再让 ptyd 退出。
+   * supervisor 不在而 ptyd 在（替换窗口 / 崩溃）时只停 ptyd——那同样结束终端，所以同样要确认。
+   */
   async function stopConfirmed(reason: StopReason): Promise<boolean> {
     const outcome = (confirmed: boolean): boolean => {
       options.onStopOutcome?.(reason, confirmed);
       return confirmed;
     };
     runtime = await runtimeStatus(paths.home);
+    ptyd = await ptydStatus(paths.home);
     // Nothing to stop, but the caller still proceeds with the stop; report it as confirmed.
-    if (!runtime) return outcome(true);
-    if (runtime.sessions.length && !await options.confirmStop(reason, runtime.sessions.length)) return outcome(false);
-    await stopRuntime(paths.home, runtime);
+    if (!runtime && !ptyd) return outcome(true);
+    const count = liveTerminals();
+    if (count && !await options.confirmStop(reason, count)) return outcome(false);
+    if (runtime) await stopRuntime(paths.home, runtime);
     runtime = null;
+    if (ptyd) await stopPtyd(paths.home, ptyd);
+    ptyd = null;
     emit();
     return outcome(true);
   }
@@ -215,7 +319,8 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     onChange: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     verifyAccount,
     enroll: () => run("start", start),
-    restart: () => run("restart", async () => { if (await stopConfirmed("restart")) await start(); }),
+    restart: () => run("restart", restartSupervisor),
+    updatePtyd: () => run("restart", async () => { if (await stopConfirmed("update-ptyd")) await start(); }),
     stop: () => run("stop", async () => { await stopConfirmed("stop"); }),
     remove: () => run("remove", async () => { if (await stopConfirmed("stop")) rmSync(marker, { force: true }); }),
     stopForExit: async (reason) => {

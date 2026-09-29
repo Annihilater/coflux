@@ -17,6 +17,22 @@ export const CLI_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-cli-release-v1\0
 export const TRANSPORT_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-transport-release-v1\0", "utf8");
 export function transportReleaseStatement(metadata) { return artifactReleaseStatement(TRANSPORT_RELEASE_STATEMENT_DOMAIN, metadata); }
 
+/** PTY 托管进程（plan 20260918-ptyd-terminal-custody）：独立 domain，合法的其它组件签名不能移植过来。 */
+export const PTYD_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-ptyd-release-v1\0", "utf8");
+export function ptydReleaseStatement(metadata) { return artifactReleaseStatement(PTYD_RELEASE_STATEMENT_DOMAIN, metadata); }
+
+const RELEASE_COMPONENTS = ["worker", "supervisor", "cli", "transport", "ptyd"];
+
+function releaseStatementFor(component, metadata) {
+  switch (component) {
+    case "worker": return workerReleaseStatement(metadata);
+    case "cli": return cliReleaseStatement(metadata);
+    case "transport": return transportReleaseStatement(metadata);
+    case "ptyd": return ptydReleaseStatement(metadata);
+    default: return supervisorReleaseStatement(metadata);
+  }
+}
+
 const STRICT_RELEASE_VERSION = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/i;
@@ -146,7 +162,7 @@ function isRecord(value) {
  */
 export function parseReleaseManifestEntry(manifest, component, version, target) {
   assertReleaseVersion(version);
-  if (!["worker", "supervisor", "cli", "transport"].includes(component)) {
+  if (!RELEASE_COMPONENTS.includes(component)) {
     throw new Error(`未知 release component: ${JSON.stringify(component)}`);
   }
   if (!isRecord(manifest) || manifest.schemaVersion !== 2 || manifest.version !== version) {
@@ -200,9 +216,7 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
     throw new Error("worker 产物 legacy Ed25519 签名无效");
   }
   const metadata = { version, target: entry.target, sha256, size: data.byteLength };
-  const statement = component === "worker"
-    ? workerReleaseStatement(metadata)
-    : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
+  const statement = releaseStatementFor(component, metadata);
   if (!crypto.verify(null, statement, publicKey, Buffer.from(entry.releaseSignature, "hex"))) {
     throw new Error(`${component} 产物 release Ed25519 签名无效`);
   }
@@ -215,11 +229,11 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
 export function installStagedPair(staged) {
   if (
     !Array.isArray(staged) ||
-    ![2, 3, 4, 5].includes(staged.length) ||
+    staged.length < 2 || staged.length > 6 ||
     staged.some(({ source, destination }) =>
       typeof source !== "string" || !source || typeof destination !== "string" || !destination)
   ) {
-    throw new Error("daemon installation requires two to five valid staged artifacts");
+    throw new Error("daemon installation requires two to six valid staged artifacts");
   }
   const installed = [];
   const backups = [];

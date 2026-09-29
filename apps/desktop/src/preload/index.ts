@@ -143,6 +143,9 @@ const bridge: DesktopBridge = {
   daemonRestart() {
     ipcRenderer.send(IPC.daemonRestart);
   },
+  daemonUpdatePtyd() {
+    ipcRenderer.send(IPC.daemonUpdatePtyd);
+  },
   daemonStop() {
     ipcRenderer.send(IPC.daemonStop);
   },

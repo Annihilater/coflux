@@ -30,9 +30,18 @@ enum AltEvent {
     Exit,
 }
 
+/// 跟随 vte 状态机的轻量扫描器。原本只为 DECSET/DECRST 的 alt 边界而存在（只跟 ESC/CSI）；
+/// plan 20260918-ptyd-terminal-custody 把它扩展到字符串态（OSC / DCS / APC / PM / SOS）与
+/// UTF-8 续字节，因为它还要回答第二个问题：**此刻切一刀安全吗**——checkpoint 只能落在两条序列
+/// 之间。切在 OSC 133 mark 中间，重放会把尾巴（`coflux=<secret>`）当普通文本打进屏幕和历史，
+/// 暴露的正是 mark 校验用的 session secret；切在多字节字符中间，新建的 parser 会吐一个坏字。
+/// PTY 安静与否只决定 supervisor 什么时候来问，从来不是边界条件本身：shell 完全可以把一条 OSC
+/// 分两次 `write(2)`，中间隔得比合帧窗口还长。
 #[derive(Debug, Default)]
 struct DecModeScanner {
     state: ScanState,
+    /// Ground 态里尚未收齐的 UTF-8 续字节数。
+    utf8_pending: u8,
 }
 
 #[derive(Debug, Default)]
@@ -50,6 +59,12 @@ enum ScanState {
         current: u16,
         has_digit: bool,
     },
+    /// `ESC ]` … BEL / ST。vte 里 ESC 会先离开 OSC 进入 Escape，再由 `\` 收尾。
+    OscString,
+    /// `ESC P` … ST（entry/param/intermediate/passthrough/ignore 在"是否处于序列内"上无区别，合并）。
+    DcsString,
+    /// `ESC X` / `ESC ^` / `ESC _` … ST。
+    SosPmApcString,
 }
 
 /// 只保留 DECSET/DECRST 判定所需的 VTE CSI 阶段。阶段边界必须与 vte 0.15 一致：
@@ -78,12 +93,27 @@ impl DecModeScanner {
         }
     }
 
+    /// 此刻是否处在两条序列之间（且不在多字节字符中间）：checkpoint 只允许落在这里。
+    fn between_sequences(&self) -> bool {
+        matches!(self.state, ScanState::Ground) && self.utf8_pending == 0
+    }
+
     fn feed(&mut self, byte: u8) -> Option<AltEvent> {
         match &mut self.state {
             ScanState::Ground => {
                 if byte == 0x1b {
                     self.state = ScanState::Escape;
+                    self.utf8_pending = 0;
+                    return None;
                 }
+                // 只为"切一刀是否安全"跟踪 UTF-8 续字节；vte 自己的 utf8 解码不受影响。
+                self.utf8_pending = match byte {
+                    0x80..=0xbf => self.utf8_pending.saturating_sub(1),
+                    0xc2..=0xdf => 1,
+                    0xe0..=0xef => 2,
+                    0xf0..=0xf4 => 3,
+                    _ => 0,
+                };
                 None
             }
             ScanState::Escape => {
@@ -97,11 +127,39 @@ impl DecModeScanner {
                         current: 0,
                         has_digit: false,
                     },
+                    b']' => ScanState::OscString,
+                    b'P' => ScanState::DcsString,
+                    b'X' | b'^' | b'_' => ScanState::SosPmApcString,
                     0x18 | 0x1a => ScanState::Ground,
                     0x1b | 0x00..=0x17 | 0x19 | 0x1c..=0x1f => ScanState::Escape,
                     0x20..=0x2f => ScanState::EscapeIntermediate,
                     0x30..=0x7e => ScanState::Ground,
                     _ => ScanState::Escape,
+                };
+                None
+            }
+            ScanState::OscString => {
+                self.state = match byte {
+                    // BEL 直接收尾；ESC 进 Escape 等 `\`（ST）；CAN/SUB 取消。
+                    0x07 | 0x18 | 0x1a => ScanState::Ground,
+                    0x1b => ScanState::Escape,
+                    _ => ScanState::OscString,
+                };
+                None
+            }
+            ScanState::DcsString => {
+                self.state = match byte {
+                    0x18 | 0x1a => ScanState::Ground,
+                    0x1b => ScanState::Escape,
+                    _ => ScanState::DcsString,
+                };
+                None
+            }
+            ScanState::SosPmApcString => {
+                self.state = match byte {
+                    0x18 | 0x1a => ScanState::Ground,
+                    0x1b => ScanState::Escape,
+                    _ => ScanState::SosPmApcString,
                 };
                 None
             }
@@ -441,6 +499,97 @@ impl TerminalState {
         Some(delta)
     }
 
+    /// checkpoint 只能落在两条序列之间（见 [`DecModeScanner::between_sequences`]）。
+    pub fn checkpoint_eligible(&self) -> bool {
+        self.mode_scanner.between_sequences()
+    }
+
+    /// 从 checkpoint 重建：把规范 snapshot 喂给新 parser，再装回 snapshot 编码不了的那些状态。
+    /// 之后调用方按偏移把 ring 里 `[output_seq, now)` 的字节逐段 `feed` 进来。
+    pub fn restore(
+        checkpoint: &Checkpoint,
+        history_line_limit: usize,
+        mark_secret: String,
+    ) -> Self {
+        let history_row_capacity = history_line_limit.saturating_mul(HISTORY_WRAP_FACTOR);
+        let mut parser = vt100::Parser::new_with_callbacks(
+            checkpoint.rows,
+            checkpoint.cols,
+            history_row_capacity,
+            OscCapture::with_secret(mark_secret.clone()),
+        );
+        parser.process(&checkpoint.snapshot);
+        let callbacks = parser.callbacks_mut();
+        callbacks.pending_title = None;
+        callbacks.marks.clear();
+        Self {
+            parser,
+            title: checkpoint.title.clone(),
+            mark_secret,
+            command: CommandTracker {
+                state: checkpoint.command,
+                changed: false,
+            },
+            rows: checkpoint.rows,
+            cols: checkpoint.cols,
+            history_line_limit,
+            history_row_capacity,
+            output_seq: checkpoint.output_seq,
+            retransmit: VecDeque::new(),
+            retransmit_bytes: 0,
+            mode_scanner: DecModeScanner::default(),
+            normal_before_alt: checkpoint.normal_before_alt.clone(),
+        }
+    }
+
+    /// 退化重建（没有可用 blob）：屏幕从空白开始，序号从 ring 起点接上。
+    pub fn set_output_seq(&mut self, output_seq: u64) {
+        self.output_seq = output_seq;
+        self.retransmit.clear();
+        self.retransmit_bytes = 0;
+    }
+
+    /// 当前状态打成 checkpoint。snapshot 太大时按逻辑行数减半直到装进 `max_bytes`（只影响
+    /// 这份 checkpoint 的回滚深度，不影响在跑的 history）；实在装不下返回 None。
+    pub fn checkpoint(&self, max_bytes: usize) -> Option<Checkpoint> {
+        let mut line_limit = self.history_line_limit;
+        loop {
+            let snapshot = if self.parser.screen().alternate_screen() {
+                self.snapshot()
+            } else {
+                render_normal_snapshot(self.parser.screen(), line_limit, self.history_row_capacity)
+            };
+            let normal_before_alt = self
+                .normal_before_alt
+                .as_ref()
+                .filter(|_| self.parser.screen().alternate_screen())
+                .cloned();
+            let checkpoint = Checkpoint {
+                output_seq: self.output_seq,
+                rows: self.rows,
+                cols: self.cols,
+                title: self.title.clone(),
+                command: self.command.state,
+                normal_before_alt,
+                snapshot,
+            };
+            if checkpoint.encoded_len() <= max_bytes {
+                return Some(checkpoint);
+            }
+            if line_limit == 0 {
+                return None;
+            }
+            line_limit /= 2;
+        }
+    }
+
+    /// ring 里最早仍可回放的序号（1 起）：ring 覆盖最近 `PTYD_RING_CAPACITY` 个输出字节。
+    pub fn ring_floor_seq(&self) -> u64 {
+        self.output_seq
+            .saturating_sub(coflux_protocol::ptyd::PTYD_RING_CAPACITY)
+            .saturating_add(1)
+    }
+
     fn push_retransmit(&mut self, delta: Delta) {
         if delta.data.len() > RETRANSMIT_LIMIT {
             self.retransmit.clear();
@@ -561,26 +710,128 @@ impl TerminalState {
             .unwrap_or_else(|| self.output_seq.saturating_add(1))
     }
 
-    /// `last_seq` 必须位于 whole-frame 边界；否则调用方应返回原子 snapshot。
+    /// 从 `last_seq` 之后按**字节偏移**切片：seq 就是字节偏移，落在某条 delta 中间也定义良好。
+    /// 只在本地 retransmit 缓冲覆盖不到时返回 None（调用方再去 ptyd 的 ring 里取）。
+    /// 过去只在 `from_seq` 恰好是 batch 边界时才回答，重放会把流重新分帧，那样每个 client 的
+    /// resume 都会退化成整屏重绘——看起来就像本功能没生效。
     fn deltas_after(&self, last_seq: u64) -> Option<Vec<Delta>> {
-        if last_seq == self.output_seq {
-            return Some(Vec::new());
+        if last_seq >= self.output_seq {
+            return (last_seq == self.output_seq).then(Vec::new);
         }
         let expected = last_seq.checked_add(1)?;
         let start = self
             .retransmit
             .iter()
-            .position(|delta| delta.from_seq == expected)?;
+            .position(|delta| delta.from_seq <= expected && expected <= delta.to_seq)?;
         let mut next = expected;
         let mut output = Vec::new();
         for delta in self.retransmit.iter().skip(start) {
-            if delta.from_seq != next {
+            if delta.from_seq > next || delta.to_seq < next {
                 return None;
             }
-            output.push(delta.clone());
+            let skip = (next - delta.from_seq) as usize;
+            output.push(Delta {
+                from_seq: next,
+                to_seq: delta.to_seq,
+                data: delta.data[skip..].to_vec(),
+            });
             next = delta.to_seq.saturating_add(1);
         }
         (next == self.output_seq.saturating_add(1)).then_some(output)
+    }
+}
+
+/// supervisor 自己的 checkpoint 格式：对 ptyd 不透明，由 supervisor 版本化。新 supervisor 必须
+/// 能读旧 supervisor 写的 blob；读不了就只回放 ring（接受上面说的模态状态丢失），绝不中止恢复。
+/// 编码：`[u32 BE header_len][header JSON][normal_before_alt][snapshot]`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub output_seq: u64,
+    pub rows: u16,
+    pub cols: u16,
+    pub title: String,
+    pub command: CommandStateInfo,
+    /// alt screen 激活时进入 alt 前的主屏 snapshot；否则 None。
+    pub normal_before_alt: Option<Vec<u8>>,
+    /// 规范 snapshot（alt 激活时已含 `?1049h` 与 alt 网格）。
+    pub snapshot: Vec<u8>,
+}
+
+/// 只在不兼容改动时递增；新增可缺省字段不用动它。
+const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CheckpointHeader {
+    v: u32,
+    output_seq: u64,
+    rows: u16,
+    cols: u16,
+    title: String,
+    command: CommandStateInfo,
+    alt: bool,
+    normal_len: u32,
+}
+
+impl Checkpoint {
+    fn header(&self) -> CheckpointHeader {
+        CheckpointHeader {
+            v: CHECKPOINT_FORMAT_VERSION,
+            output_seq: self.output_seq,
+            rows: self.rows,
+            cols: self.cols,
+            title: self.title.clone(),
+            command: self.command,
+            alt: self.normal_before_alt.is_some(),
+            normal_len: self.normal_before_alt.as_ref().map_or(0, |normal| normal.len() as u32),
+        }
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        let header = serde_json::to_vec(&self.header()).unwrap_or_default();
+        4 + header.len()
+            + self.normal_before_alt.as_ref().map_or(0, Vec::len)
+            + self.snapshot.len()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let header = serde_json::to_vec(&self.header()).unwrap_or_default();
+        let mut out = Vec::with_capacity(self.encoded_len());
+        out.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        out.extend_from_slice(&header);
+        if let Some(normal) = &self.normal_before_alt {
+            out.extend_from_slice(normal);
+        }
+        out.extend_from_slice(&self.snapshot);
+        out
+    }
+
+    /// 解析失败（更老/更新的格式、损坏）返回 None：调用方退化为只回放 ring。
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let header_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let rest = bytes.get(4..)?;
+        let header: CheckpointHeader = serde_json::from_slice(rest.get(..header_len)?).ok()?;
+        if header.v != CHECKPOINT_FORMAT_VERSION || header.rows == 0 || header.cols == 0 {
+            return None;
+        }
+        let body = rest.get(header_len..)?;
+        let normal_len = header.normal_len as usize;
+        if !header.alt && normal_len != 0 {
+            return None;
+        }
+        let normal = body.get(..normal_len)?;
+        let snapshot = body.get(normal_len..)?;
+        Some(Self {
+            output_seq: header.output_seq,
+            rows: header.rows,
+            cols: header.cols,
+            title: header.title,
+            command: header.command,
+            normal_before_alt: header.alt.then(|| normal.to_vec()),
+            snapshot: snapshot.to_vec(),
+        })
     }
 }
 
@@ -714,6 +965,10 @@ pub struct SessionState {
     input_reservations: HashMap<String, VecDeque<PendingInput>>,
     input_failure: Option<ControlError>,
     resize_cursors: HashMap<String, ResizeCursor>,
+    /// 重建时拿不到 ptyd 的输入游标（旧 ptyd 没有 `cursors` op）：第一次见到某个 identity 就以它自报的
+    /// seq 为起点接纳，重复 / 跳号交给 ptyd 那边的游标裁决——否则回来的 client 一律被判 `input_seq_gap`，
+    /// 一个能力缺失就变成了死 ack。
+    cursorless_rebuild: bool,
 }
 
 impl SessionState {
@@ -728,6 +983,7 @@ impl SessionState {
             input_reservations: HashMap::new(),
             input_failure: None,
             resize_cursors: HashMap::new(),
+            cursorless_rebuild: false,
         }
     }
 
@@ -735,6 +991,88 @@ impl SessionState {
     pub fn with_mark_secret(mut self, secret: String) -> Self {
         self.terminal = self.terminal.with_mark_secret(secret);
         self
+    }
+
+    /// 从 checkpoint 重建的 authority：holder / epoch 不跨越 supervisor 重启（client 走 stale_transport
+    /// 重新 attach），输入游标由调用方从 ptyd 装回。
+    pub fn restore(terminal: TerminalState) -> Self {
+        Self {
+            terminal,
+            subscribers: HashMap::new(),
+            holder: None,
+            transport_bindings: HashMap::new(),
+            next_holder_epoch: 0,
+            input_cursors: HashMap::new(),
+            input_reservations: HashMap::new(),
+            input_failure: None,
+            resize_cursors: HashMap::new(),
+            cursorless_rebuild: false,
+        }
+    }
+
+    /// 装回 ptyd 记录的输入游标：它是"什么真正写进了 PTY"的记录，重启后 client 重投的 seq 据此
+    /// 判 duplicate / collision / gap。
+    pub fn restore_input_cursor(&mut self, client_instance_id: &str, seq: u64, data: Vec<u8>) {
+        self.input_cursors
+            .insert(client_instance_id.to_string(), InputCursor { seq, data });
+    }
+
+    /// 重建时没有游标可装（ptyd 不提供 `cursors`）：见 `cursorless_rebuild`。
+    pub fn set_cursorless_rebuild(&mut self) {
+        self.cursorless_rebuild = true;
+    }
+
+    /// ptyd 按它自己的游标拒绝了这条输入（gap / collision / identity 上限）：弹掉队首的 reservation、
+    /// 把错误交回给发它的 transport，session 与后续输入都不受影响（与 `fail_input` 封死 session 不同）。
+    pub fn reject_pending_input(
+        &mut self,
+        client_instance_id: &str,
+        input_seq: u64,
+    ) -> Result<InputFailureTarget, ControlError> {
+        let Some(reservations) = self.input_reservations.get_mut(client_instance_id) else {
+            return Err(ControlError {
+                code: "input_reservation_missing",
+                message: "input reservation 不存在".into(),
+            });
+        };
+        if reservations.front().is_none_or(|pending| pending.seq != input_seq) {
+            return Err(ControlError {
+                code: "input_reservation_missing",
+                message: "input reservation 顺序错误".into(),
+            });
+        }
+        let pending = reservations.pop_front().unwrap();
+        if reservations.is_empty() {
+            self.input_reservations.remove(client_instance_id);
+        }
+        Ok(InputFailureTarget {
+            channel_id: pending.channel_id,
+            request_id: pending.request_id,
+        })
+    }
+
+    pub fn checkpoint_eligible(&self) -> bool {
+        self.terminal.checkpoint_eligible()
+    }
+
+    pub fn checkpoint(&self, max_bytes: usize) -> Option<Checkpoint> {
+        self.terminal.checkpoint(max_bytes)
+    }
+
+    pub fn set_output_seq(&mut self, output_seq: u64) {
+        self.terminal.set_output_seq(output_seq);
+    }
+
+    /// 只在本地重发缓冲之外、ring 之内需要回放时调用 `ring`（参数：起始 seq、结束 seq，含）。
+    pub fn attach_with_ring(
+        &mut self,
+        channel_id: &str,
+        client_instance_id: &str,
+        transport_generation: u64,
+        resume_from_seq: Option<u64>,
+        ring: &mut dyn FnMut(u64, u64) -> Option<Vec<u8>>,
+    ) -> Result<AttachOutcome, AttachError> {
+        self.attach_inner(channel_id, client_instance_id, transport_generation, resume_from_seq, Some(ring))
     }
 
     pub fn command_state(&self) -> CommandStateInfo {
@@ -767,12 +1105,25 @@ impl SessionState {
         pending
     }
 
+    /// 单测便利：没有 ring 的 attach（生产只走 [`SessionState::attach_with_ring`]，本地重发缓冲之外由 ptyd 的 ring 补）。
+    #[cfg(test)]
     pub fn attach(
         &mut self,
         channel_id: &str,
         client_instance_id: &str,
         transport_generation: u64,
         resume_from_seq: Option<u64>,
+    ) -> Result<AttachOutcome, AttachError> {
+        self.attach_inner(channel_id, client_instance_id, transport_generation, resume_from_seq, None)
+    }
+
+    fn attach_inner(
+        &mut self,
+        channel_id: &str,
+        client_instance_id: &str,
+        transport_generation: u64,
+        resume_from_seq: Option<u64>,
+        mut ring: Option<&mut dyn FnMut(u64, u64) -> Option<Vec<u8>>>,
     ) -> Result<AttachOutcome, AttachError> {
         self.validate_attach(channel_id, client_instance_id, transport_generation)?;
         let mut detached = None;
@@ -809,9 +1160,22 @@ impl SessionState {
             },
         );
 
-        let (snapshot_seq, ansi_snapshot, replay) = match resume_from_seq
-            .and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas)))
-        {
+        let local = resume_from_seq
+            .and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas)));
+        // 本地缓冲够不到、但 ring 仍覆盖：从 ptyd 取 `[seq+1, output_seq]` 一整段当作一条 delta。
+        let from_ring = match (&local, resume_from_seq, ring.as_mut()) {
+            (None, Some(seq), Some(ring))
+                if seq < self.terminal.output_seq() && seq.saturating_add(1) >= self.terminal.ring_floor_seq() =>
+            {
+                let from = seq.saturating_add(1);
+                let to = self.terminal.output_seq();
+                ring(from, to)
+                    .filter(|data| data.len() as u64 == to - from + 1)
+                    .map(|data| (seq, vec![Delta { from_seq: from, to_seq: to, data }]))
+            }
+            _ => None,
+        };
+        let (snapshot_seq, ansi_snapshot, replay) = match local.or(from_ring) {
             Some((seq, replay)) => (seq, None, replay),
             None => (
                 self.terminal.output_seq(),
@@ -897,7 +1261,11 @@ impl SessionState {
     }
 
     pub fn pending_gaps(&self) -> Vec<PendingGap> {
-        let available_seq = self.terminal.earliest_retransmit_seq();
+        // gap 里报 ring 起点而不是 512 KB 重发缓冲的上限：resume 能深到 ring 有多深。
+        let available_seq = self
+            .terminal
+            .earliest_retransmit_seq()
+            .min(self.terminal.ring_floor_seq());
         self.subscribers
             .iter()
             .filter(|(_, subscriber)| subscriber.gapped && !subscriber.gap_notified)
@@ -979,6 +1347,22 @@ impl SessionState {
             .clone();
         if let Some(failure) = &self.input_failure {
             return Err(failure.clone());
+        }
+        if self.cursorless_rebuild
+            && !self.input_cursors.contains_key(&client_instance_id)
+            && !self
+                .input_reservations
+                .get(&client_instance_id)
+                .is_some_and(|reservations| !reservations.is_empty())
+        {
+            // 没有游标可对照：以 client 自报的 seq 为起点接纳；它是否重复 / 跳号由 ptyd 的游标在写入时裁决。
+            self.input_cursors.insert(
+                client_instance_id.clone(),
+                InputCursor {
+                    seq: input_seq.saturating_sub(1),
+                    data: Vec::new(),
+                },
+            );
         }
 
         let applied_through_seq = self
@@ -2055,14 +2439,177 @@ mod tests {
             (4, 5)
         );
 
-        let fallback = state.attach("channel-2", "client-1", 2, Some(4)).unwrap();
+        // seq 就是字节偏移：落在一条 delta 中间也能从那个字节起切片，不再退化成整屏 snapshot。
+        let sliced = state.attach("channel-2", "client-1", 2, Some(4)).unwrap();
+        assert_eq!(sliced.snapshot_seq, 4);
+        assert_eq!(sliced.ansi_snapshot, None);
+        assert_eq!(sliced.replay.len(), 1);
+        assert_eq!(
+            (sliced.replay[0].from_seq, sliced.replay[0].to_seq, sliced.replay[0].data.as_slice()),
+            (5, 5, &b"e"[..])
+        );
+        assert_eq!(
+            sliced.holder_epoch, resumed.holder_epoch,
+            "transport migration must not self-handoff"
+        );
+
+        // 超前于当前输出的 resume 无法回放：退回原子 snapshot。
+        let fallback = state.attach("channel-3", "client-1", 3, Some(9)).unwrap();
         assert_eq!(fallback.snapshot_seq, 5);
         assert!(fallback.ansi_snapshot.is_some());
         assert!(fallback.replay.is_empty());
-        assert_eq!(
-            fallback.holder_epoch, resumed.holder_epoch,
-            "transport migration must not self-handoff"
-        );
+    }
+
+    #[test]
+    fn deltas_after_slices_inside_a_retained_delta_and_reads_the_ring_below_it() {
+        let mut state = TerminalState::new(3, 12, 4);
+        state.feed(b"abcdef");
+        state.feed(b"ghi");
+        let sliced = state.deltas_after(2).expect("偏移 2 之后仍在重发缓冲里");
+        assert_eq!(sliced.len(), 2);
+        assert_eq!((sliced[0].from_seq, sliced[0].to_seq, sliced[0].data.as_slice()), (3, 6, &b"cdef"[..]));
+        assert_eq!((sliced[1].from_seq, sliced[1].to_seq, sliced[1].data.as_slice()), (7, 9, &b"ghi"[..]));
+        assert_eq!(state.deltas_after(9), Some(Vec::new()));
+        assert_eq!(state.deltas_after(10), None);
+
+        // 重发缓冲之外、ring 之内：attach 经 ring 回调取整段。
+        let mut session = SessionState::new(3, 12, 4);
+        session.feed(b"abcdef");
+        session.terminal.retransmit.clear();
+        session.terminal.retransmit_bytes = 0;
+        let mut asked = Vec::new();
+        let outcome = session
+            .attach_with_ring("channel-1", "client-1", 1, Some(2), &mut |from, to| {
+                asked.push((from, to));
+                Some(b"cdef".to_vec())
+            })
+            .unwrap();
+        assert_eq!(asked, vec![(3, 6)]);
+        assert_eq!(outcome.snapshot_seq, 2);
+        assert_eq!(outcome.ansi_snapshot, None);
+        assert_eq!(outcome.replay.len(), 1);
+        assert_eq!((outcome.replay[0].from_seq, outcome.replay[0].to_seq, outcome.replay[0].data.as_slice()), (3, 6, &b"cdef"[..]));
+        // ring 给的长度对不上就不冒充连续流。
+        let short = session
+            .attach_with_ring("channel-2", "client-1", 2, Some(2), &mut |_, _| Some(b"cd".to_vec()))
+            .unwrap();
+        assert!(short.ansi_snapshot.is_some());
+        assert!(short.replay.is_empty());
+    }
+
+    /// 把一条带 OSC 133 mark 的流在**每一个**字节位置切开：mark 内部任何位置都不许 checkpoint，
+    /// 终止符之后才许。切在里面重放会把 `coflux=<secret>` 当文本打进屏幕与历史。
+    #[test]
+    fn checkpoint_eligibility_is_false_inside_an_osc_133_mark_and_true_after_its_terminator() {
+        for terminator in [&b"\x07"[..], &b"\x1b\\"[..]] {
+            let mut stream = b"prompt$ \x1b]133;A;coflux=deadbeef".to_vec();
+            stream.extend_from_slice(terminator);
+            stream.extend_from_slice(b"ls\r\n");
+            let osc_start = stream.iter().position(|byte| *byte == 0x1b).unwrap();
+            let osc_end = osc_start + b"\x1b]133;A;coflux=deadbeef".len() + terminator.len();
+            for cut in 0..=stream.len() {
+                let mut scanner = DecModeScanner::default();
+                for byte in &stream[..cut] {
+                    scanner.feed(*byte);
+                }
+                let inside = cut > osc_start && cut < osc_end;
+                assert_eq!(
+                    scanner.between_sequences(),
+                    !inside,
+                    "cut={cut} terminator={terminator:?}：OSC 内部（{osc_start}<cut<{osc_end}）不许切，其余位置都许"
+                );
+            }
+            // TerminalState 暴露的谓词与 scanner 一致：整条喂完就是安全点。
+            let mut state = TerminalState::new(4, 40, 8).with_mark_secret("deadbeef".into());
+            state.feed(&stream[..osc_end - 1]);
+            assert!(!state.checkpoint_eligible());
+            state.feed(&stream[osc_end - 1..]);
+            assert!(state.checkpoint_eligible());
+        }
+    }
+
+    #[test]
+    fn checkpoint_eligibility_covers_csi_dcs_apc_and_utf8_continuations() {
+        let cases: &[&[u8]] = &[
+            b"\x1b[?1049h",
+            b"\x1b[38;2;1;2;3m",
+            b"\x1bPq#0;2;0;0;0#0~~\x1b\\",
+            b"\x1b_Gf=100;\x1b\\",
+            b"\x1b^pm\x1b\\",
+            b"\x1bXsos\x1b\\",
+            "真".as_bytes(),
+            "\u{301}".as_bytes(),
+        ];
+        for sequence in cases {
+            let mut scanner = DecModeScanner::default();
+            for (index, byte) in sequence.iter().enumerate() {
+                scanner.feed(*byte);
+                let last = index + 1 == sequence.len();
+                assert_eq!(
+                    scanner.between_sequences(),
+                    last,
+                    "{sequence:?} 第 {index} 字节之后：只有整条结束才是安全点"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_round_trips_screen_title_command_state_and_sequence() {
+        let bytes = concat!(
+            "plain\r\n",
+            "\x1b]0;my title\x07",
+            "\x1b]133;A;coflux=s3cret\x07$ ",
+            "\x1b[38;2;12;34;56m真e\u{301}\x1b[48;5;201m彩色\x1b[0m\r\n",
+            "third line\x1b[3DXYZ",
+            "\x1b[?2004h\x1b[?1h\x1b[?25l"
+        )
+        .as_bytes();
+        let mut state = TerminalState::new(5, 24, 16).with_mark_secret("s3cret".into());
+        state.feed(bytes);
+        assert!(state.checkpoint_eligible());
+        let checkpoint = state.checkpoint(usize::MAX).unwrap();
+        assert_eq!(checkpoint.output_seq, bytes.len() as u64);
+        let encoded = checkpoint.encode();
+        assert_eq!(encoded.len(), checkpoint.encoded_len());
+        let decoded = Checkpoint::decode(&encoded).unwrap();
+        assert_eq!(decoded, checkpoint);
+
+        let mut restored = TerminalState::restore(&decoded, 16, "s3cret".into());
+        assert_screen_equivalent(restored.parser.screen(), state.parser.screen());
+        assert_eq!(restored.title(), "my title");
+        assert_eq!(restored.command_state(), state.command_state());
+        assert_eq!(restored.output_seq(), state.output_seq());
+        assert!(restored.take_command_change().is_none());
+        // 之后的字节在两边产生相同的屏幕与相同的序号。
+        let tail = b"\r\nafter restore\x1b]133;C;coflux=s3cret\x07";
+        let left = state.feed(tail).unwrap();
+        let right = restored.feed(tail).unwrap();
+        assert_eq!((left.from_seq, left.to_seq), (right.from_seq, right.to_seq));
+        assert_screen_equivalent(restored.parser.screen(), state.parser.screen());
+        assert!(restored.command_state().busy);
+
+        // alt screen 激活时 normal_before_alt 随 checkpoint 走，退出 alt 后主屏照旧接回。
+        let mut alt = TerminalState::new(4, 12, 8);
+        alt.feed(b"main line\r\n\x1b[?1049h\x1b[Halt!");
+        let alt_checkpoint = alt.checkpoint(usize::MAX).unwrap();
+        assert!(alt_checkpoint.normal_before_alt.is_some());
+        let mut alt_restored = TerminalState::restore(&Checkpoint::decode(&alt_checkpoint.encode()).unwrap(), 8, String::new());
+        assert!(alt_restored.parser.screen().alternate_screen());
+        alt.feed(b"\x1b[?1049l");
+        alt_restored.feed(b"\x1b[?1049l");
+        assert_screen_equivalent(alt_restored.parser.screen(), alt.parser.screen());
+        assert!(alt_restored.parser.screen().contents().contains("main line"));
+
+        // 不认识的格式版本退化为 None，调用方只回放 ring。
+        assert!(Checkpoint::decode(b"\x00\x00\x00\x02{}").is_none());
+        let tampered = encoded.clone();
+        let header_len = u32::from_be_bytes(tampered[..4].try_into().unwrap()) as usize;
+        let header = String::from_utf8_lossy(&tampered[4..4 + header_len]).replace("\"v\":1", "\"v\":99");
+        let mut future = (header.len() as u32).to_be_bytes().to_vec();
+        future.extend_from_slice(header.as_bytes());
+        future.extend_from_slice(&tampered[4 + header_len..]);
+        assert!(Checkpoint::decode(&future).is_none());
     }
 
     #[test]
@@ -2485,5 +3032,50 @@ mod tests {
         let pending = state.feed(b"streamed");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].channel_id, "channel-a");
+    }
+
+    /// 旧 ptyd 没有 `cursors`：重建出的 authority 拿不到"什么真正写进了 PTY"的记录。回来的 client 从它
+    /// 上次的 seq 继续（比如 5）必须被接纳，而不是判 `input_seq_gap`——那会把一个能力缺失变成死 ack。
+    #[test]
+    fn cursorless_rebuild_accepts_a_returning_client_at_its_own_sequence_and_ptyd_rejections_are_not_fatal() {
+        let mut state = SessionState::restore(TerminalState::new(3, 12, 4));
+        state.set_cursorless_rebuild();
+        let epoch = state.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        // 上一个 supervisor 已经 ack 过 1..4，client 继续投 5。
+        let admitted = state
+            .admit_input("channel-a", "request-5", epoch, 5, b"five".to_vec())
+            .expect("拿不到游标时以 client 自报的 seq 为起点");
+        assert_eq!(admitted, InputAdmission::Enqueue { client_instance_id: "client-a".into() });
+        assert_eq!(state.input_applied_through("channel-a", epoch).unwrap(), 4);
+        // 起点一旦确立，之后照常连续：6 可以，8 是 gap。
+        state.complete_input("client-a", 5).unwrap();
+        assert!(matches!(
+            state.admit_input("channel-a", "request-6", epoch, 6, b"six".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        assert_eq!(
+            state.admit_input("channel-a", "request-8", epoch, 8, b"eight".to_vec()).unwrap_err().code,
+            "input_seq_gap"
+        );
+        // ptyd 按它的游标拒绝了 6：弹掉 reservation、把目标交回，session 没有封死，7 之后照常。
+        let target = state.reject_pending_input("client-a", 6).unwrap();
+        assert_eq!((target.channel_id.as_str(), target.request_id.as_str()), ("channel-a", "request-6"));
+        assert!(matches!(
+            state.admit_input("channel-a", "request-6-again", epoch, 6, b"six".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        assert!(state.reject_pending_input("client-a", 9).is_err(), "只能弹队首那一条");
+
+        // 有游标的正常重建不受影响：跳号仍是 gap。
+        let mut strict = SessionState::restore(TerminalState::new(3, 12, 4));
+        strict.restore_input_cursor("client-a", 4, b"four".to_vec());
+        let epoch = strict.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        assert!(matches!(
+            strict.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap(),
+            InputAdmission::Enqueue { .. }
+        ));
+        let mut fresh = SessionState::restore(TerminalState::new(3, 12, 4));
+        let epoch = fresh.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
+        assert_eq!(fresh.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap_err().code, "input_seq_gap");
     }
 }

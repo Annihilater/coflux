@@ -1,22 +1,32 @@
 # Automatic daemon hot-upgrade design (Option A)
 
-> Status: implemented. The daemon consists of two Rust binaries, `coflux-supervisor` and `coflux-worker`, with no Node runtime. Worker upgrades support automatic downloads, dual ed25519 signature verification, persistent rollback prevention, observation-period switching, and crash rollback while preserving PTY/agent sessions. The supervisor itself is still upgraded manually through `cofluxd update`; cofluxd verifies both components against the same release trust root before installation and persistently rejects remote downgrades.
+> Status: implemented. The daemon consists of three Rust processes, `coflux-ptyd`, `coflux-supervisor` and `coflux-worker`, with no Node runtime. Worker upgrades support automatic downloads, dual ed25519 signature verification, persistent rollback prevention, observation-period switching, and crash rollback while preserving PTY/agent sessions. The supervisor is upgraded through `cofluxd update` + `cofluxd restart` (or the desktop's update action) as an ordinary stop/start: PTYs live in `coflux-ptyd`, so terminals keep running with their screens and scrollback intact across the replacement. cofluxd verifies every component against the same release trust root before installation and persistently rejects remote downgrades. Only a change to ptyd itself still ends terminals, through its own confirmed action.
 
 ## Client updates and runtime-component updates
 
 Updating the desktop app restarts only its interface and account client. It reconnects to the existing `runtime.sock` without restarting the process that owns terminals. The CLI can be replaced atomically on its own. The runtime's worker and plugins live in stable version directories and do not disappear when the `.app` is replaced. When runtime artifacts change, the app offers deferred installation. Only an explicit user choice to restart local terminals ends live tasks and replaces runtime components. Linux CLI `update` likewise only prepares binaries; explicit `restart` interrupts terminals.
 
-This is not live-process recovery: if the PTY-owning component or operating system actually restarts, program memory is not guaranteed to survive.
+This is not live-process recovery: if `coflux-ptyd` (the PTY-owning process) or the operating system actually restarts, program memory is not guaranteed to survive. A supervisor restart is not that event any more.
 
-## 1. Why split into two processes?
+## 1. Why split into three processes?
 
-A PTY is a resource of the process that owns it. Putting networking, protocol handling, and PTYs in one frequently upgraded process would kill running shells/agents whenever its code is replaced. Option A separates stable session authority from the frequently changing transport adapter:
+A PTY is a resource of the process that owns it. Putting networking, protocol handling, and PTYs in one frequently upgraded process would kill running shells/agents whenever its code is replaced. The split keeps three change rates apart: PTY custody (near zero), session authority (every release), transport (hot-swapped):
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ coflux-supervisor (rarely upgraded)                         │
-│ · portable-pty + sessiond: PTY, VT/history, holder/sequence   │
-│ · UDS server                                               │
+│ coflux-ptyd (long-lived; lifetime independent of the rest)  │
+│ · openpty + fork/exec of a fully resolved spec, TIOCSWINSZ, │
+│   waitpid; bare write(2) input                              │
+│ · per-session 4 MiB output ring indexed by byte offset,     │
+│   never overwriting past the last checkpoint (stops reading)│
+│ · input cursors, resize log, opaque checkpoint blob, status │
+│ · v1 UDS protocol with a capability handshake               │
+└──────────────────────▲─────────────────────────────────────┘
+                       │ local UDS (ptyd protocol)
+┌──────────────────────┴─────────────────────────────────────┐
+│ coflux-supervisor (replaceable at will; crash-recoverable)  │
+│ · sessiond: VT/history, holder/sequence, checkpoints        │
+│ · UDS server for the worker                                │
 │ · worker spawning/monitoring, versions, observation/rollback│
 │ · downloads, dual signatures, SemVer rollback prevention    │
 └──────────────────────▲─────────────────────────────────────┘
@@ -31,7 +41,9 @@ A PTY is a resource of the process that owns it. Putting networking, protocol ha
                     Central server
 ```
 
-When the worker crashes, upgrades, or disconnects from the center, the supervisor continues reading PTYs, advancing VT/history, and retaining sessiond's logical holder/sequence. The replacement worker rebuilds local/native channel transports. A transport never has authority to pause all PTYs.
+When the worker crashes, upgrades, or disconnects from the center, the supervisor continues consuming PTY output from ptyd, advancing VT/history, and retaining sessiond's logical holder/sequence. The replacement worker rebuilds local/native channel transports. A transport never has authority to pause all PTYs.
+
+When the supervisor is replaced or crashes, ptyd keeps reading each PTY into its ring (and stops reading rather than overwriting anything at or past the last checkpoint offset, so the shell pauses on the kernel buffer instead of losing output). The next supervisor enumerates ptyd's sessions, feeds each checkpoint blob, replays the ring from the checkpoint offset with the resize log applied at the recorded offsets, restores the input cursors, and only then starts the worker. `output_seq` is the ring's byte offset, so the rebuilt supervisor reproduces byte-identical sequence numbers and every client's `resume_from_seq` stays meaningful. Recovery is per session; a session whose blob or ring is unusable degrades alone. The worker restarts with the supervisor, so the device is briefly offline at the center. The ptyd protocol is a long-term compatibility contract: the hello advertises the ops the running ptyd implements, a supervisor treats a missing op as an unavailable capability, and v1 ops are never removed or changed, so a supervisor upgrade never requires a matching ptyd (and rolling back the supervisor works too). ptyd is started only by whoever owns the runtime lifecycle (the desktop app as a sibling of the supervisor, or the service that `cofluxd` generates); the supervisor never starts it and refuses to run without it, naming `cofluxd update` as the fix.
 
 ## 2. UDS and two-level reconciliation
 
@@ -65,7 +77,8 @@ Server pushes also have a per-daemon/version backoff cap to prevent repeated swi
 - `worker.release-floor` uses strict SemVer precedence. Equal precedence, including differences only in build metadata, is rejected as replay. It constrains remote release requests only; the supervisor can still roll back internally to the previous active version, and local administrators remain responsible for switching known local versions.
 - SHA-256 verifies manifest/transport integrity; dual signatures authenticate artifacts and release metadata. Every check must pass.
 - Download failure, hash/signature mismatch, persistence failure, or a candidate crash must not damage the current worker or PTYs.
-- Supervisor upgrades are not hot swaps because the supervisor owns session authority. They require explicit maintenance through `cofluxd update` and a restart; live sessions are not guaranteed to survive that restart. cofluxd first verifies component-separated statements for both binaries, then replaces them from one staging generation. The greater of `cofluxd.release-floor` and `worker.release-floor` prevents a download source from replaying an older valid release.
+- Supervisor upgrades are an ordinary stop/start: the supervisor owns session authority but not the PTYs, and it rebuilds that authority from ptyd on start. They still go through explicit maintenance (`cofluxd update` then `cofluxd restart`, or the desktop's update action, which needs no confirmation and rolls back to the previous directory when the new supervisor fails to start). cofluxd verifies component-separated statements for every binary (worker, supervisor, cli, transport, ptyd), then replaces them from one staging generation. The greater of `cofluxd.release-floor` and `worker.release-floor` prevents a download source from replaying an older valid release. A change to ptyd itself is the one update that ends terminals; it is a separate, confirmed action (`cofluxd restart --ptyd`, the desktop's "update terminal component").
+- ptyd's `terminal-data` files are the one place raw terminal output is persisted (everything that ever appeared in a terminal, while its session lives): the directory and files are `0600`, each file is unlinked when its session ends, stale files are swept at ptyd startup, the total is bounded by the live-session limit times the ring size, and the directory is excluded from backups. Weakening any of these is a product decision, not a cleanup.
 
 ## 5. Relationship to the local-first data plane
 

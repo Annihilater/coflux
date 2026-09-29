@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 
 import {
   cliReleaseStatement,
+  ptydReleaseStatement,
   transportReleaseStatement,
   supervisorReleaseStatement,
   workerReleaseStatement,
@@ -35,6 +36,7 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     writeFileSync(join(dir, supervisorName), supervisorArtifact);
     writeFileSync(join(dir, `coflux-cli-${target}`), workerArtifact);
     writeFileSync(join(dir, `coflux-transport-${target}`), workerArtifact);
+    writeFileSync(join(dir, `coflux-ptyd-${target}`), workerArtifact);
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const pem = privateKey.export({ format: "pem", type: "pkcs8" });
 
@@ -57,6 +59,13 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
     verifyReleaseArtifact({component:"transport",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey});
     assert.equal(crypto.verify(null, transportReleaseStatement({version:manifest.version,...helperEntry}),publicKey,Buffer.from(helperEntry.releaseSignature,"hex")),true);
     assert.throws(() => verifyReleaseArtifact({component:"cli",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey}));
+    // ptyd（PTY 托管进程）：自己的 domain，同样的字节配 worker/transport 的 statement 都验不过。
+    const ptydEntry = parseReleaseManifestEntry(manifest, "ptyd", manifest.version, target);
+    verifyReleaseArtifact({component:"ptyd",version:manifest.version,entry:ptydEntry,data:workerArtifact,publicKey});
+    assert.equal(crypto.verify(null, ptydReleaseStatement({version:manifest.version,...ptydEntry}),publicKey,Buffer.from(ptydEntry.releaseSignature,"hex")),true);
+    assert.throws(() => verifyReleaseArtifact({component:"transport",version:manifest.version,entry:ptydEntry,data:workerArtifact,publicKey}));
+    assert.throws(() => verifyReleaseArtifact({component:"ptyd",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey}));
+    assert.equal(readFileSync(join(dir, `coflux-ptyd-${target}.release.sig`), "utf8"), ptydEntry.releaseSignature);
     const entry = manifest.worker[target];
     const supervisorEntry = manifest.supervisor[target];
     assert.equal(manifest.schemaVersion, 2);
@@ -318,10 +327,19 @@ test("staged pair 第二项替换失败时恢复第一项旧版本", () => {
 });
 
 
+test("release-sign refuses an entire missing ptyd component", () => {
+  const dir = mkdtempSync(join(tmpdir(), "coflux-release-no-ptyd-"));
+  try {
+    for (const component of ["worker", "supervisor", "cli", "transport"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    const { privateKey } = crypto.generateKeyPairSync("ed25519");
+    assert.throws(() => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.0.0"], {env: {...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({format:"pem",type:"pkcs8"})},stdio:"pipe"}),error => error.status === 1 && /mandatory ptyd/.test(error.stderr.toString()));
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
 test("release-sign refuses an entire missing transport component", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-no-helper-"));
   try {
-    for (const component of ["worker", "supervisor", "cli"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    for (const component of ["worker", "supervisor", "cli", "ptyd"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
     const { privateKey } = crypto.generateKeyPairSync("ed25519");
     assert.throws(() => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.0.0"], {env: {...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({format:"pem",type:"pkcs8"})},stdio:"pipe"}),error => error.status === 1 && /mandatory native transport/.test(error.stderr.toString()));
   } finally { rmSync(dir,{recursive:true,force:true}); }

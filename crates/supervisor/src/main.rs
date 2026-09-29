@@ -1,10 +1,13 @@
-//! supervisor —— daemon 的长生进程（热升级时不动）。
+//! supervisor —— VT/history/序号的 authority；可随时替换、崩溃可自恢复。
 //!
-//! 持有 PTY（portable-pty，唯一原生依赖留在此进程）；监听 UDS；起/管/重启 worker 子进程，
-//! 支持版本切换 + 观察期回滚。worker 断开/重启都不影响 PTY，worker 重连后 resync 重挂会话。
+//! PTY 本身归 `coflux-ptyd`（plan 20260918-ptyd-terminal-custody）：supervisor 只是它的客户端，
+//! 启动时从 ptyd 接回上一个实例留下的 session（blob + ring 回放），然后才起 worker；找不到 ptyd
+//! 就拒绝启动并指出 `cofluxd update` 是修法——它从不自己开 PTY，也从不启动 ptyd。SIGTERM 是
+//! leave-sessions 退出：杀 worker、退出，shell 留在 ptyd 里；"停止本机终端"是另一条路径
+//! （runtime_control 的 `stop` op），那才让 ptyd 杀 shell。
 //!
-//! 渐进式 Rust 化：本进程是 Rust，但能对接现有已测的 TS worker（UDS 协议语言中立），
-//! 故现有黑盒测试可直接验证。worker 走 COFLUX_WORKER_CMD/ARGS 指定（TS 阶段=node --import tsx worker.ts）。
+//! 监听 UDS；起/管/重启 worker 子进程，支持版本切换 + 观察期回滚。worker 断开/重启都不影响
+//! PTY，worker 重连后 resync 重挂会话。worker 走 COFLUX_WORKER_CMD/ARGS 指定。
 
 mod runtime_control;
 mod fda;
@@ -24,10 +27,12 @@ use std::thread;
 use std::time::Duration;
 
 use coflux_protocol::logln;
+use coflux_protocol::ptyd::{PTYD_PROTOCOL_VERSION, PTYD_SOCK_ENV, PTYD_SOCK_NAME};
 use coflux_protocol::{
     decode_frame, is_frame, DataFrame, RecordParser, Settings, WorkerToSupervisor,
     SUPERVISOR_SOCK_ENV,
 };
+use coflux_ptyd::PtydClient;
 
 use manager::{Manager, WorkerSpec};
 use sessions::{Outbound, SessionContext, Sessions};
@@ -70,6 +75,24 @@ fn parse_history_line_limit(value: Option<&str>) -> usize {
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(DEFAULT_HISTORY_LINE_LIMIT)
         .clamp(1, MAX_HISTORY_LINE_LIMIT)
+}
+
+/// 在 `window` 内反复尝试连接 ptyd（socket 尚不存在 / 上一个 ptyd 的残留 socket 拒绝连接都算"还没好"），
+/// 超时返回最后一次错误。这里只是等，绝不启动 ptyd。
+fn connect_ptyd(path: &str, window: Duration) -> Result<Arc<PtydClient>, coflux_ptyd::PtydError> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        match PtydClient::connect(path) {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                let retryable = matches!(&error, coflux_ptyd::PtydError::Io(io) if matches!(io.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+                if !retryable || std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 /// 与 supervisor 二进制同目录的 coflux-worker 路径（cofluxd 把两个二进制装在一起）。
@@ -126,6 +149,40 @@ fn main() {
     } else {
         None
     };
+    // plan 20260918-ptyd-terminal-custody：PTY 归 coflux-ptyd。它由生命周期拥有者（桌面 app /
+    // cofluxd 生成的服务）启动，supervisor 只连接；连不上就退出并说清修法，绝不自己开 PTY。
+    let ptyd_sock = std::env::var(PTYD_SOCK_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("{home}/{PTYD_SOCK_NAME}"));
+    // 服务管理器可能把 ptyd 排在 supervisor 之后几百毫秒才拉起（launchd 两个 label / systemd After=
+    // 只保证顺序不保证就绪），给它一个有界的等待窗口；窗口过了仍连不上才是"没有 ptyd"。
+    let ptyd = match connect_ptyd(&ptyd_sock, Duration::from_secs(10)) {
+        Ok(client) => client,
+        Err(error) => {
+            let message = format!(
+                "找不到 coflux-ptyd（{ptyd_sock}）：{error}。本机运行组件不完整或 cofluxd 版本过旧——\
+                 请运行 `cofluxd update && cofluxd restart`（桌面版：重新安装 Coflux 应用）。\
+                 supervisor 不会自己接管 PTY，现在退出。"
+            );
+            logln!("[supervisor] {message}");
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+    if ptyd.hello().protocol_version != PTYD_PROTOCOL_VERSION {
+        // 能力握手才是兼容机制；版本号只作日志。
+        logln!(
+            "[supervisor] ptyd 协议版本 {}（本 supervisor {}），按其宣告的能力工作",
+            ptyd.hello().protocol_version,
+            PTYD_PROTOCOL_VERSION
+        );
+    }
+    logln!(
+        "[supervisor] ptyd 已连接 identity={} ops={}",
+        ptyd.hello().identity,
+        ptyd.hello().ops.len()
+    );
     let settings = Settings::load(&home);
     fda::write_status(&home); // macOS: 探测完全磁盘访问权限并落盘,供 cofluxd status/fda 展示引导；非 macOS 空操作
     write_version_file(&home); // plan 112：自身版本落盘，桌面版据此判断「app 内置的 supervisor 比在跑的新」
@@ -203,7 +260,9 @@ fn main() {
 
     // PTY/VT authority 永远不等待 worker；每次连接有独立的 bounded outbound writer。
     let outbound = Outbound::new();
-    let sessions = Sessions::new(outbound, shell, home.clone(), history_line_limit);
+    let sessions = Sessions::new(outbound, ptyd, shell, home.clone(), history_line_limit);
+    // 先把上一个 supervisor 留在 ptyd 里的 session 接回来，再起 worker：resync 不能看到还在动的序号。
+    sessions.recover();
 
     // worker 子进程管理
     let manager = Manager::new(
@@ -219,10 +278,10 @@ fn main() {
         desktop.serve(manager.clone(), sessions.clone(), sock_path.clone());
     }
 
-    // 优雅关闭：SIGTERM/SIGINT → 杀 worker + 全部 PTY 后退出（systemd/launchd 会发 SIGTERM）
+    // SIGTERM/SIGINT = leave-sessions：杀 worker 后退出，shell 留在 ptyd 里（systemd/launchd 重启
+    // supervisor 走的就是这条路）。结束终端是 ptyd 自己收到 SIGTERM、或 runtime_control 的 `stop` op。
     {
         let manager = manager.clone();
-        let sessions = sessions.clone();
         let sock_path = sock_path.clone();
         if let Ok(mut signals) = signal_hook::iterator::Signals::new([
             signal_hook::consts::SIGTERM,
@@ -230,9 +289,8 @@ fn main() {
         ]) {
             thread::spawn(move || {
                 if signals.forever().next().is_some() {
-                    logln!("[supervisor] shutdown");
+                    logln!("[supervisor] shutdown（leave-sessions：终端留在 ptyd 里）");
                     manager.shutdown();
-                    sessions.shutdown();
                     let _ = std::fs::remove_file(&sock_path);
                     std::process::exit(0);
                 }

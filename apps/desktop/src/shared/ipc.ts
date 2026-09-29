@@ -32,6 +32,7 @@ export const IPC = {
   daemonGetState: "desktop:daemon-get-state",
   daemonEnroll: "desktop:daemon-enroll",
   daemonRestart: "desktop:daemon-restart",
+  daemonUpdatePtyd: "desktop:daemon-update-ptyd",
   daemonStop: "desktop:daemon-stop",
   daemonRemove: "desktop:daemon-remove",
   daemonOpenFdaGuide: "desktop:daemon-open-fda-guide",

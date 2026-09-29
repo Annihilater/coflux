@@ -1,0 +1,23 @@
+[package]
+name = "coflux-ptyd"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+# 库 + 薄二进制：supervisor 的单测在进程内起一个 ptyd 走真 PTY，不退化成 mock。
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "coflux-ptyd"
+path = "src/main.rs"
+
+[dependencies]
+coflux-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+signal-hook = "0.3"
+hex = "0.4"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
