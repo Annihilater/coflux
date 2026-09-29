@@ -259,7 +259,7 @@ export function TerminalPaper(props: TerminalPaperProps) {
  *  select-none 是为了整页框选时它不会混进复制出来的正文。 */
 function PaperHeader({ agent }: { agent: string }) {
   return (
-    <div className="sticky top-0 z-10 mb-6 flex select-none items-baseline gap-2 border-b border-border bg-popover pb-3 pr-10 pt-1 text-xs text-muted-foreground">
+    <div className="sticky top-0 z-10 mb-6 flex select-none items-baseline gap-2 border-b border-border bg-popover pb-3 pr-10 pt-1 text-sm text-muted-foreground">
       <span className="font-medium text-foreground">对话原文</span>
       <span>{agent}</span>
       <span className="ml-auto">Esc 关闭</span>
@@ -282,7 +282,7 @@ function PaperBody({ result }: { result: TranscriptResult | null }) {
   // 块级排版（不是 flex column）：宽内容——代码块、表格——撑不宽版心，只在自己那格里横向滚。
   return (
     <div className="space-y-5">
-      {truncated ? <p className="text-xs text-muted-foreground">只显示了最近的部分</p> : null}
+      {truncated ? <p className="text-sm text-muted-foreground">只显示了最近的部分</p> : null}
       {entries.map((entry, index) => (
         <PaperEntry key={index} entry={entry} />
       ))}
@@ -325,8 +325,8 @@ function PaperEntry({ entry }: { entry: TranscriptEntry }) {
 function PaperNote({ title, detail }: { title: string; detail?: string }) {
   return (
     <div className="space-y-2 py-6">
-      <p className="text-sm text-foreground">{title}</p>
-      {detail ? <p className="text-xs leading-relaxed text-muted-foreground">{detail}</p> : null}
+      <p className="text-base text-foreground">{title}</p>
+      {detail ? <p className="text-sm leading-relaxed text-muted-foreground">{detail}</p> : null}
     </div>
   );
 }

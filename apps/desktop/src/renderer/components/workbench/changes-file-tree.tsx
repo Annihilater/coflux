@@ -154,7 +154,7 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
       role="tree"
       aria-label="变更文件"
       tabIndex={0}
-      className="h-full overflow-y-auto py-1 text-xs outline-none"
+      className="h-full overflow-y-auto py-1 text-base outline-none"
       onKeyDown={onKeyDown}
       onFocus={() => setHasFocus(true)}
       onBlur={() => setHasFocus(false)}
@@ -214,13 +214,13 @@ function FileRow({ name, file }: { name: string; file: ChangedFile }) {
         {name}
       </span>
       {!file.binary && (file.additions > 0 || file.deletions > 0) ? (
-        <span className="shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums">
+        <span className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums">
           {file.additions > 0 ? <span className="text-success">+{file.additions}</span> : null}
           {file.additions > 0 && file.deletions > 0 ? " " : null}
           {file.deletions > 0 ? <span className="text-destructive">−{file.deletions}</span> : null}
         </span>
       ) : null}
-      <span className={cn("w-3 shrink-0 text-center font-mono text-2xs", STATUS_TONE[file.status])}>
+      <span className={cn("w-3 shrink-0 text-center font-mono text-xs", STATUS_TONE[file.status])}>
         {STATUS_LETTER[file.status]}
       </span>
     </>

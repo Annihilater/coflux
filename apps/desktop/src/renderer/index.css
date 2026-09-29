@@ -79,7 +79,6 @@
   /* mono 复用上面自带的 Maple Mono CN（字体已经为终端加载过，这里零额外成本），于是 UI 里的代码
    * 片段与终端是同一种字。连字只会在这侧（普通 DOM 文本）出现、终端那侧渲染不出来，已接受。 */
   --coflux-font-mono: "Maple Mono CN", ui-monospace, Menlo, monospace;
-  --coflux-text-2xs: 10px;
   --coflux-text-xs: 11px;
   --coflux-text-sm: 12px;
   --coflux-text-base: 13px;
@@ -147,8 +146,12 @@
   --animate-pulse-alive: pulse-alive 2.6s ease-in-out infinite;
 
   /* Tailwind text-* 对齐真相源（astryx tailwind-theme 走 --font-size-*，此处给 shadcn 遗留类用） */
-  --text-2xs: var(--coflux-text-2xs);
-  --text-2xs--line-height: 1.35;
+  /* No `text-2xs`: 11 px (`text-xs`) is the floor, and only badges use it (see
+   * docs/design-guidelines.md, "Type scale"). Deleting coflux's alias is not enough —
+   * astryx's tailwind-theme.css registers `--text-2xs` itself — so `initial` unregisters
+   * the key and a stray `text-2xs` class emits no rule instead of a sub-floor size. */
+  --text-2xs: initial;
+  --text-2xs--line-height: initial;
   --text-xs: var(--coflux-text-xs);
   --text-xs--line-height: 1.35;
   --text-sm: var(--coflux-text-sm);

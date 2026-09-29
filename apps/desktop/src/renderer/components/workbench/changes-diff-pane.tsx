@@ -49,12 +49,14 @@ type DiffPaneProps = {
 const HIGHLIGHT_MAX_CHARS = 400_000;
 /** Rows per `content-visibility` block: the browser skips layout and paint of off-screen blocks. */
 const ROW_BLOCK = 120;
+// Must equal the rows' `leading-5`. Code renders at 12 px (`text-sm`), the terminal's content
+// size: monospace looks larger than the UI sans at the same px, so it sits one step below body.
 const ROW_HEIGHT_PX = 20;
 
 export function ChangesDiffPane({ file, state, mode, onModeChange, onRetry, onForceLoad }: DiffPaneProps) {
   return (
     <div className="flex h-full min-w-0 flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-3 border-b border-border px-3 text-xs">
+      <div className="flex h-9 shrink-0 items-center gap-3 border-b border-border px-3 text-sm">
         <span className="min-w-0 flex-1 truncate font-mono">
           {file.path}
           {file.oldPath ? <span className="ml-1.5 text-muted-foreground">← {file.oldPath}</span> : null}
@@ -117,7 +119,7 @@ function PaneBody({
           {state.canLoad ? (
             <Button label="仍然加载" variant="secondary" size="sm" onClick={onForceLoad} />
           ) : (
-            <p className="text-xs text-muted-foreground">文件太大，不显示内容</p>
+            <p className="text-sm text-muted-foreground">文件太大，不显示内容</p>
           )}
         </Centered>
       );
@@ -219,7 +221,7 @@ function DiffBody({ file, data, mode }: { file: ChangedFile; data: ChangeFileDat
   }
 
   return (
-    <div className="absolute inset-0 overflow-y-auto overflow-x-hidden font-mono text-xs leading-5">
+    <div className="absolute inset-0 overflow-y-auto overflow-x-hidden font-mono text-sm leading-5">
       {blocks.map((block, blockIndex) => (
         <div
           key={blockIndex}
@@ -232,7 +234,7 @@ function DiffBody({ file, data, mode }: { file: ChangedFile; data: ChangeFileDat
                 <button
                   key={`gap-${row.id}`}
                   type="button"
-                  className="flex w-full items-center gap-2 bg-muted/60 px-3 text-left text-2xs leading-5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                  className="flex w-full items-center gap-2 bg-muted/60 px-3 text-left text-sm leading-5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
                   onClick={() => expand(row.id)}
                 >
                   <UnfoldVertical className="size-3" />

@@ -62,7 +62,7 @@ export function PortMenu({
     button={{
       ref: anchorRef,
       label: `端口转发，${count} 个端口`,
-      icon: <span className="relative flex"><Router className="size-3.5" />{count > 0 && <span aria-hidden className="absolute -right-2 -top-1.5 min-w-2.5 rounded-sm bg-background px-0.5 text-center text-[9px] leading-3 text-foreground">{count > 9 ? "9+" : count}</span>}</span>,
+      icon: <span className="relative flex"><Router className="size-3.5" />{count > 0 && <span aria-hidden className="absolute -right-2 -top-1.5 min-w-3 rounded-sm bg-background px-0.5 text-center text-xs leading-3 text-foreground">{count > 9 ? "9+" : count}</span>}</span>,
       isIconOnly: true,
       variant: "ghost",
       size: "sm",

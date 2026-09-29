@@ -146,7 +146,7 @@ function PaletteHeader({
             // does not: the palette's surface is #262626, so the active tab was invisible. These are
             // astryx's own interactive overlays, which are defined as alpha over whatever is beneath.
             className={cn(
-              "flex h-6 items-center rounded-md px-2 text-xs transition-colors",
+              "flex h-6 items-center rounded-md px-2 text-sm transition-colors",
               tab.id === filter
                 ? "bg-[var(--color-overlay-pressed)] text-foreground"
                 : "text-secondary-foreground hover:bg-[var(--color-overlay-hover)] hover:text-foreground",
@@ -181,9 +181,9 @@ function PaletteRow({ entry }: { entry: PaletteEntry }) {
       ) : (
         <Icon className={cn("size-3.5 shrink-0", isMainWorkspace ? "text-warning" : "opacity-70")} />
       )}
-      <span className="truncate text-sm text-foreground">{entry.label}</span>
-      {entry.detail ? <span className="shrink-0 truncate text-xs text-muted-foreground">{entry.detail}</span> : null}
-      <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-xs text-muted-foreground">
+      <span className="truncate text-base text-foreground">{entry.label}</span>
+      {entry.detail ? <span className="shrink-0 truncate text-sm text-muted-foreground">{entry.detail}</span> : null}
+      <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-sm text-muted-foreground">
         {entry.context ? <span className="max-w-32 truncate">{entry.context}</span> : null}
         {entry.isOffline && entry.kind !== "device" ? <span>离线</span> : null}
         {entry.activity === "approval" || entry.activity === "question" ? (

@@ -54,8 +54,8 @@ export function NotificationInbox({ client, open, onClose, onOpen, onNavigate }:
     {createPortal(<div className="fixed right-4 top-10 z-50 flex w-80 flex-col gap-2" aria-live="polite">
       {hints.map((item) => <div key={item.id} className="flex rounded-lg border border-border bg-popover p-3 shadow-lg">
         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => view(item)}>
-          <div className="text-xs text-muted-foreground">{item.workspaceName} · {item.terminalTitle}</div>
-          <div className="mt-1 line-clamp-3 whitespace-pre-wrap break-words text-sm">{item.message}</div>
+          <div className="text-sm text-muted-foreground">{item.workspaceName} · {item.terminalTitle}</div>
+          <div className="mt-1 line-clamp-3 whitespace-pre-wrap break-words text-base">{item.message}</div>
         </button><Tooltip content="关闭提示"><button type="button" aria-label="关闭提示" className="self-start p-1" onClick={() => setHints((items) => items.filter((hint) => hint.id !== item.id))}><X className="size-4" /></button></Tooltip>
       </div>)}
     </div>, document.body)}

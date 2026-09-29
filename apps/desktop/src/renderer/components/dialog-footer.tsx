@@ -6,7 +6,7 @@ import { HStack, LayoutFooter } from "@astryxdesign/core/Layout";
  * 纯装饰——真正的键位行为由 Dialog 的 Esc 处理、表单的 submit 或动作按钮的焦点承担——读屏忽略。 */
 export function KeyHint({ label }: { label: string }) {
   return (
-    <span aria-hidden className="text-xs opacity-60">
+    <span aria-hidden className="text-sm opacity-60">
       {label}
     </span>
   );
