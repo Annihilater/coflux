@@ -10,6 +10,7 @@ import type {
   DesktopBrowserLoginResult,
   DesktopBrowserPrepared,
   DesktopBrowserRect,
+  DesktopBrowserScope,
   DesktopCommand,
   DesktopDaemonState,
   DesktopExecutorCatalog,
@@ -62,6 +63,11 @@ if (nativeTransport) ipcRenderer.on(IPC.tailcatEvent, (_event, event: NativeEven
   try { for (const listener of nativeListeners) listener(event); }
   finally { if (event.kind === "frame") ipcRenderer.send(IPC.tailcatAck, event.handle, event.frame.byteLength); }
 });
+
+/** A browser scope rebuilt as a plain object; main validates it field by field. */
+function plainScope(scope: DesktopBrowserScope): { kind: string; id: string } {
+  return { kind: String(scope?.kind), id: String(scope?.id) };
+}
 
 const bridge: DesktopBridge = {
   nativeTransport,
@@ -201,8 +207,8 @@ const bridge: DesktopBridge = {
   },
   // Built-in browser tabs (plan 20260924-desktop-browser-tab). Arguments are rebuilt as plain
   // values here; the main process validates them again.
-  browserPrepare(workspaceId: string, daemonId: string) {
-    return ipcRenderer.invoke(IPC.browserPrepare, { workspaceId: String(workspaceId), daemonId: String(daemonId) }) as Promise<DesktopBrowserPrepared>;
+  browserPrepare(scope: DesktopBrowserScope, daemonId: string) {
+    return ipcRenderer.invoke(IPC.browserPrepare, { scope: plainScope(scope), daemonId: String(daemonId) }) as Promise<DesktopBrowserPrepared>;
   },
   browserNavigate(guestId: number, url: string) {
     ipcRenderer.send(IPC.browserNavigate, { guestId: Number(guestId), url: String(url) });
@@ -233,8 +239,8 @@ const bridge: DesktopBridge = {
   browserCloseDevTools(guestId: number) {
     ipcRenderer.send(IPC.browserCloseDevTools, { guestId: Number(guestId) });
   },
-  browserClearData(workspaceId: string, target: DesktopBrowserClearTarget) {
-    return ipcRenderer.invoke(IPC.browserClearData, { workspaceId: String(workspaceId), target: String(target) }).then((ok) => ok === true);
+  browserClearData(scope: DesktopBrowserScope, target: DesktopBrowserClearTarget) {
+    return ipcRenderer.invoke(IPC.browserClearData, { scope: plainScope(scope), target: String(target) }).then((ok) => ok === true);
   },
   browserCertificate(guestId: number, host: string) {
     return ipcRenderer.invoke(IPC.browserCertificate, { guestId: Number(guestId), host: String(host) }) as Promise<DesktopBrowserCertificate | null>;

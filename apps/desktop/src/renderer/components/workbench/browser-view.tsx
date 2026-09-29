@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import {
   AppWindow,
@@ -33,6 +33,7 @@ import { ANNOTATION_UPLOAD_TOO_LARGE, MAX_ANNOTATION_UPLOAD_BYTES, type Annotati
 import { AnnotationImageKind, AnnotationPutSchema, create, type Annotation } from "@coflux/protocol";
 
 import { BROWSER_DEVTOOLS_PARTITION } from "../../../shared/browser-partitions";
+import type { DesktopBrowserScope } from "../../../shared/desktop-bridge";
 import {
   displayUrl,
   hostLabel,
@@ -100,7 +101,7 @@ import { cn } from "@/lib/utils";
  * closed.
  *
  * The `<webview>` elements are created imperatively inside a host node React renders no children
- * into, in the order the main process requires: prepare the workspace's partition → insert the
+ * into, in the order the main process requires: prepare the scope's partition → insert the
  * element with that partition and `src="about:blank"` → once attached, navigate through main.
  */
 
@@ -109,6 +110,11 @@ export type BrowserViewEntry = {
   workspaceId: string;
   /** The device the workspace lives on; main compares it with this Mac's to decide what `localhost` is. */
   daemonId: string;
+  /**
+   * Whose browser state the tab uses: its workspace's project, or its device on the device view
+   * (plan 20260929-browser-scope-partitions). Derived by the Workbench, never stored with the tab.
+   */
+  scope: DesktopBrowserScope;
   /** Its group's active tab in the selected workspace, changes overlay closed. */
   visible: boolean;
   /** The focused group's active tab. */
@@ -229,6 +235,9 @@ function BrowserView({
   onPointerFocus: (tabId: string) => void;
 }) {
   const { tabId, workspaceId, daemonId, visible } = entry;
+  const { kind: scopeKind, id: scopeId } = entry.scope;
+  // A stable object for effects: the entry's is rebuilt on every Workbench render.
+  const scope = useMemo<DesktopBrowserScope>(() => ({ kind: scopeKind, id: scopeId }), [scopeKind, scopeId]);
   const showToast = useToast();
   const tab = useStore(runtime.tabs, (state) => state.tabs[tabId]);
   const library = useStore(runtime.library, (state) => state.library);
@@ -237,7 +246,7 @@ function BrowserView({
 
   const [prepared, setPrepared] = useState<DesktopBrowserPrepared | null>(null);
   const [prepareError, setPrepareError] = useState<string | null>(null);
-  const [mode, setMode] = useState<DesktopBrowserMode | null>(() => runtime.modeOf(workspaceId));
+  const [mode, setMode] = useState<DesktopBrowserMode | null>(() => runtime.modeOf(scope));
   const [guestId, setGuestId] = useState<number | null>(null);
   const [history, setHistory] = useState({ canGoBack: false, canGoForward: false, zoomFactor: 1 });
   const [failure, setFailure] = useState<Failure | null>(null);
@@ -486,7 +495,7 @@ function BrowserView({
   });
 
   function currentMode(): DesktopBrowserMode | null {
-    return runtime.modeOf(workspaceId) ?? liveRef.current.mode;
+    return runtime.modeOf(scope) ?? liveRef.current.mode;
   }
 
   /** Loads a URL the address bar, a suggestion, a port or a retry resolved — always through main. */
@@ -575,14 +584,14 @@ function BrowserView({
     if (!visible) setAnnotating(false);
   }, [visible]);
 
-  // 1. Prepare the workspace's partition (main decides local vs remote from the local daemon id).
+  // 1. Prepare the scope's partition (main decides local vs remote from the local daemon id).
   useEffect(() => {
     let cancelled = false;
-    runtime.prepare(workspaceId, daemonId).then(
+    runtime.prepare(scope, daemonId).then(
       (result) => {
         if (cancelled) return;
         setPrepared(result);
-        setMode(runtime.modeOf(workspaceId) ?? result.mode);
+        setMode(runtime.modeOf(scope) ?? result.mode);
       },
       (error: unknown) => {
         if (!cancelled) setPrepareError(error instanceof Error ? error.message : String(error));
@@ -591,7 +600,7 @@ function BrowserView({
     return () => {
       cancelled = true;
     };
-  }, [runtime, workspaceId, daemonId]);
+  }, [runtime, scope, daemonId]);
 
   // 2. Insert the webview only once the partition is prepared, then 3. navigate once it attached.
   useEffect(() => {
@@ -696,7 +705,7 @@ function BrowserView({
   // Main-process events about this tab, and the hooks the Workbench drives it through.
   useEffect(
     () =>
-      runtime.register(tabId, {
+      runtime.register(tabId, scope, {
         onEvent: (event: DesktopBrowserEvent) => {
           switch (event.kind) {
             case "key":
@@ -743,7 +752,7 @@ function BrowserView({
         focus: () => actionsRef.current.focusPage(),
         reload: () => actionsRef.current.reload(),
       }),
-    [runtime, tabId],
+    [runtime, tabId, scope],
   );
 
   // Docked DevTools: a second webview as the DevTools host, still on its initial about:blank when
@@ -871,8 +880,10 @@ function BrowserView({
 
   function clearData(target: "cookies" | "cache" | "certificates") {
     const labels = { cookies: "Cookies", cache: "缓存", certificates: "已信任的证书" } as const;
-    void desktop.browserClearData(workspaceId, target).then(
-      (ok) => showToast(ok ? { body: `已清除这个工作区的${labels[target]}`, type: "info" } : { body: `清除${labels[target]}失败`, type: "error" }),
+    // The tab's scope: clearing from one worktree clears the project's state for all of them.
+    const owner = scope.kind === "project" ? "这个项目" : "这台设备";
+    void desktop.browserClearData(scope, target).then(
+      (ok) => showToast(ok ? { body: `已清除${owner}的${labels[target]}`, type: "info" } : { body: `清除${labels[target]}失败`, type: "error" }),
       () => showToast({ body: `清除${labels[target]}失败`, type: "error" }),
     );
   }
@@ -1144,7 +1155,7 @@ function BrowserView({
           <NewTabPage ports={workspacePorts} recent={library.history.slice(0, NEW_TAB_RECENT_COUNT)} isRemote={isRemote} onOpen={navigate} />
         ) : null}
 
-        {failure ? <FailurePage failure={failure} trusting={trusting} onRetry={retry} onTrust={trustAndRetry} /> : null}
+        {failure ? <FailurePage failure={failure} scopeKind={scope.kind} trusting={trusting} onRetry={retry} onTrust={trustAndRetry} /> : null}
 
         {prepareError && !prepared ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-terminal px-6">
@@ -1352,11 +1363,14 @@ function NewTabRow({ icon, primary, secondary, onClick }: { icon: ReactNode; pri
 
 function FailurePage({
   failure,
+  scopeKind,
   trusting,
   onRetry,
   onTrust,
 }: {
   failure: Failure;
+  /** Who a trusted certificate is trusted for: the project (all its worktrees) or the device. */
+  scopeKind: DesktopBrowserScope["kind"];
   trusting: boolean;
   onRetry: () => void;
   onTrust: (failure: Extract<Failure, { kind: "certificate" }>) => void;
@@ -1388,7 +1402,7 @@ function FailurePage({
   } else if (failure.kind === "certificate") {
     icon = <ShieldAlert className="size-5" />;
     heading = "此站点的证书不受信任";
-    body = `${failure.host} 出示的证书没有通过验证${failure.certificate?.error ? `（${failure.certificate.error}）` : ""}。只在确认这是你自己的开发服务器时才信任它；信任只对这个工作区生效。`;
+    body = `${failure.host} 出示的证书没有通过验证${failure.certificate?.error ? `（${failure.certificate.error}）` : ""}。只在确认这是你自己的开发服务器时才信任它；${scopeKind === "project" ? "信任对这个项目的所有工作区生效" : "信任只对这台设备生效"}。`;
   } else if (failure.kind === "crashed") {
     heading = "页面已崩溃";
     body = "重新加载即可恢复。";

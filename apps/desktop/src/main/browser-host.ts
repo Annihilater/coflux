@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import {
@@ -31,6 +32,7 @@ import type {
   DesktopBrowserEvent,
   DesktopBrowserMode,
   DesktopBrowserPrepared,
+  DesktopBrowserScope,
   DesktopBrowserTunnelFailure,
   DesktopCommand,
 } from "../shared/desktop-bridge";
@@ -44,6 +46,8 @@ import {
   isAllowedPageNavigation,
   isCertificateTrusted,
   isKeyDown,
+  isSameScopeDaemon,
+  legacyPartitionDirectories,
   parseTrustedCertificates,
   sanitizeBrowserCommand,
   sanitizeCaptureRegion,
@@ -71,13 +75,13 @@ import { isTrustedRendererUrl } from "./ipc-trust";
  * The main-process half of the built-in browser tab (plan 20260924-desktop-browser-tab).
  *
  * The renderer embeds pages with `<webview>` and owns every piece of chrome around them. This module
- * owns what must not be the renderer's: the per-workspace session partitions (permissions, the
+ * owns what must not be the renderer's: the per-scope session partitions (permissions, the
  * remote-workspace network path, certificates, downloads), the gate every `<webview>` passes before
  * it may attach, the hardening and event plumbing of every guest (popups, keys, focus, favicons,
  * navigation state, zoom), docked DevTools, screenshots and clearing data. The rules themselves are
  * pure and live in browser-policy.ts.
  *
- * Order, always: the renderer asks to **prepare** a workspace's partition; only then does it insert
+ * Order, always: the renderer asks to **prepare** a scope's partition; only then does it insert
  * a `<webview>` with that partition and `src="about:blank"`, which the gate admits; only once the
  * guest is attached does it ask main to **navigate**. Preparing is where the session is configured
  * (a remote workspace's proxy is installed there, which is async — the reason it is not done in the
@@ -143,8 +147,9 @@ export type BrowserHost = {
 
 type ConfiguredPartition = {
   session: Session;
-  workspaceId: string;
-  daemonId: string;
+  scope: DesktopBrowserScope;
+  /** The device the scope lives on, fixed by its first prepare: a scope never moves. */
+  readonly daemonId: string;
   /** The mode last reported to the renderer; null before the first prepare. */
   announced: DesktopBrowserMode | null;
   /** The remote partition's own proxy listener; null for a local partition. */
@@ -192,6 +197,35 @@ function portOfUrl(url: string): number | null {
   }
 }
 
+/**
+ * Deletes the on-disk data of the legacy per-workspace partitions (plan
+ * 20260929-browser-scope-partitions: no migration, every project and device starts empty). Only
+ * direct entries of `Partitions/` whose names `legacyPartitionDirectories` selects, never through a
+ * symlink, never anything else. Never rejects: a failure is logged and the leftover stays unused.
+ */
+async function removeLegacyPartitions(partitionsDir: string, log: (message: string, detail?: unknown) => void): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(partitionsDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("读取浏览器分区目录失败", String(error));
+    return;
+  }
+  const removed: string[] = [];
+  for (const name of legacyPartitionDirectories(names)) {
+    const path = join(partitionsDir, name);
+    try {
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+      await rm(path, { recursive: true, force: true });
+      removed.push(name);
+    } catch (error) {
+      log("删除旧的浏览器分区数据失败", { name, error: String(error) });
+    }
+  }
+  if (removed.length > 0) log("已删除旧的按工作区浏览器分区数据", { count: removed.length });
+}
+
 /** Whether the partition's requests go through its proxy (so loopback reaches the device). */
 function proxied(entry: ConfiguredPartition): boolean {
   return typeof entry.applied === "number";
@@ -210,6 +244,10 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   const downloadsInFlight = new Set<string>();
   let devtoolsSessionReady = false;
   let trusted: TrustedCertificates = readTrusted();
+  // Old per-workspace partitions go before any browser partition session exists: every
+  // `session.fromPartition` of a page partition awaits this first. Partitions hang off
+  // `sessionData` (not `userData`), read now, after main's userData overrides ran.
+  const legacyCleanup = removeLegacyPartitions(join(app.getPath("sessionData"), "Partitions"), options.log);
 
   function readTrusted(): TrustedCertificates {
     try {
@@ -242,9 +280,9 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     return local !== null && local !== "" && entry.daemonId === local ? "local" : "remote";
   }
 
-  // A workspace prepared while the local daemon id was unknown was reported as remote; once main
-  // learns the id, any partition whose meaning changed flips its network path and is reported again
-  // once the flip is in place.
+  // A scope prepared while the local daemon id was unknown was reported as remote; once main learns
+  // the id, any partition whose meaning changed flips its network path and is reported again once
+  // the flip is in place — to the scope, whose tabs the renderer finds in every workspace of it.
   const stopWatchingDaemon = options.onLocalDaemonChange(() => {
     for (const entry of configured.values()) {
       if (entry.announced === null) continue;
@@ -252,7 +290,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       void queueNetwork(entry).then(() => {
         if (mode !== modeOf(entry) || mode === entry.announced) return;
         entry.announced = mode;
-        send({ kind: "mode", workspaceId: entry.workspaceId, mode });
+        send({ kind: "mode", scope: entry.scope, mode });
       });
     }
   });
@@ -270,7 +308,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!entry.proxy) {
         try {
           entry.proxy = await startPartitionProxy({
-            // The daemon is read per connection: a workspace prepared again may have moved.
+            // The scope's one device: prepare refuses to point a scope anywhere else.
             connectLoopback: (port) => connectLoopback(entry.daemonId, port),
             resolveProxy: (url) => (options.resolveSystemProxy ? options.resolveSystemProxy(url) : Promise.resolve("DIRECT")),
             onLoopbackResult: (port, failure) => {
@@ -386,7 +424,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   }
 
   /**
-   * One-time configuration of a workspace partition. Deliberately nothing of the app's own session:
+   * One-time configuration of a scope partition. Deliberately nothing of the app's own session:
    * no Origin rewrite (guest pages must send their real Origin), no app permissions.
    */
   function configureSession(ses: Session, partition: string): void {
@@ -417,17 +455,18 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     return ses;
   }
 
-  async function prepare(workspaceId: string, daemonId: string): Promise<DesktopBrowserPrepared> {
-    const partition = browserPartitionFor(workspaceId);
-    if (!partition) throw new Error("工作区标识无效");
+  async function prepare(scope: DesktopBrowserScope, daemonId: string): Promise<DesktopBrowserPrepared> {
+    const partition = browserPartitionFor(scope);
+    if (!partition) throw new Error("浏览器分区标识无效");
+    await legacyCleanup;
     let entry = configured.get(partition);
+    // A scope maps to exactly one device (a project never moves; a device scope is its own device).
+    if (!isSameScopeDaemon(entry?.daemonId, daemonId)) throw new Error("这个浏览器分区属于另一台设备");
     if (!entry) {
       const ses = session.fromPartition(partition);
       configureSession(ses, partition);
-      entry = { session: ses, workspaceId, daemonId, announced: null, proxy: null, applied: null, network: Promise.resolve(), tunnelFailures: new Map() };
+      entry = { session: ses, scope, daemonId, announced: null, proxy: null, applied: null, network: Promise.resolve(), tunnelFailures: new Map() };
       configured.set(partition, entry);
-    } else {
-      entry.daemonId = daemonId;
     }
     await waitForLocalDaemonId();
     // Before the renderer may insert a webview: its first navigation must already take this path.
@@ -749,9 +788,11 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     }
   }
 
-  async function clearData(workspaceId: string, target: DesktopBrowserClearTarget): Promise<boolean> {
-    const partition = browserPartitionFor(workspaceId);
+  /** Clears a scope's data: the tabs of every workspace in it (every worktree of a project) at once. */
+  async function clearData(scope: DesktopBrowserScope, target: DesktopBrowserClearTarget): Promise<boolean> {
+    const partition = browserPartitionFor(scope);
     if (!partition) return false;
+    await legacyCleanup;
     const entry = configured.get(partition);
     const ses = entry?.session ?? session.fromPartition(partition);
     if (target === "cookies") {
@@ -853,7 +894,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizePrepare(payload);
       if (!input) throw new Error("浏览器分区参数无效");
-      return prepare(input.workspaceId, input.daemonId);
+      return prepare(input.scope, input.daemonId);
     });
 
     ipcMain.on(IPC.browserNavigate, (event, payload: unknown) => {
@@ -941,7 +982,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizeClearData(payload);
       if (!input) return false;
-      return clearData(input.workspaceId, input.target).catch((error: unknown) => {
+      return clearData(input.scope, input.target).catch((error: unknown) => {
         options.log("清除浏览器数据失败", String(error));
         return false;
       });
