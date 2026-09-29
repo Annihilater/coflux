@@ -35,6 +35,7 @@ import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
 import { BrowserViews, type BrowserViewEntry } from "@/components/workbench/browser-view";
 import { createBrowserRuntime } from "@/components/workbench/browser-runtime";
+import { browserScopeOfWorkspace } from "../../../shared/browser-partitions";
 import { createBrowserTabId, readBrowserTabRecords, restoreBrowserTabs, type BrowserTabStore } from "@/components/workbench/browser-tabs";
 import type { BrowserLibraryStore } from "@/components/workbench/browser-library";
 import { localPortUrl, normalizeIncomingUrl } from "@/components/workbench/browser-address";
@@ -989,6 +990,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   for (const workspace of terminalWorkspaces) {
     const layout = workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id);
     const onScreen = workspace.id === activeWorkspaceId && !changesOpen[workspace.id];
+    // Browser state is the project's (every worktree shares it), or the device's on the device view
+    // (plan 20260929-browser-scope-partitions); derived here, never stored with the tab.
+    const scope = browserScopeOfWorkspace(workspace);
     for (const { group, rect } of layoutGeometry(layout).groups) {
       for (const tabId of group.tabs) {
         if (!isBrowserTabId(tabId)) continue;
@@ -997,6 +1001,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           tabId,
           workspaceId: workspace.id,
           daemonId: workspace.daemonId,
+          scope,
           visible,
           focused: visible && group.id === layout.focusedGroupId,
           frame: groupBodyStyle(rect),

@@ -1,5 +1,7 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
 
+import { browserScopeKey } from "../../../shared/browser-partitions";
+import type { DesktopBrowserScope } from "../../../shared/desktop-bridge";
 import type { DesktopBridge, DesktopBrowserEvent, DesktopBrowserMode, DesktopBrowserPrepared } from "@/desktop-bridge";
 import { readLibrary, writeLibrary, type BrowserLibrary, type BrowserLibraryStore } from "@/components/workbench/browser-library";
 import {
@@ -14,6 +16,10 @@ import {
  * Workbench: what every tab shows (for its strip chip as much as for its view), the global library
  * (history), the prepared partitions, which page guest is which tab, and the routing of
  * main-process events to the tab they concern.
+ *
+ * Partitions and modes belong to a browser scope — the tab's project, or its device on the device
+ * view (plan 20260929-browser-scope-partitions) — while a tab still belongs to its workspace. The
+ * scope is never stored with the tab: a view hands it over when it registers.
  *
  * It is a plain object built once and handed down, never state: views register themselves with it
  * from effects, and the Workbench subscribes to the few events that change the layout (focus,
@@ -31,7 +37,7 @@ export type BrowserTabView = {
 
 /** Per-tab hooks a mounted view registers. */
 export type BrowserTabHandlers = {
-  /** A main-process event about this tab's page guest (or its workspace's mode). */
+  /** A main-process event about this tab's page guest (or its scope's mode). */
   onEvent: (event: DesktopBrowserEvent) => void;
   /** Keyboard focus into the tab: the page, or the address bar when there is no page to focus. */
   focus: () => void;
@@ -45,14 +51,15 @@ export type BrowserRuntime = {
   updateTab: (id: string, patch: Partial<Omit<BrowserTabView, "workspaceId">>) => void;
   removeTab: (id: string) => void;
   updateLibrary: (change: (library: BrowserLibrary) => BrowserLibrary) => void;
-  /** Prepares (once per workspace and renderer) the workspace's partition; main decides the mode. */
-  prepare: (workspaceId: string, daemonId: string) => Promise<DesktopBrowserPrepared>;
-  /** The mode main last reported for a workspace; null before it was prepared. */
-  modeOf: (workspaceId: string) => DesktopBrowserMode | null;
+  /** Prepares (once per scope and renderer) the scope's partition; main decides the mode. */
+  prepare: (scope: DesktopBrowserScope, daemonId: string) => Promise<DesktopBrowserPrepared>;
+  /** The mode main last reported for a scope; null before it was prepared. */
+  modeOf: (scope: DesktopBrowserScope) => DesktopBrowserMode | null;
   bindGuest: (tabId: string, guestId: number) => void;
   unbindGuest: (tabId: string) => void;
   guestOf: (tabId: string) => number | null;
-  register: (tabId: string, handlers: BrowserTabHandlers) => () => void;
+  /** A mounted view's hooks, with its scope: a scope's mode events reach the tabs of every workspace in it. */
+  register: (tabId: string, scope: DesktopBrowserScope, handlers: BrowserTabHandlers) => () => void;
   /** Focuses a tab now, or as soon as its view registers (a tab that was just created). */
   focus: (tabId: string) => void;
   reload: (tabId: string) => void;
@@ -105,11 +112,14 @@ export function createBrowserRuntime(options: {
     libraryTimer = window.setTimeout(flushLibrary, LIBRARY_WRITE_DELAY_MS);
   });
 
+  // Keyed by `browserScopeKey`.
   const prepared = new Map<string, Promise<DesktopBrowserPrepared>>();
   const modes = new Map<string, DesktopBrowserMode>();
   const guestByTab = new Map<string, number>();
   const tabByGuest = new Map<number, string>();
   const handlers = new Map<string, BrowserTabHandlers>();
+  /** Per registered tab, its scope's key; lives and dies with the tab's handlers. */
+  const scopeKeyByTab = new Map<string, string>();
   let pendingFocus: string | null = null;
   let workbench: { onGuestFocus: (tabId: string) => void; onPopup: (tabId: string, url: string) => void } | null = null;
   const downloadListeners = new Set<(event: Extract<DesktopBrowserEvent, { kind: "download" }>) => void>();
@@ -125,9 +135,10 @@ export function createBrowserRuntime(options: {
     }
     if (event.kind === "mode") {
       // Views read the live mode through `modeOf`; the prepare result they already hold only gave them the partition.
-      modes.set(event.workspaceId, event.mode);
+      const key = browserScopeKey(event.scope);
+      modes.set(key, event.mode);
       for (const [tabId, handler] of handlers) {
-        if (tabs.getState().tabs[tabId]?.workspaceId === event.workspaceId) handler.onEvent(event);
+        if (scopeKeyByTab.get(tabId) === key) handler.onEvent(event);
       }
       return;
     }
@@ -164,21 +175,22 @@ export function createBrowserRuntime(options: {
       const next = change(current);
       if (next !== current) library.setState({ library: next });
     },
-    prepare(workspaceId, daemonId) {
-      const existing = prepared.get(workspaceId);
+    prepare(scope, daemonId) {
+      const key = browserScopeKey(scope);
+      const existing = prepared.get(key);
       if (existing) return existing;
-      const promise = desktop.browserPrepare(workspaceId, daemonId).then((result) => {
-        if (!modes.has(workspaceId)) modes.set(workspaceId, result.mode);
-        return { ...result, mode: modes.get(workspaceId) ?? result.mode };
+      const promise = desktop.browserPrepare(scope, daemonId).then((result) => {
+        if (!modes.has(key)) modes.set(key, result.mode);
+        return { ...result, mode: modes.get(key) ?? result.mode };
       });
       // A failed prepare is retried by the next view that asks.
       promise.catch(() => {
-        if (prepared.get(workspaceId) === promise) prepared.delete(workspaceId);
+        if (prepared.get(key) === promise) prepared.delete(key);
       });
-      prepared.set(workspaceId, promise);
+      prepared.set(key, promise);
       return promise;
     },
-    modeOf: (workspaceId) => modes.get(workspaceId) ?? null,
+    modeOf: (scope) => modes.get(browserScopeKey(scope)) ?? null,
     bindGuest(tabId, guestId) {
       const previous = guestByTab.get(tabId);
       if (previous !== undefined) tabByGuest.delete(previous);
@@ -192,14 +204,17 @@ export function createBrowserRuntime(options: {
       if (tabByGuest.get(guestId) === tabId) tabByGuest.delete(guestId);
     },
     guestOf: (tabId) => guestByTab.get(tabId) ?? null,
-    register(tabId, tabHandlers) {
+    register(tabId, scope, tabHandlers) {
       handlers.set(tabId, tabHandlers);
+      scopeKeyByTab.set(tabId, browserScopeKey(scope));
       if (pendingFocus === tabId) {
         pendingFocus = null;
         tabHandlers.focus();
       }
       return () => {
-        if (handlers.get(tabId) === tabHandlers) handlers.delete(tabId);
+        if (handlers.get(tabId) !== tabHandlers) return;
+        handlers.delete(tabId);
+        scopeKeyByTab.delete(tabId);
       };
     },
     focus(tabId) {
