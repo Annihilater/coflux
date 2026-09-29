@@ -97,10 +97,10 @@ Nothing reaches users until the next `v*` release after this merges. There is no
   - Based on: `packages/cli/cofluxd.mjs:31-33,261-274,351`.
 - **`latest` now means latest stable** `(decided while planning)`: today `releases?per_page=1` may return a prerelease (`cofluxd.mjs:261`). That now matches the server (`/releases/latest`) and the desktop feed.
 - **Desktop feed**:
-  - `apps/desktop/electron-builder.yml` `publish` becomes `{provider: generic, url: https://dl.coflux.dev/desktop, useMultipleRangeRequest: false}`.
+  - `apps/desktop/electron-builder.yml` `publish` becomes `{provider: generic, url: https://dl.coflux.dev/desktop}`, electron-updater's range settings left at their defaults.
   - The `desktop-updates` branch keeps being pushed for installed apps.
   - Both feeds carry the R2 absolute zip URL.
-  - `useMultipleRangeRequest: false` `(revised on plan audit)`: the default is `true` for non-S3 hosts (`builder-util-runtime/out/publishOptions.d.ts:175-177`), and `multipleRangeDownloader.js:83` throws unless the response is `multipart/byteranges`. The Cloudflare/R2 edge does not produce that (inferred; confirm with the Range probe in Commands). Without the flag, differential updates would never work.
+  - No `useMultipleRangeRequest: false` `(revised on M1 evidence, 2026-09-30)`: the plan audit inferred that the Cloudflare/R2 edge would not answer multi-range requests with `multipart/byteranges` (`multipleRangeDownloader.js:83` throws otherwise). The M1 probe disproved it: `curl -H 'Range: bytes=0-9, 20-29' https://dl.coflux.dev/<probe>` returned `206` with `content-type: multipart/byteranges` on both a cache MISS and a HIT. electron-updater's default (multi-range) stays.
   - Rejected: stopping the branch feed. It is baked into every installed app's `app-update.yml`.
 - **Add-device DMG button → the R2 alias** `(decided while planning)`: `desktopDownloadUrl` (`add-device-view.ts:13-15`) no longer pins the running app's version. Pinned versions are pruned from R2, and a GitHub pin would be the slow path this plan exists to remove. Plan 20260923-add-device-dialog (`wiki/plans/20260923-add-device-dialog.md:62`) chose the pin only because GitHub's `releases/latest` had been hijacked by release ordering and could not deep-link to an asset. The alias fixes both problems, and a newer app on the other Mac is fine because it self-updates anyway. The README's download links use the same alias. The release badge may stay on GitHub.
 - **Credentials and job placement**:
@@ -144,7 +144,7 @@ Validation (executor), in four checks:
 - `curl -sI https://dl.coflux.dev/<probe>` → `200`. Note that a bare 404 proves nothing, because the proxied `*.coflux.dev` wildcard already answers today.
 - A second request shows `cf-cache-status: HIT`.
 - Requests with a `node` user agent and with no user agent both succeed without a `cf-mitigated` challenge header. The clients are Node `fetch`, Electron net and a Rust downloader, so check for Bot Fight Mode, Browser Integrity Check and WAF interference.
-- The multi-range probe `curl -H 'Range: bytes=0-9, 20-29'` is recorded as evidence for the `useMultipleRangeRequest` decision.
+- The multi-range probe `curl -H 'Range: bytes=0-9, 20-29'` is recorded as evidence for the range decision (result: `multipart/byteranges` on MISS and HIT).
 
 Delete the probe afterwards. Then hand the user the token and secret instructions. No code milestone depends on the token.
 
@@ -152,7 +152,7 @@ Delete the probe afterwards. Then hand the user the token and secret instruction
 
 - `release-sign.mjs` writes R2 URLs for stable tags and GitHub URLs for prereleases.
 - `renderDesktopFeed` renders R2 zip URLs and keeps every existing guard.
-- `electron-builder.yml` publishes to `https://dl.coflux.dev/desktop` with `useMultipleRangeRequest: false`, and `config.test.ts`'s `Builder.publish` type and assertion lock both.
+- `electron-builder.yml` publishes to `https://dl.coflux.dev/desktop` and `config.test.ts` locks it.
 - Stale comments are updated: `apps/desktop/src/main/updater.ts:34-35`, `apps/desktop/src/main/index.ts:208-209`, and `electron-builder.yml:83-86`.
 
 Validation: `node --test scripts/product-version.test.mjs`, `node --import tsx --test tests/src/release-sign.test.mjs` (asserting both the stable and the prerelease URL forms), and `pnpm -C apps/desktop test` all exit 0.
@@ -221,7 +221,7 @@ Dependencies:
   - The server polls every 10 min (`apps/server/src/config.ts:167`). Between a prune and its next poll, it may push the pruned previous version's URL to a daemon still on an even older worker. That produces one 404, charged to the old version's attempt quota. Quotas are keyed by (daemon, version) and reset for the new version.
   - A desktop app mid-download of the previous zip at prune time fails, and retries at the next 4-hour check.
   - A `cofluxd` run that read the old `latest.json` a moment before the prune gets one 404 and succeeds on re-run.
-- **Differential desktop updates:** the old blockmap comes from electron-updater's cache dir first (`AppUpdater.js:696`), and only then from a URL built by replacing the version in the new URL (`Provider.js:22-25`). With latest-only retention that URL is always pruned, so differential works only for apps with a cached `current.blockmap`, and otherwise falls back to a full download. This is expected. It works at all only because `useMultipleRangeRequest: false`.
+- **Differential desktop updates:** the old blockmap comes from electron-updater's cache dir first (`AppUpdater.js:696`), and only then from a URL built by replacing the version in the new URL (`Provider.js:22-25`). With latest-only retention that URL is always pruned, so differential works only for apps with a cached `current.blockmap`, and otherwise falls back to a full download. This is expected.
 - **`coflux-screen`** (landed 2026-09-29) ships inside the app bundle only (`config.test.ts`, "coflux-screen" test). It is not a daemon release asset. Do not add it to any upload set.
 - **Tests that assert the current shape literally:** `scripts/product-version.test.mjs:40-51`, `apps/desktop/test/config.test.ts:64,179,214`, `add-device-view.test.ts:19`, and `tests/src/cli-release-trust.test.mjs:66-69,96-97,119`.
 - **A fresh worktree has no `node_modules`.** Run `pnpm install` before any validation. `node --import tsx` needs it.
@@ -259,7 +259,7 @@ Out of scope:
 | Desktop typecheck + tests | `pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test` | exit 0 |
 | Retained black-box suite | `pnpm -C tests test` | exit 0 (release signing is one of its three areas) |
 | R2 live (acceptance) | M1's probe: `200`, then `cf-cache-status: HIT`, no `cf-mitigated` with a `node` UA | as stated |
-| Multi-range behaviour (acceptance) | `curl -s -D- -o /dev/null -H 'Range: bytes=0-9, 20-29' https://dl.coflux.dev/<probe>` | recorded: not `multipart/byteranges` confirms the flag is required |
+| Multi-range behaviour (acceptance) | `curl -s -D- -o /dev/null -H 'Range: bytes=0-9, 20-29' https://dl.coflux.dev/<probe>` | done 2026-09-30: `206 multipart/byteranges` on MISS and HIT — no flag needed |
 | Real release (acceptance, user-triggered) | next stable `v*` tag | R2 holds only `releases/<tag>/`, `latest.json`, `desktop/latest-mac.yml` and the alias; the `desktop-updates` feed points at R2; a daemon hot-upgrade log shows a `dl.coflux.dev` URL; `cofluxd update --version <older>` downloads from GitHub |
 
 ## Done criteria
@@ -267,7 +267,7 @@ Out of scope:
 - [ ] All listed non-acceptance commands pass.
 - [ ] `dl.coflux.dev` serves from the bucket with the cache rule, and the user has the exact secret and variable names to set.
 - [ ] A stable manifest from `release-sign.mjs` contains only `https://dl.coflux.dev/releases/<tag>/…` URLs, and a prerelease manifest contains only GitHub URLs. Both are asserted.
-- [ ] Both desktop feeds render R2 zip URLs. Every existing feed guard still rejects its bad case. `useMultipleRangeRequest: false` is locked by a test.
+- [ ] Both desktop feeds render R2 zip URLs. Every existing feed guard still rejects its bad case.
 - [ ] `cofluxd` installs latest from the mirror and older versions from the archive. Tests prove the older-version path never touches the mirror's versioned objects. `COFLUX_RELEASE_API_BASE` is gone.
 - [ ] Workflow order is locked by tests: upload before `release`, pointer after `release`, pointer stable-only, overwrite gate present, no `contents: write` on the new jobs, `desktop-updates` still pushed.
 - [ ] Prune selection is unit-tested. It never returns the confirmed latest tag, and it returns nothing when the read-back disagrees.
