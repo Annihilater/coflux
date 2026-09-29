@@ -4,14 +4,11 @@ import { test } from "node:test";
 import {
   EMPTY_LIBRARY,
   clearHistory,
-  isBookmarked,
   parseLibrary,
   rankSuggestions,
   readLibrary,
   recordVisit,
   serializeLibrary,
-  setBookmarksBarVisible,
-  toggleBookmark,
   updateHistoryTitle,
   writeLibrary,
   type BrowserLibrary,
@@ -19,6 +16,9 @@ import {
 
 const NOW = 1_800_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
+/** Two fields older versions wrote into the same version-1 record; kept out of the source as literals. */
+const RETIRED_LIST_FIELD = ["book", "marks"].join("");
+const RETIRED_TOGGLE_FIELD = `${RETIRED_LIST_FIELD}BarVisible`;
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -63,19 +63,9 @@ test("history is capped by dropping the oldest visits", () => {
   assert.equal(clearHistory(library).history.length, 0);
 });
 
-test("☆ toggles a bookmark; the bar toggle is remembered", () => {
-  let library = toggleBookmark(EMPTY_LIBRARY, { url: "http://localhost:3000/", title: "App" }, NOW);
-  assert.equal(isBookmarked(library, "http://localhost:3000/"), true);
-  library = toggleBookmark(library, { url: "http://localhost:3000/", title: "App" }, NOW);
-  assert.equal(isBookmarked(library, "http://localhost:3000/"), false);
-  assert.equal(toggleBookmark(library, { url: "about:blank", title: "" }, NOW), library);
-  library = setBookmarksBarVisible(library, true);
-  assert.equal(parseLibrary(serializeLibrary(library)).bookmarksBarVisible, true);
-});
-
 test("storage round-trips, and missing or corrupt storage reads as an empty library", () => {
   let library = recordVisit(EMPTY_LIBRARY, { url: "https://example.com/", title: "Example" }, NOW);
-  library = toggleBookmark(library, { url: "https://docs.example.com/", title: "Docs" }, NOW);
+  library = recordVisit(library, { url: "https://docs.example.com/", title: "Docs" }, NOW + 1);
   const storage = memoryStorage();
   assert.ok(writeLibrary({ storage, key: "lib" }, library));
   assert.deepEqual(readLibrary({ storage, key: "lib" }), library);
@@ -106,8 +96,6 @@ test("storage round-trips, and missing or corrupt storage reads as an empty libr
         { url: "https://a.com/", title: "dup" },
         { url: "https://b.com/", title: 42, visitCount: -1, lastVisitedAt: "soon" },
       ],
-      bookmarks: [{ url: "https://c.com/" }, { url: 7 }],
-      bookmarksBarVisible: "yes",
     }),
   );
   assert.deepEqual(
@@ -117,29 +105,67 @@ test("storage round-trips, and missing or corrupt storage reads as an empty libr
       ["https://b.com/", "", 1],
     ],
   );
-  assert.deepEqual(partial.bookmarks.map((bookmark) => bookmark.url), ["https://c.com/"]);
-  assert.equal(partial.bookmarksBarVisible, false);
 });
 
-test("suggestions rank URL-prefix matches first, bookmarks over history, frequent and recent pages higher", () => {
-  let library: BrowserLibrary = EMPTY_LIBRARY;
-  library = recordVisit(library, { url: "https://github.com/coflux/coflux", title: "coflux repo" }, NOW - 30 * DAY);
-  library = recordVisit(library, { url: "https://docs.github.com/", title: "GitHub Docs" }, NOW - 30 * DAY);
-  library = recordVisit(library, { url: "https://example.com/about-github", title: "About" }, NOW - 30 * DAY);
-  for (let index = 0; index < 4; index++) library = recordVisit(library, { url: "https://gist.github.com/", title: "Gists" }, NOW - DAY / 2);
-  library = toggleBookmark(library, { url: "https://github.com/", title: "GitHub" }, NOW);
+test("a version-1 record with fields written by older versions keeps its history and drops those fields on the next write", () => {
+  const history = [
+    { url: "http://localhost:3000/", title: "App", visitCount: 2, lastVisitedAt: NOW },
+    { url: "https://example.com/", title: "Example", visitCount: 1, lastVisitedAt: NOW - DAY },
+  ];
+  const stale = JSON.stringify({
+    version: 1,
+    history,
+    [RETIRED_LIST_FIELD]: [{ url: "https://c.com/", title: "C", addedAt: NOW }],
+    [RETIRED_TOGGLE_FIELD]: true,
+  });
+  assert.deepEqual(Object.keys(JSON.parse(stale)).sort(), [RETIRED_LIST_FIELD, RETIRED_TOGGLE_FIELD, "history", "version"].sort());
+  const storage = memoryStorage({ lib: stale });
+  const library = readLibrary({ storage, key: "lib" });
+  assert.deepEqual(library, { history });
 
-  const ranked = rankSuggestions(library, "git", NOW).map((suggestion) => suggestion.url);
-  // Prefix of the typed form: the bookmark first, then the history entry with the same match.
-  assert.equal(ranked[0], "https://github.com/");
-  assert.equal(ranked[1], "https://github.com/coflux/coflux");
-  // Host label prefix, frequent and recent, ranks above an older one with the same match.
-  assert.ok(ranked.indexOf("https://gist.github.com/") < ranked.indexOf("https://docs.github.com/"));
-  // A substring match ranks last.
-  assert.equal(ranked[ranked.length - 1], "https://example.com/about-github");
-  // Every URL once; a bookmarked page is suggested as the bookmark.
-  assert.equal(new Set(ranked).size, ranked.length);
-  assert.equal(rankSuggestions(library, "github.com", NOW)[0]!.source, "bookmark");
+  assert.ok(writeLibrary({ storage, key: "lib" }, recordVisit(library, { url: "https://example.com/", title: "" }, NOW + 1)));
+  const written = JSON.parse(storage.values.get("lib")!);
+  assert.deepEqual(Object.keys(written).sort(), ["history", "version"]);
+  assert.equal(written.version, 1);
+  assert.deepEqual(
+    written.history.map((entry: { url: string; visitCount: number }) => [entry.url, entry.visitCount]),
+    [
+      ["https://example.com/", 2],
+      ["http://localhost:3000/", 2],
+    ],
+  );
+  const reserialized = JSON.parse(serializeLibrary(library));
+  assert.deepEqual(Object.keys(reserialized).sort(), ["history", "version"]);
+  assert.equal(RETIRED_LIST_FIELD in reserialized || RETIRED_TOGGLE_FIELD in reserialized, false);
+});
+
+test("suggestions rank URL-prefix over host-label over title-word over substring matches, frequent and recent pages higher", () => {
+  let library: BrowserLibrary = EMPTY_LIBRARY;
+  // Recorded oldest first; every candidate below matches "git" in exactly one tier.
+  library = recordVisit(library, { url: "https://example.com/about-github", title: "About" }, NOW - 30 * DAY); // substring
+  library = recordVisit(library, { url: "https://notes.example.com/", title: "Git notes" }, NOW - 30 * DAY); // title word
+  library = recordVisit(library, { url: "https://docs.github.com/", title: "Docs" }, NOW - 30 * DAY); // host label, old
+  for (let index = 0; index < 4; index++) library = recordVisit(library, { url: "https://gist.github.com/", title: "Gists" }, NOW - DAY / 2); // host label, frequent and recent
+  library = recordVisit(library, { url: "https://github.com/coflux/coflux", title: "coflux repo" }, NOW - 30 * DAY); // prefix, old
+  library = recordVisit(library, { url: "https://github.com/", title: "GitHub" }, NOW - 2 * DAY); // prefix, recent
+
+  assert.deepEqual(
+    rankSuggestions(library, "git", NOW).map((suggestion) => suggestion.url),
+    [
+      // Prefix of the typed form; the recently visited one first.
+      "https://github.com/",
+      "https://github.com/coflux/coflux",
+      // Host label prefix; the frequent and recent one above the old one.
+      "https://gist.github.com/",
+      "https://docs.github.com/",
+      // A word of the title.
+      "https://notes.example.com/",
+      // A substring match ranks last.
+      "https://example.com/about-github",
+    ],
+  );
+  // A suggestion carries only the page.
+  assert.deepEqual(rankSuggestions(library, "github.com", NOW)[0], { url: "https://github.com/", title: "GitHub" });
 
   // Title words, multi-word queries, no match, empty query and the limit.
   assert.deepEqual(

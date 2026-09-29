@@ -19,15 +19,13 @@ import {
   RotateCw,
   ShieldAlert,
   SquareCode,
-  Star,
   Trash2,
   Unplug,
   WifiOff,
   X,
 } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
-import { ContextMenu } from "@astryxdesign/core/ContextMenu";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuDivider, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
+import { DropdownMenu, DropdownMenuDivider, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { useToast } from "@astryxdesign/core/Toast";
 import type { CofluxClient } from "@coflux/client";
@@ -44,12 +42,8 @@ import {
 } from "@/components/workbench/browser-address";
 import {
   clearHistory,
-  isBookmarked,
   rankSuggestions,
   recordVisit,
-  removeBookmark,
-  setBookmarksBarVisible,
-  toggleBookmark,
   updateHistoryTitle,
   type BrowserSuggestion,
   type HistoryEntry,
@@ -104,8 +98,6 @@ type BrowserViewsProps = {
   entries: readonly BrowserViewEntry[];
   /** A pointer went down anywhere in a view: its group becomes the focused one. */
   onPointerFocus: (tabId: string) => void;
-  /** A bookmark's 在新标签页中打开: a new browser tab beside this one. */
-  onOpenTab: (workspaceId: string, url: string, besideTabId: string) => void;
 };
 
 /** The subset of Electron's `<webview>` element this file uses (no Electron types in the renderer). */
@@ -149,7 +141,7 @@ function createWebview(partition: string, options: { allowPopups: boolean }): We
   return element;
 }
 
-export function BrowserViews({ runtime, client, entries, onPointerFocus, onOpenTab }: BrowserViewsProps) {
+export function BrowserViews({ runtime, client, entries, onPointerFocus }: BrowserViewsProps) {
   const showToast = useToast();
   useEffect(
     () =>
@@ -162,7 +154,7 @@ export function BrowserViews({ runtime, client, entries, onPointerFocus, onOpenT
   return (
     <div className="pointer-events-none absolute inset-0">
       {entries.map((entry) => (
-        <BrowserView key={entry.tabId} entry={entry} runtime={runtime} client={client} onPointerFocus={onPointerFocus} onOpenTab={onOpenTab} />
+        <BrowserView key={entry.tabId} entry={entry} runtime={runtime} client={client} onPointerFocus={onPointerFocus} />
       ))}
     </div>
   );
@@ -205,13 +197,11 @@ function BrowserView({
   runtime,
   client,
   onPointerFocus,
-  onOpenTab,
 }: {
   entry: BrowserViewEntry;
   runtime: BrowserRuntime;
   client: CofluxClient;
   onPointerFocus: (tabId: string) => void;
-  onOpenTab: (workspaceId: string, url: string, besideTabId: string) => void;
 }) {
   const { tabId, workspaceId, daemonId, visible } = entry;
   const showToast = useToast();
@@ -250,7 +240,6 @@ function BrowserView({
   const url = tab?.url ?? "";
   const title = tab?.title ?? "";
   const loading = tab?.loading ?? false;
-  const bookmarked = isWebUrl(url) && isBookmarked(library, url);
   const blank = url === "" && failure === null;
 
   // Handlers registered once per mount read the current values through this mirror.
@@ -263,7 +252,7 @@ function BrowserView({
     return runtime.modeOf(workspaceId) ?? liveRef.current.mode;
   }
 
-  /** Loads a URL the address bar, a bookmark, a port or a retry resolved — always through main. */
+  /** Loads a URL the address bar, a suggestion, a port or a retry resolved — always through main. */
   function navigate(target: string) {
     setFailure(null);
     setEditing(false);
@@ -721,7 +710,7 @@ function BrowserView({
             aria-label="地址栏"
             spellCheck={false}
             autoComplete="off"
-            className="h-6 w-full rounded-md bg-muted/60 pl-2.5 pr-7 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
+            className="h-6 w-full rounded-md bg-muted/60 px-2.5 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
             onFocus={(event) => {
               setAddressText(displayUrl(url));
               setEditing(true);
@@ -740,19 +729,6 @@ function BrowserView({
             }}
             onKeyDown={onAddressKeyDown}
           />
-          {isWebUrl(url) ? (
-            <Tooltip content={bookmarked ? "移除书签" : "加入书签"} placement="below">
-              <button
-                type="button"
-                aria-label={bookmarked ? "移除书签" : "加入书签"}
-                aria-pressed={bookmarked}
-                className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                onClick={() => runtime.updateLibrary((current) => toggleBookmark(current, { url, title }, Date.now()))}
-              >
-                <Star className={cn("size-3.5", bookmarked && "fill-warning text-warning")} />
-              </button>
-            </Tooltip>
-          ) : null}
           {suggestions.length > 0 ? (
             <div role="listbox" aria-label="地址建议" className="absolute inset-x-0 top-full z-30 mt-1 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-lg">
               {suggestions.map((suggestion, index) => (
@@ -773,7 +749,7 @@ function BrowserView({
                     requestAnimationFrame(() => webviewRef.current?.focus());
                   }}
                 >
-                  {suggestion.source === "bookmark" ? <Star className="size-3 shrink-0 fill-warning text-warning" /> : <History className="size-3 shrink-0 opacity-60" />}
+                  <History className="size-3 shrink-0 opacity-60" />
                   <span className="min-w-0 max-w-[50%] shrink truncate text-foreground">{suggestion.title || hostLabel(suggestion.url)}</span>
                   <span className="min-w-0 flex-1 truncate text-muted-foreground">{displayUrl(suggestion.url)}</span>
                 </button>
@@ -849,12 +825,6 @@ function BrowserView({
             </span>
           </div>
           <DropdownMenuDivider />
-          <DropdownMenuCheckboxItem
-            label="显示书签栏"
-            value={library.bookmarksBarVisible}
-            onChange={(checked) => runtime.updateLibrary((current) => setBookmarksBarVisible(current, checked))}
-          />
-          <DropdownMenuDivider />
           <DropdownMenuItem
             icon={<History className="size-3.5" />}
             label="清除浏览历史"
@@ -870,38 +840,6 @@ function BrowserView({
         {/* Sibling tooltip after the menu, never button.tooltip (docs/design-guidelines.md). */}
         <Tooltip anchorRef={moreAnchorRef} isOpen={menuOpen ? false : undefined} content="更多" />
       </div>
-
-      {library.bookmarksBarVisible ? (
-        <div className="flex h-7 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border bg-background px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {library.bookmarks.length === 0 ? (
-            <span className="px-1 text-2xs text-muted-foreground">点地址栏里的 ☆ 把当前页面加入书签</span>
-          ) : (
-            library.bookmarks.map((bookmark) => (
-              <div key={bookmark.url} className="shrink-0">
-                <ContextMenu
-                  label={`书签「${bookmark.title || hostLabel(bookmark.url)}」操作`}
-                  size="sm"
-                  items={[
-                    { label: "在新标签页中打开", onClick: () => onOpenTab(workspaceId, bookmark.url, tabId) },
-                    { label: "复制网址", onClick: () => desktop.writeClipboard(bookmark.url) },
-                    { type: "divider" },
-                    { label: "删除书签", onClick: () => runtime.updateLibrary((current) => removeBookmark(current, bookmark.url)) },
-                  ]}
-                >
-                  <button
-                    type="button"
-                    className="flex h-5 max-w-40 items-center gap-1 rounded px-1.5 text-2xs text-secondary-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={() => navigate(bookmark.url)}
-                  >
-                    <Star className="size-2.5 shrink-0 opacity-60" />
-                    <span className="truncate">{bookmark.title || hostLabel(bookmark.url)}</span>
-                  </button>
-                </ContextMenu>
-              </div>
-            ))
-          )}
-        </div>
-      ) : null}
 
       {/* Page area. The webview host has no React children, so React never touches the element
           inserted into it; the overlays are its later siblings and draw over the page. */}

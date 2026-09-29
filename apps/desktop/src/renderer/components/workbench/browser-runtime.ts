@@ -12,7 +12,7 @@ import {
 /**
  * The renderer's side of the built-in browser tabs (plan 20260924-desktop-browser-tab), one per
  * Workbench: what every tab shows (for its strip chip as much as for its view), the global library
- * (bookmarks, history), the prepared partitions, which page guest is which tab, and the routing of
+ * (history), the prepared partitions, which page guest is which tab, and the routing of
  * main-process events to the tab they concern.
  *
  * It is a plain object built once and handed down, never state: views register themselves with it

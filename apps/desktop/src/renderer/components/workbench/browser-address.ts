@@ -148,7 +148,7 @@ export function resolveAddressInput(input: string): AddressResolution | null {
 }
 
 /**
- * A URL that arrives from outside the address bar (a terminal link, a page popup, a bookmark):
+ * A URL that arrives from outside the address bar (a terminal link or a page popup):
  * http(s) only, with the unspecified host rewritten. Anything else is refused (null).
  */
 export function normalizeIncomingUrl(url: string): string | null {
