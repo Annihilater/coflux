@@ -258,7 +258,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   return (
     <div className="flex h-full min-h-0">
       <div className="relative flex shrink-0 flex-col border-r border-border bg-background" style={{ width: treeWidth.width }}>
-        <div className="flex h-9 shrink-0 items-center gap-3 border-b border-border pl-3 pr-1.5 text-xs text-muted-foreground">
+        <div className="flex h-9 shrink-0 items-center gap-3 border-b border-border pl-3 pr-1.5 text-sm text-muted-foreground">
           <span className="whitespace-nowrap">{list.files.length} 个文件</span>
           <span className="min-w-0 truncate font-mono tabular-nums">
             <span className="text-success">+{totals.added}</span> <span className="text-destructive">−{totals.deleted}</span>

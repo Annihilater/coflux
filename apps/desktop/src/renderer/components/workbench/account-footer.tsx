@@ -27,7 +27,7 @@ const ACCOUNT_MENU_WIDTH = 200;
  *
  * 菜单里不画按键块：菜单行的惯例（macOS 一路下来都是）是行尾一串淡色纯文字。
  */
-const COMPACT_KBD = "[&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:border-b [&_kbd]:px-1 [&_kbd]:text-2xs";
+const COMPACT_KBD = "[&_kbd]:h-4 [&_kbd]:min-w-4 [&_kbd]:border-b [&_kbd]:px-1 [&_kbd]:text-xs";
 
 /** 菜单行尾的快捷键文字，与侧栏其它快捷键提示同一口径（纯 ⌘ 前缀，见 shortcut-modifier.ts）。 */
 const SETTINGS_SHORTCUT_TEXT = `${SHORTCUT_MODIFIER_PREFIX},`;

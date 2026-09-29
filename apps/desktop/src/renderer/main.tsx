@@ -27,7 +27,11 @@ const cofluxTheme = defineTheme({
     "--font-family-body": "var(--coflux-font-sans)",
     "--font-family-heading": "var(--coflux-font-sans)",
     "--font-family-code": "var(--coflux-font-mono)",
-    "--font-size-2xs": "var(--coflux-text-2xs)",
+    // astryx's rungs below `xs` (8 / 7 / 6 px by default) all land on the 11 px floor, so no
+    // component can render smaller than a badge (docs/design-guidelines.md, "Type scale").
+    "--font-size-2xs": "var(--coflux-text-xs)",
+    "--font-size-3xs": "var(--coflux-text-xs)",
+    "--font-size-4xs": "var(--coflux-text-xs)",
     "--font-size-xs": "var(--coflux-text-xs)",
     "--font-size-sm": "var(--coflux-text-sm)",
     "--font-size-base": "var(--coflux-text-base)",
@@ -44,7 +48,8 @@ const cofluxTheme = defineTheme({
     "--text-heading-3-size": "var(--font-size-lg)",
     "--text-heading-4-size": "var(--font-size-base)",
     "--text-heading-5-size": "var(--font-size-sm)",
-    "--text-heading-6-size": "var(--font-size-xs)",
+    // Headings never sit at the badge size: the smallest heading is the 12 px secondary size.
+    "--text-heading-6-size": "var(--font-size-sm)",
   },
   components: {
     tooltip: {

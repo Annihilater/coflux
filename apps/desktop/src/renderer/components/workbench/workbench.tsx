@@ -1447,7 +1447,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
       {/* 断线重连横幅：保留最后快照渲染（乐观 UI），只提示连接状态。根容器同步留出 pt-7。 */}
       {showReconnectBanner ? (
-        <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-xs text-warning backdrop-blur">
+        <div className="fixed inset-x-0 top-0 z-50 flex h-7 items-center justify-center gap-2 border-b border-warning/20 bg-warning/10 text-sm text-warning backdrop-blur">
           <LoaderCircle className="size-3 animate-spin" />
           连接已断开，正在自动重连…下方显示的是最后一次同步的状态。
         </div>
@@ -1589,7 +1589,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
             >
               <FileDiff className="size-3.5" />
               {activeWorkspace.additions > 0 || activeWorkspace.deletions > 0 ? (
-                <span className="whitespace-nowrap font-mono text-2xs tabular-nums">
+                <span className="whitespace-nowrap font-mono text-xs tabular-nums">
                   <span className="text-success">+{activeWorkspace.additions}</span>{" "}
                   <span className="text-destructive">−{activeWorkspace.deletions}</span>
                 </span>

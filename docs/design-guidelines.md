@@ -41,6 +41,12 @@ Anything clickable that sits inside or overlaps a `-webkit-app-region: drag` are
 
 Built-in browser tabs (`browser-view.tsx`) keep hidden pages alive with `visibility: hidden` at their last rectangle, and `<main>` is taken out of the flow and made invisible rather than `hidden` when no workspace is selected. Do not add `hidden`, `display: none` or a Suspense boundary above the browser layer, and never move or re-key a view: a `<webview>` under `display: none` risks a blank or detached guest, and one moved to another parent reloads its page (the user loses HMR state and logins in progress).
 
+## Type scale: 13 / 12 / 11 px, nothing smaller
+
+Give every piece of UI text one of three roles. **Body** — labels, names, messages, input text — is 13 px (`text-base`). **Secondary** — meta lines, captions, group headings, hints, timestamps, banners, shortcut hints inside rows — is 12 px (`text-sm`). **Badge** — counts, numbers inside pills, keycap glyphs, status chips — is 11 px (`text-xs`), and 11 px is for badges only. Nothing renders below 11 px: `text-2xs` is unregistered in `index.css` and astryx's `2xs`/`3xs`/`4xs` sizes are pinned to 11 px in `main.tsx`. Use the token utilities, never an arbitrary `text-[Npx]`. When a dense row does not fit, adjust line-height, truncation or spacing; do not step the text back down. Terminal content (xterm's font size) is not UI text and is excluded.
+
+Rationale: 10–11 px had spread into ordinary reading text and was hard to read. One floor and three named roles keep the choice from being made site by site.
+
 ## Workspace activity: SVG dot matrices
 
 Use `ActivityDots` for the four workspace activity states, matching assistant-ui DotMatrix's N×N SVG circles. Running: random flashes in a 4×4 matrix. Awaiting approval: slowly blinking 5×5 exclamation mark. Awaiting an answer: cycling 5×5 ellipsis. Turn complete: static 5×5 check mark. The neutral state remains GitBranch. Do not use `LoaderCircle`, sweeping highlights, Unicode braille, or lucide status icons in this slot.

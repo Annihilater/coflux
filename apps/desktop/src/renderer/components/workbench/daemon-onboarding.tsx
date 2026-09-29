@@ -42,8 +42,8 @@ function StepRow({ state, label, detail }: { state: OnboardingStepState; label: 
         <StepIcon state={state} />
       </div>
       <div className="flex min-w-0 flex-col">
-        <span className={cn("text-sm", state === "pending" ? "text-muted-foreground" : "text-foreground")}>{label}</span>
-        {detail ? <span className={cn("text-xs leading-5", state === "failed" ? "text-destructive" : "text-muted-foreground")}>{detail}</span> : null}
+        <span className={cn("text-base", state === "pending" ? "text-muted-foreground" : "text-foreground")}>{label}</span>
+        {detail ? <span className={cn("text-sm leading-5", state === "failed" ? "text-destructive" : "text-muted-foreground")}>{detail}</span> : null}
       </div>
     </div>
   );
