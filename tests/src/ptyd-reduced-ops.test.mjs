@@ -7,7 +7,7 @@ import { openNativeDevice, utf8 } from "./device-harness.mjs";
 // plan 20260918-ptyd-terminal-custody：ptyd 协议的兼容机制是能力握手。这里用测试专用的 op 宣告开关
 // 模拟一个"旧 ptyd"（没有 checkpoint / blob / resizes / cursors），supervisor 必须照常建会话、收发输入输出，
 // 而不是在第一次调用缺失的 op 时硬失败——否则 supervisor 升级又要求配套的 ptyd，整个方案就白做了。
-const PORT = 8831;
+const PORT = 8833;
 const REDUCED_OPS = "open,spawn,list,subscribe,read,write,resize,kill,remove,status,shutdown";
 let stack;
 const repos = [];
