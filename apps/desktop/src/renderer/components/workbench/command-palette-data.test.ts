@@ -259,3 +259,14 @@ test("新建浏览器标签页 is an action: offered only with a workspace on sc
   );
   assert.equal(searchPaletteEntries({ snapshot: withAction, query: "浏览器", filter: "terminal", recent: [] }).length, 0);
 });
+
+test("打开屏幕 is an action offered only for a capable device's workspace (plan 20260929-remote-desktop)", () => {
+  const withScreen = buildPaletteSnapshot({ ...fixture({ workspaceId: "w1", taskId: null, daemonId: null }), canOpenScreenTab: true });
+  const without = buildPaletteSnapshot({ ...fixture({ workspaceId: "w1", taskId: null, daemonId: null }), canOpenBrowserTab: true });
+  assert.equal(without.entries.some((entry) => entry.target.kind === "action" && entry.target.action === "new-screen-tab"), false);
+  const typed = searchPaletteEntries({ snapshot: withScreen, query: "屏幕", filter: "all", recent: [] });
+  assert.equal(typed[0]?.label, "打开屏幕");
+  assert.deepEqual(typed[0]?.auxiliaryData.entry.target, { kind: "action", action: "new-screen-tab" });
+  assert.equal(searchPaletteEntries({ snapshot: withScreen, query: "screen", filter: "all", recent: [] })[0]?.label, "打开屏幕");
+  assert.equal(searchPaletteEntries({ snapshot: withScreen, query: "", filter: "all", recent: [] }).some((item) => item.auxiliaryData.entry.kind === "action"), false);
+});

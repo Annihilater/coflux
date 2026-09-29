@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DaemonBundle } from "./daemon-bundle";
-import { DAEMON_BINARIES, PTYD_BINARY, RUNTIME_BINARIES } from "./daemon-paths";
+import { DAEMON_BINARIES, DAEMON_VERSION_FILE, PTYD_BINARY, RUNTIME_BINARIES, SCREEN_HELPER_BINARY, SCREEN_HELPER_ENV, SCREEN_HELPER_VERSION_ENV } from "./daemon-paths";
 
 export type RuntimeStatus = {
   ok: true;
@@ -279,6 +279,11 @@ export function stageRuntime(home: string, bundle: DaemonBundle, runtimeId: stri
  * 启动 supervisor（由主应用直接启动，保持应用的权限责任链；不交给独立 LaunchAgent，也不重签二进制）。
  * ptyd 必须已经在跑（`startPtyd`）：supervisor 找不到它会立刻退出。
  */
+/** The staged runtime's VERSION stamp (CI writes vX.Y.Z; a local pack falls back to dev). */
+function readVersionStamp(directory: string): string {
+  try { return readFileSync(join(directory, DAEMON_VERSION_FILE), "utf8").trim() || "dev"; } catch { return "dev"; }
+}
+
 export async function startRuntime(home: string, directory: string, runtimeId: string, logFile: string): Promise<RuntimeStatus> {
   const existing = await runtimeStatus(home);
   if (existing) return existing;
@@ -292,7 +297,9 @@ export async function startRuntime(home: string, directory: string, runtimeId: s
       detached: true,
       stdio: ["ignore", logFd, logFd],
       env: { ...process.env, TMPDIR: temporaryHome, COFLUX_HOME: home, COFLUX_RUNTIME_CONTROL: "1", COFLUX_RUNTIME_ID: runtimeId,
-        COFLUX_WORKER_CMD: join(directory, "coflux-worker"), COFLUX_CLAUDE_PLUGIN_DIR: join(directory, "claude-plugin") },
+        COFLUX_WORKER_CMD: join(directory, "coflux-worker"), COFLUX_CLAUDE_PLUGIN_DIR: join(directory, "claude-plugin"),
+        // The supervisor passes its environment through to every worker, hot-upgraded ones included.
+        [SCREEN_HELPER_ENV]: join(directory, SCREEN_HELPER_BINARY), [SCREEN_HELPER_VERSION_ENV]: readVersionStamp(directory) },
     });
     child.once("error", (error) => { launchError = error; });
     child.once("exit", () => { exited = true; });

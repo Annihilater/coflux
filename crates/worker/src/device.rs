@@ -18,7 +18,7 @@ use coflux_protocol::wire::{
 use coflux_protocol::{
     decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
     DataFrame, WorkerToSupervisor, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
-    MAX_FRAME_ID_BYTES, MAX_SESSION_CHECKPOINT_BYTES,
+    MAX_FRAME_ID_BYTES, MAX_SESSION_CHECKPOINT_BYTES, SCREEN_CHANNEL_RECORD_BUDGET,
 };
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
@@ -32,6 +32,7 @@ use crate::annotations::AnnotationStore;
 use crate::device_loopback::{self, LoopbackTable};
 use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
+use crate::screen;
 use crate::secret::{SecretBytes, SecretVault};
 use crate::{Config, WorkerState, WsOut};
 
@@ -581,6 +582,10 @@ struct ChannelEntry {
     /// Loopback tunnel connections of this channel, created on the first open. Dropping the
     /// entry (every channel-removal path does) tears all of them down.
     loopback: Option<LoopbackTable>,
+    /// This channel's hold on the remote screen helper (plan 20260929-remote-desktop), created on
+    /// its first screen payload. Dropping the entry releases it: the helper learns the lane went
+    /// away and starts its orphan grace, without ending the session.
+    screen: Option<screen::Hold>,
 }
 
 #[derive(Clone)]
@@ -690,6 +695,13 @@ impl ChannelSink {
                 .fetch_sub(length, Ordering::AcqRel);
             false
         }
+    }
+
+    /// Records queued and not yet pulled by the transport pump.
+    fn queued_records(&self) -> usize {
+        self.regular
+            .max_capacity()
+            .saturating_sub(self.regular.capacity())
     }
 
     fn close(&self) {
@@ -835,6 +847,9 @@ pub struct DeviceRuntime {
     /// Browser annotations (plan 20260929-browser-annotations): the per-workspace store under
     /// `$COFLUX_HOME/annotations`. Present in production only (it needs the home directory).
     annotations: Option<Arc<AnnotationStore>>,
+    /// The remote screen helper bridge (plan 20260929-remote-desktop), attached by main once the
+    /// runtime exists; absent on devices without the helper (Linux, headless installs).
+    screen: std::sync::OnceLock<Arc<screen::Bridge>>,
 }
 
 impl DeviceRuntime {
@@ -937,6 +952,20 @@ impl DeviceRuntime {
             loopback_connections: Arc::new(AtomicUsize::new(0)),
             secrets,
             annotations,
+            screen: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Attach the remote screen bridge; screen payloads are refused as `screen_unavailable`
+    /// until then.
+    pub fn attach_screen(&self, bridge: Arc<screen::Bridge>) {
+        let _ = self.screen.set(bridge);
+    }
+
+    /// Where the bridge delivers helper → client payloads.
+    pub fn screen_outlet(self: &Arc<Self>) -> Arc<dyn screen::Outlet> {
+        Arc::new(ScreenOutlet {
+            runtime: Arc::downgrade(self),
         })
     }
 
@@ -969,6 +998,7 @@ impl DeviceRuntime {
                 sink,
                 streams: HashMap::new(),
                 loopback: None,
+                screen: None,
             },
         );
         Ok((channel_id, receiver))
@@ -1034,6 +1064,7 @@ impl DeviceRuntime {
                 sink,
                 streams: HashMap::new(),
                 loopback: None,
+                screen: None,
             },
         );
         Ok(receiver)
@@ -1946,6 +1977,12 @@ impl DeviceRuntime {
             }
             return;
         }
+        // Remote screen (plan 20260929-remote-desktop): bridged to the helper right after the
+        // scope gate, like loopback frames; most carry no request_id.
+        if screen::is_screen_payload(payload) {
+            self.handle_screen_frame(channel_id, &principal, envelope);
+            return;
+        }
         // Secret answers (plan 20260926-agent-secret-input): settled here, right after the scope
         // gate (SESSION_CONTROL on the channel, no attach or holder_epoch needed). The envelope is
         // taken apart so the value moves into zeroing custody without an extra copy.
@@ -2301,6 +2338,100 @@ impl DeviceRuntime {
             .unwrap()
             .get(channel_id)
             .is_some_and(|entry| entry.sink.try_send(bytes))
+    }
+
+    /// A client screen payload: check the open's identity against the channel's principal, take
+    /// the channel's hold on the helper, then forward the envelope verbatim (its channel_id names
+    /// the lane the helper answers to).
+    fn handle_screen_frame(
+        self: &Arc<Self>,
+        channel_id: &str,
+        principal: &Principal,
+        envelope: DeviceEnvelope,
+    ) {
+        let Some(payload) = envelope.payload.as_ref() else {
+            return;
+        };
+        let request = request_id(payload);
+        if let Some(id) = request.as_deref() {
+            if !valid_id(id) {
+                self.send_error(channel_id, None, "invalid_request_id", "request_id 非法");
+                return;
+            }
+        }
+        if let device_envelope::Payload::ScreenSessionOpen(open) = payload {
+            if open.client_instance_id != principal.client_instance_id()
+                || open.transport_generation != principal.transport_generation()
+            {
+                self.send_error(
+                    channel_id,
+                    request,
+                    "principal_mismatch",
+                    "screen open identity 与认证 channel 不匹配",
+                );
+                return;
+            }
+        }
+        let Some(bridge) = self.screen.get() else {
+            self.send_error(
+                channel_id,
+                request,
+                "screen_unavailable",
+                "this device has no remote screen helper",
+            );
+            return;
+        };
+        {
+            let mut channels = self.channels.lock().unwrap();
+            let Some(entry) = channels.get_mut(channel_id) else {
+                return;
+            };
+            if entry.screen.is_none() {
+                entry.screen = Some(bridge.hold(channel_id));
+            }
+        }
+        if !bridge.forward(envelope) {
+            self.send_error(
+                channel_id,
+                request,
+                "screen_unavailable",
+                "the remote screen helper is not reachable",
+            );
+        }
+    }
+
+    /// Queue a helper-initiated screen payload on the lane, under the response scope gate.
+    /// `droppable` payloads are discarded (reported as delivered) once the lane's sink holds the
+    /// screen record budget, so a saturated stream never closes the channel. Never closes the
+    /// channel itself.
+    fn send_screen(&self, channel_id: &str, payload: device_envelope::Payload, droppable: bool) -> bool {
+        let principal = self
+            .channels
+            .lock()
+            .unwrap()
+            .get(channel_id)
+            .map(|entry| entry.principal.clone());
+        let Some(principal) = principal else {
+            return false;
+        };
+        let scopes = self.effective_scopes(&principal);
+        if response_required_scope(&payload).is_none_or(|scope| !scopes.contains(&(scope as i32)))
+        {
+            return false;
+        }
+        let bytes = encode_device_envelope(&DeviceEnvelope {
+            protocol_version: DEVICE_PROTOCOL_VERSION,
+            channel_id: channel_id.to_string(),
+            payload: Some(payload),
+        });
+        let channels = self.channels.lock().unwrap();
+        let Some(entry) = channels.get(channel_id) else {
+            return false;
+        };
+        if droppable && entry.sink.queued_records() >= SCREEN_CHANNEL_RECORD_BUDGET {
+            return true;
+        }
+        entry.sink.try_send(bytes)
     }
 
     fn handle_remote_frame(
@@ -4115,6 +4246,20 @@ impl device_loopback::Outlet for LoopbackOutlet {
     }
 }
 
+/// Where the screen bridge queues helper → client payloads. Holds the runtime weakly: the bridge
+/// outlives nothing the runtime owns.
+struct ScreenOutlet {
+    runtime: Weak<DeviceRuntime>,
+}
+
+impl screen::Outlet for ScreenOutlet {
+    fn deliver(&self, channel_id: &str, payload: device_envelope::Payload, droppable: bool) -> bool {
+        self.runtime
+            .upgrade()
+            .is_some_and(|runtime| runtime.send_screen(channel_id, payload, droppable))
+    }
+}
+
 fn start_call(
     ledger: &Mutex<CallLedger>,
     key: String,
@@ -4629,6 +4774,18 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::AnnotationsMutate(_)
         | device_envelope::Payload::AnnotationImageRead(_)
         | device_envelope::Payload::AnnotationHandOff(_) => Some(DeviceScope::SessionControl),
+        // Remote screen (plan 20260929-remote-desktop): RPC, like the loopback tunnel — RPC already
+        // allows `exec` of anything on the device, so seeing and driving its screen widens nothing.
+        device_envelope::Payload::ScreenSessionOpen(_)
+        | device_envelope::Payload::ScreenSessionClose(_)
+        | device_envelope::Payload::ScreenSessionResize(_)
+        | device_envelope::Payload::ScreenSessionPause(_)
+        | device_envelope::Payload::ScreenSessionResume(_)
+        | device_envelope::Payload::ScreenVideoAttach(_)
+        | device_envelope::Payload::ScreenVideoCredit(_)
+        | device_envelope::Payload::ScreenKeyframeRequest(_)
+        | device_envelope::Payload::ScreenInput(_)
+        | device_envelope::Payload::ScreenClipboardSet(_) => Some(DeviceScope::Rpc),
         _ => None,
     }
 }
@@ -4667,6 +4824,15 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::AnnotationsMutated(_)
         | device_envelope::Payload::AnnotationImageData(_)
         | device_envelope::Payload::AnnotationHandOffResult(_) => Some(DeviceScope::SessionControl),
+        device_envelope::Payload::ScreenSessionOpened(_)
+        | device_envelope::Payload::ScreenSessionState(_)
+        | device_envelope::Payload::ScreenSessionClosed(_)
+        | device_envelope::Payload::ScreenSessionDetached(_)
+        | device_envelope::Payload::ScreenSessionEnded(_)
+        | device_envelope::Payload::ScreenVideoAttached(_)
+        | device_envelope::Payload::ScreenVideoFrame(_)
+        | device_envelope::Payload::ScreenCursor(_)
+        | device_envelope::Payload::ScreenClipboardChanged(_) => Some(DeviceScope::Rpc),
         _ => None,
     }
 }
@@ -4706,6 +4872,9 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::AnnotationsMutate(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationImageRead(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationHandOff(value) => Some(value.request_id.clone()),
+        // Screen open/close answer on the control lane; they never enter the call ledger.
+        device_envelope::Payload::ScreenSessionOpen(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::ScreenSessionClose(value) => Some(value.request_id.clone()),
         _ => None,
     }
 }
@@ -5988,6 +6157,160 @@ mod tests {
         assert!(matches!(
             remote_envelope(&mut read_only_rx).await.payload,
             Some(Payload::Error(DeviceError { ref code, .. })) if code == "scope_denied"
+        ));
+        fixture.runtime.close_tailcats();
+        let _ = std::fs::remove_dir_all(&fixture.home);
+    }
+
+    #[test]
+    fn screen_payloads_are_rpc_scoped_in_both_directions() {
+        use device_envelope::Payload;
+        for client in [
+            Payload::ScreenSessionOpen(Default::default()),
+            Payload::ScreenSessionClose(Default::default()),
+            Payload::ScreenSessionResize(Default::default()),
+            Payload::ScreenSessionPause(Default::default()),
+            Payload::ScreenSessionResume(Default::default()),
+            Payload::ScreenVideoAttach(Default::default()),
+            Payload::ScreenVideoCredit(Default::default()),
+            Payload::ScreenKeyframeRequest(Default::default()),
+            Payload::ScreenInput(Default::default()),
+            Payload::ScreenClipboardSet(Default::default()),
+        ] {
+            assert_eq!(required_scope(&client), Some(DeviceScope::Rpc));
+            assert!(screen::is_screen_payload(&client));
+        }
+        for worker in [
+            Payload::ScreenSessionOpened(Default::default()),
+            Payload::ScreenSessionState(Default::default()),
+            Payload::ScreenSessionClosed(Default::default()),
+            Payload::ScreenSessionDetached(Default::default()),
+            Payload::ScreenSessionEnded(Default::default()),
+            Payload::ScreenVideoAttached(Default::default()),
+            Payload::ScreenVideoFrame(Default::default()),
+            Payload::ScreenCursor(Default::default()),
+            Payload::ScreenClipboardChanged(Default::default()),
+        ] {
+            // Worker-initiated only: a client sending them is refused as unsupported.
+            assert_eq!(required_scope(&worker), None);
+            assert_eq!(response_required_scope(&worker), Some(DeviceScope::Rpc));
+        }
+        assert_eq!(
+            request_id(&Payload::ScreenSessionOpen(wire::ScreenSessionOpen {
+                request_id: "r1".into(),
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("r1")
+        );
+    }
+
+    /// Screen frames are consumed right after the scope gate: an open with a foreign identity is
+    /// `principal_mismatch`, one on a device without the helper is `screen_unavailable` (with the
+    /// request id), a read-only lane is `scope_denied`, and a worker-only payload from a client
+    /// is `unsupported_payload`. None of them reach the request path.
+    #[tokio::test]
+    async fn screen_frames_pass_the_scope_gate_and_never_reach_the_request_path() {
+        use device_envelope::Payload;
+        let mut fixture = test_runtime();
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::ScreenSessionOpen(wire::ScreenSessionOpen {
+                    request_id: "open-1".into(),
+                    session_id: "scr".into(),
+                    client_instance_id: "someone-else".into(),
+                    transport_generation: 2,
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut fixture.remote_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: Some(ref id), .. }))
+                if code == "principal_mismatch" && id == "open-1"
+        ));
+
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::ScreenSessionOpen(wire::ScreenSessionOpen {
+                    request_id: "open-2".into(),
+                    session_id: "scr".into(),
+                    client_instance_id: "client-1".into(),
+                    transport_generation: 2,
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut fixture.remote_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: Some(ref id), .. }))
+                if code == "screen_unavailable" && id == "open-2"
+        ));
+
+        // Input carries no request_id and, with no helper, is refused without one.
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::ScreenInput(wire::ScreenInput {
+                    session_id: "scr".into(),
+                    holder_epoch: 1,
+                    event: None,
+                }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut fixture.remote_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: None, .. }))
+                if code == "screen_unavailable"
+        ));
+
+        fixture.runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                Payload::ScreenVideoFrame(Default::default()),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut fixture.remote_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: None, .. }))
+                if code == "unsupported_payload"
+        ));
+
+        let read_only = "relay-screen-read-only".to_string();
+        let mut read_only_rx = fixture
+            .runtime
+            .open_tailcat(&wire::DeviceTailcatGrant {
+                channel_id: read_only.clone(),
+                account_id: "account-1".into(),
+                client_instance_id: "client-1".into(),
+                transport_generation: 4,
+                scopes: vec![DeviceScope::SessionRead as i32],
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
+            })
+            .unwrap();
+        fixture.runtime.handle_tailcat_frame(
+            &read_only,
+            &request_envelope(
+                &read_only,
+                Payload::ScreenSessionOpen(wire::ScreenSessionOpen {
+                    request_id: "open-3".into(),
+                    client_instance_id: "client-1".into(),
+                    transport_generation: 4,
+                    ..Default::default()
+                }),
+            ),
+        );
+        assert!(matches!(
+            remote_envelope(&mut read_only_rx).await.payload,
+            Some(Payload::Error(DeviceError { ref code, request_id: Some(ref id), .. }))
+                if code == "scope_denied" && id == "open-3"
         ));
         fixture.runtime.close_tailcats();
         let _ = std::fs::remove_dir_all(&fixture.home);

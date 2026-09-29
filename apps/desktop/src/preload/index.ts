@@ -24,8 +24,10 @@ import type {
   DesktopLoginOptions,
   DesktopLoginProvider,
   DesktopNotification,
+  DesktopScreenEvent,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
+import { SCREEN_PORT_MESSAGE } from "../shared/desktop-bridge";
 import type { NativeEvent, NativeTransportBridge } from "../shared/native-transport";
 import { IPC, type Bootstrap } from "../shared/ipc";
 
@@ -260,6 +262,28 @@ const bridge: DesktopBridge = {
     // Rebuilt as plain data; main sanitizes every field again.
     ipcRenderer.send(IPC.browserAnnotatorSync, { guestId: Number(guestId), state: JSON.parse(JSON.stringify(state)) as unknown });
   },
+  // Remote screen tabs (plan 20260929-remote-desktop).
+  screenOpen(sessionId: string, daemonId: string) {
+    return ipcRenderer.invoke(IPC.screenOpen, { sessionId: String(sessionId), daemonId: String(daemonId) }).then((ok) => ok === true);
+  },
+  screenClose(sessionId: string) {
+    ipcRenderer.send(IPC.screenClose, { sessionId: String(sessionId) });
+  },
+  screenFocus(focused: boolean) {
+    ipcRenderer.send(IPC.screenFocus, focused === true);
+  },
+  screenImmersive(on: boolean) {
+    ipcRenderer.send(IPC.screenImmersive, on === true);
+  },
+  onScreenEvent(listener) {
+    return subscribe<DesktopScreenEvent>(IPC.screenEvent, listener);
+  },
 };
+// A session's MessagePort cannot cross the context bridge; the page receives it as a window message
+// (Electron's documented port hand-off), keyed by session id.
+ipcRenderer.on(IPC.screenPort, (event, sessionId: unknown) => {
+  if (typeof sessionId !== "string" || event.ports.length === 0) return;
+  window.postMessage({ type: SCREEN_PORT_MESSAGE, sessionId }, "*", event.ports);
+});
 
 contextBridge.exposeInMainWorld("cofluxDesktop", bridge);

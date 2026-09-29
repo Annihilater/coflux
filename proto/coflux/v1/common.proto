@@ -16,6 +16,12 @@ message DaemonInfo {
   // 热更新编排（plan 015）：在线连接的内存态版本，供 web 展示；离线设备无此信息（空串）。
   string worker_version = 6;
   string supervisor_version = 7;
+  // Capability names the online daemon declared at authentication (DaemonAuth.capabilities), as
+  // the server holds them for the connection; empty for an offline device and for old servers.
+  // Clients gate device-side features on a name (for example `screen_v1`, the remote screen helper
+  // of plan 20260929-remote-desktop), never on a version. The server fills it on every DaemonInfo
+  // it emits, so a client may replace its copy of the device wholesale on each daemonUpdated.
+  repeated string capabilities = 8;
 }
 
 message Project {

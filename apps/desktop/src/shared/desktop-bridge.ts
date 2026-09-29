@@ -105,6 +105,8 @@ export type DesktopCommand =
   | `select-tab-${DesktopDigit}`
   /** 文件 → 新建浏览器标签页 (plan 20260924-desktop-browser-tab); no keyboard shortcut. */
   | "new-browser-tab"
+  /** 文件 → 新建屏幕标签页 (plan 20260929-remote-desktop); no keyboard shortcut. */
+  | "new-screen-tab"
   | "toggle-help"
   | "open-settings"
   | "toggle-palette";
@@ -120,6 +122,40 @@ export type DesktopNotification = {
 
 /** Where a clicked attention notification lands: the waiting terminal, else its workspace. */
 export type DesktopFocusTarget = Pick<DesktopNotification, "workspaceId" | "taskId">;
+
+/**
+ * Remote screen tabs (plan 20260929-remote-desktop). A session's two device lanes (control and
+ * video, RPC scope) are opened and owned by the main process under an identity of this app run's
+ * own; the renderer encodes and decodes the DeviceEnvelopes itself and talks to main over a
+ * MessagePort so video frames cross as transferred buffers, never structured clones. Main also
+ * polls the local clipboard while asked to and writes it on request, and switches its menu
+ * accelerators off while the picture has focus.
+ */
+export type DesktopScreenLaneKind = "control" | "video";
+export type DesktopScreenLane = {
+  channelId: string;
+  /** The principal the worker checks ScreenSessionOpen against. */
+  clientInstanceId: string;
+  /** Decimal string of the lane's transport generation. */
+  generation: string;
+};
+/** What main posts on the session's port. */
+export type DesktopScreenPortMessage =
+  | { type: "lanes"; control: DesktopScreenLane; video: DesktopScreenLane }
+  | { type: "lanes-failed"; message: string }
+  | { type: "frame"; lane: DesktopScreenLaneKind; data: ArrayBuffer }
+  | { type: "closed"; lane: DesktopScreenLaneKind }
+  | { type: "clipboard"; text?: string; png?: ArrayBuffer };
+/** What the renderer posts on the session's port. */
+export type DesktopScreenPortRequest =
+  | { type: "send"; lane: DesktopScreenLaneKind; data: ArrayBuffer }
+  /** Open the lanes (again) — after `closed`, when the device is reachable again. */
+  | { type: "reopen" }
+  | { type: "clipboard-set"; text?: string; png?: ArrayBuffer }
+  | { type: "clipboard-watch"; on: boolean };
+/** The window message the preload posts to the page with the session's port in `ports[0]`. */
+export const SCREEN_PORT_MESSAGE = "coflux-screen-port";
+export type DesktopScreenEvent = { kind: "fullscreen"; on: boolean };
 
 /**
  * Built-in browser tabs (plan 20260924-desktop-browser-tab). Whether a workspace's `localhost` is
@@ -438,6 +474,18 @@ export type DesktopBridge = {
   onBrowserEvent(listener: (event: DesktopBrowserEvent) => void): () => void;
   /** Browser annotations: what the page should show and do; main instruments the guest on demand. */
   browserAnnotatorSync(guestId: number, state: DesktopAnnotatorState): void;
+  /**
+   * Remote screen tabs (plan 20260929-remote-desktop). `screenOpen` makes main own a session's two
+   * lanes and hand the page a MessagePort (a `SCREEN_PORT_MESSAGE` window message with the port);
+   * resolves false when this build has no native transport. `screenClose` drops the lanes and the port.
+   */
+  screenOpen(sessionId: string, daemonId: string): Promise<boolean>;
+  screenClose(sessionId: string): void;
+  /** The picture has keyboard focus: every menu accelerator (⌘Q, ⇧⌘W, ⌘R, ⌃⌘F, Edit) yields to it. */
+  screenFocus(focused: boolean): void;
+  /** Immersive mode: the window goes full screen (true) or back (false). */
+  screenImmersive(on: boolean): void;
+  onScreenEvent(listener: (event: DesktopScreenEvent) => void): () => void;
 };
 
 /** 一个自定义端点的定义。**不含凭据**——它单独走 `apiKey` 字段，且只往主进程去。 */

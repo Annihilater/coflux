@@ -71,6 +71,16 @@ pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
 pub const MAX_DEVICE_FRAME_BYTES: usize = 30 * 1024 * 1024;
 /// 中心 checkpoint 的 ANSI snapshot 上限。
 pub const MAX_SESSION_CHECKPOINT_BYTES: usize = 512 * 1024;
+/// Remote screen (plan 20260929-remote-desktop): the capability name a device advertises when its
+/// worker reached the `coflux-screen` helper. Same spelling as the TS `SCREEN_CAPABILITY`.
+pub const SCREEN_CAPABILITY: &str = "screen_v1";
+/// Version of the worker ⟷ coflux-screen hello (`ScreenHelperHello.protocol_version`).
+pub const SCREEN_HELPER_PROTOCOL_VERSION: u32 = 1;
+/// Largest `ScreenVideoFrame.data` in one message; larger frames are chunked.
+pub const SCREEN_VIDEO_CHUNK_BYTES: usize = 256 * 1024;
+/// Records of one screen channel the worker keeps queued to the transport helper: a quarter of
+/// the helper's shared 256-record queue, the loopback tunnel's budget.
+pub const SCREEN_CHANNEL_RECORD_BUDGET: usize = 64;
 
 #[cfg(test)]
 mod wire_tests;

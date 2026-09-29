@@ -24,6 +24,7 @@ mod local_auth;
 mod observed;
 mod ops;
 mod ports;
+mod screen;
 mod secret;
 mod session_ledger;
 mod tailcat;
@@ -153,6 +154,10 @@ const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
 /// DAEMON_CAPABILITY_EXECUTOR_SETTINGS in apps/server.
 const CAPABILITY_EXECUTOR_SETTINGS: &str = "executor_settings_v1";
 
+/// The remote screen bridge (plan 20260929-remote-desktop), when this worker has one. Read by
+/// every server handshake so the capability follows the helper's hello, not the worker version.
+static SCREEN_BRIDGE: std::sync::OnceLock<Arc<screen::Bridge>> = std::sync::OnceLock::new();
+
 fn daemon_capabilities() -> Vec<String> {
     let mut capabilities = vec![
         CAPABILITY_PREPARED_EXECUTE.to_string(),
@@ -162,6 +167,11 @@ fn daemon_capabilities() -> Vec<String> {
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());
+    }
+    // Advertised only while the helper answered its hello on a live connection: clients offer
+    // the 「屏幕」 tab for this device on exactly that condition.
+    if SCREEN_BRIDGE.get().is_some_and(|bridge| bridge.ready()) {
+        capabilities.push(coflux_protocol::SCREEN_CAPABILITY.to_string());
     }
     capabilities
 }
@@ -668,6 +678,22 @@ async fn worker_main() {
         cfg.clone(),
     );
     let tailcat = tailcat::TailcatRuntime::new(device.clone());
+
+    // The remote screen helper (plan 20260929-remote-desktop): only where Coflux Desktop started
+    // this runtime and shipped `coflux-screen`. Connected (or started, detached) now so the first
+    // server handshake already carries `screen_v1` when the helper answers in time.
+    if let Some(helper) = screen::helper_path() {
+        let bridge = screen::Bridge::start(
+            helper,
+            std::env::var(screen::HELPER_VERSION_ENV).ok(),
+            cfg.home.clone(),
+            cfg.worker_version.clone(),
+            device.screen_outlet(),
+        )
+        .await;
+        device.attach_screen(bridge.clone());
+        let _ = SCREEN_BRIDGE.set(bridge);
+    }
 
     // The daemon's own executor host (plan 20260921-executor-daemon-host). Started only when the
     // service unit recorded a JS runtime and this is macOS; otherwise this machine simply has no

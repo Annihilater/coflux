@@ -198,6 +198,13 @@ interface DaemonInfoData {
    * 离线设备（来自 devices 表）无此信息——版本不入库，纯在线连接内存态，空串即"未知"。 */
   workerVersion: string;
   supervisorVersion: string;
+  /** The capability names the online connection declared (plan 20260929-remote-desktop carries them
+   * to clients so a device-side feature such as the remote screen is offered only where its helper
+   * answered). Required, not optional, so that every hand-written DaemonInfo literal must decide it:
+   * the client replaces its copy of the device wholesale on daemonUpdated, and one emission that
+   * omitted it would make the feature vanish until the next handshake. Empty for offline rows.
+   * A mutable array: the value is handed to protobuf-es as a nested MessageInit. */
+  capabilities: string[];
 }
 
 /** agent presence 条目（plan 073）：不用生成的 SessionAgentRef 消息类型（无需 $typeName）——
@@ -911,7 +918,7 @@ export class Hub {
     for (const dev of await this.store.listDevices(accountId)) {
       if (seen.has(dev.id)) continue;
       seen.add(dev.id);
-      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false, workerVersion: "", supervisorVersion: "" });
+      list.push(offlineDaemonInfo(dev));
     }
     return list;
   }
@@ -962,6 +969,7 @@ export class Hub {
         host: device.host,
         platform: device.platform,
         online: true,
+        capabilities: [...new Set(capabilities)],
       };
       const daemon: DaemonConn = { ws: conn.ws, info, accountId: device.accountId, arch, capabilities: new Set(capabilities) };
       const prev = this.daemons.get(info.daemonId);
@@ -2419,7 +2427,7 @@ export class Hub {
         }
         const registered = await this.registerDaemonConn(
           conn,
-          { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion },
+          { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion, capabilities: value.capabilities ?? [] },
           device.accountId,
           value.arch,
           { case: "daemonAuthed", value: { daemonId: device.id, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
@@ -3008,7 +3016,7 @@ export class Hub {
       const device = await this.store.getDevice(daemonId);
       if (this.shuttingDown) return;
       if (device && !device.revoked) {
-        this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false, workerVersion: "", supervisorVersion: "" } } });
+        this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: offlineDaemonInfo(device) } });
       } else {
         this.broadcast(accountId, { case: "daemonRemoved", value: { daemonId } });
       }
@@ -3407,6 +3415,52 @@ export class Hub {
         });
         break;
       }
+      case "directoryWorkspaceEnsure": {
+        // The device's canonical directory workspace without a task (plan 20260929-remote-desktop):
+        // a screen tab needs a workspace to live in but no shell. Same device lock, same idempotent
+        // reuse rule and the same path source as terminalCreate; answered to this connection only.
+        const value = msg.payload.value;
+        const requestId = value.requestId;
+        const answer = (result: { ok: true; workspaceId: string } | { ok: false; error: string }) =>
+          this.sendClient(client, { case: "directoryWorkspaceEnsured", value: result.ok ? { requestId, ok: true, workspaceId: result.workspaceId, error: "" } : { requestId, ok: false, workspaceId: "", error: result.error } });
+        const d = this.daemons.get(value.daemonId);
+        if (!d || d.accountId !== client.accountId) return void answer({ ok: false, error: "daemon 不在线或不属于本账号" });
+        if (!value.path.trim()) return void answer({ ok: false, error: "工作区目录路径为空" });
+        await this.withDeviceEffectGuard(value.daemonId, async (effectGuard) => {
+          const result = await this.store.transaction(async (tx): Promise<{ ok: false; error: string } | { ok: true; workspace: Workspace; createdWorkspace: boolean }> => {
+            const device = await tx.claimActiveDevice(value.daemonId, client.accountId!);
+            if (!device) return { ok: false, error: "daemon 不存在、已撤销或不属于本账号" };
+            let workspace: Workspace | undefined = (await tx.listWorkspacesByDaemon(value.daemonId))
+              .filter((candidate) => candidate.accountId === client.accountId && isDirWorkspace(candidate))
+              .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0];
+            let createdWorkspace = false;
+            if (!workspace) {
+              workspace = create(WorkspaceSchema, {
+                id: randomUUID(),
+                accountId: client.accountId!,
+                daemonId: value.daemonId,
+                projectId: "",
+                name: "~",
+                path: value.path,
+                branch: "",
+                isMain: false,
+                createdAt: Date.now(),
+              });
+              await tx.createWorkspace(workspace);
+              createdWorkspace = true;
+            }
+            return { ok: true, workspace, createdWorkspace };
+          });
+          if (!result.ok) return void answer({ ok: false, error: result.error });
+          if (effectGuard.cancelled) return void answer({ ok: false, error: "设备已删除，工作区创建已取消" });
+          if (result.createdWorkspace) {
+            this.broadcast(result.workspace.accountId, { case: "workspaceCreated", value: { workspace: result.workspace } });
+          }
+          answer({ ok: true, workspaceId: result.workspace.id });
+          if (result.createdWorkspace) await this.pushWorkspaceList(result.workspace.daemonId);
+        });
+        break;
+      }
       case "deviceSetName": {
         const value = msg.payload.value;
         await this.withDeviceEffectGuard(value.daemonId, async (deviceEffectGuard) => {
@@ -3417,13 +3471,13 @@ export class Hub {
           if (!trimmedName) return;
           const updated = await this.store.updateDeviceName(device.id, trimmedName);
           if (!updated || deviceEffectGuard.cancelled) return;
-          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: { daemonId: updated.id, name: updated.name, host: updated.host, platform: updated.platform, online: this.isDaemonOnline(updated.id), workerVersion: "", supervisorVersion: "" } } });
-          // 若设备当前在线，更新内存并即时下发
+          // The live connection's info (versions, capabilities) must not be blanked by a rename:
+          // the client replaces the device wholesale on daemonUpdated.
           const d = this.daemons.get(updated.id);
-          if (d) {
-            d.info.name = trimmedName;
-            this.sendDaemon(d, { case: "daemonSetName", value: { name: trimmedName } });
-          }
+          if (d) d.info.name = trimmedName;
+          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: d ? { ...d.info } : offlineDaemonInfo(updated) } });
+          // 若设备当前在线，即时下发
+          if (d) this.sendDaemon(d, { case: "daemonSetName", value: { name: trimmedName } });
         });
         break;
       }
@@ -4121,7 +4175,7 @@ export class Hub {
     if (!accountId) return { ok: false, reason: "rejected" };
     const registered = await this.registerDaemonConn(
       conn,
-      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion },
+      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion, capabilities: [...info.capabilities] },
       accountId,
       info.arch,
       { case: "daemonEnrolled", value: { daemonId, deviceToken, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
@@ -5071,6 +5125,11 @@ function validControlId(value: string): boolean {
     const code = char.charCodeAt(0);
     return code < 32 || code === 127;
   });
+}
+
+/** A DaemonInfo for a device row with no live connection: no versions, no capabilities. */
+function offlineDaemonInfo(device: { id: DaemonId; name: string; host: string; platform: string }): DaemonInfoData {
+  return { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: false, workerVersion: "", supervisorVersion: "", capabilities: [] };
 }
 
 /** 握手宣告的能力名（plan 091）：有界、无控制字符；名单外的名字原样保存（前向兼容，门禁只看已知名）。

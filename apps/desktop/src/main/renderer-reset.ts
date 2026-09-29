@@ -46,6 +46,8 @@ export type RendererResetTargets = {
    * the partitions prepared for the old page go with it. Idempotent like the rest.
    */
   resetBrowserHost?: () => void;
+  /** Remote screen tabs (plan 20260929-remote-desktop): the old page's sessions, lanes and ports. */
+  resetScreenHost?: () => void;
 };
 
 /** A committed navigation of the window's own `webContents`. */
@@ -82,5 +84,6 @@ export function createRendererResetListener(
     targets.resetExecutorChannel();
     targets.setBadge(0);
     targets.resetBrowserHost?.();
+    targets.resetScreenHost?.();
   };
 }

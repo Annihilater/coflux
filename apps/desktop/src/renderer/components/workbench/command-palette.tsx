@@ -50,6 +50,8 @@ export type NavigationPaletteProps = {
   onOpenDevice: (daemonId: string) => void;
   /** 新建浏览器标签页 (plan 20260924-desktop-browser-tab); offered only while a workspace is on screen. */
   onNewBrowserTab?: () => void;
+  /** 打开屏幕 (plan 20260929-remote-desktop); offered only for a capable remote device's workspace. */
+  onNewScreenTab?: () => void;
 };
 
 /** The tab row. An Actions tab belongs here later; nothing of it is built now. */
@@ -225,6 +227,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
         sessionCheckpoints: state.sessionCheckpoints,
         current: props.current,
         canOpenBrowserTab: Boolean(props.onNewBrowserTab && props.current.workspaceId),
+        canOpenScreenTab: Boolean(props.onNewScreenTab && props.current.workspaceId),
       });
       recentRef.current = readRecentPlaces(props.recentStore);
     } else {
@@ -261,6 +264,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
     else if (target.kind === "terminal") props.onOpenTerminal(target.workspaceId, target.taskId);
     else if (target.kind === "device") props.onOpenDevice(target.daemonId);
     else if (target.action === "new-browser-tab") props.onNewBrowserTab?.();
+    else if (target.action === "new-screen-tab") props.onNewScreenTab?.();
   }
 
   return (

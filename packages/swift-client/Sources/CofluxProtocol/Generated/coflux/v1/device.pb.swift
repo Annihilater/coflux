@@ -606,6 +606,201 @@ public enum Coflux_V1_AnnotationImageKind: SwiftProtobuf.Enum, Swift.CaseIterabl
 
 }
 
+public enum Coflux_V1_ScreenVideoCodec: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case h264 // = 1
+  case hevc // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .h264
+    case 2: self = .hevc
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .h264: return 1
+    case .hevc: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ScreenVideoCodec] = [
+    .unspecified,
+    .h264,
+    .hevc,
+  ]
+
+}
+
+public enum Coflux_V1_ScreenSessionPhase: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// Waking displays, creating the virtual display, configuring mirroring.
+  case starting // = 1
+
+  /// Capture is running; frames flow as credit allows.
+  case streaming // = 2
+
+  /// The holder paused the stream (background tab); the virtual display stays.
+  case paused // = 3
+
+  /// Screen Recording is not granted on the remote: no picture until it is.
+  case noPermission // = 4
+
+  /// The remote login session is locked: no picture, remote unlock is unsupported.
+  case locked // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .starting
+    case 2: self = .streaming
+    case 3: self = .paused
+    case 4: self = .noPermission
+    case 5: self = .locked
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .starting: return 1
+    case .streaming: return 2
+    case .paused: return 3
+    case .noPermission: return 4
+    case .locked: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ScreenSessionPhase] = [
+    .unspecified,
+    .starting,
+    .streaming,
+    .paused,
+    .noPermission,
+    .locked,
+  ]
+
+}
+
+public enum Coflux_V1_ScreenPointerAction: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case move // = 1
+  case down // = 2
+  case up // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .move
+    case 2: self = .down
+    case 3: self = .up
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .move: return 1
+    case .down: return 2
+    case .up: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ScreenPointerAction] = [
+    .unspecified,
+    .move,
+    .down,
+    .up,
+  ]
+
+}
+
+/// Modifier bits of ScreenKeyEvent / ScreenPointerEvent / ScreenScrollEvent.modifiers.
+public enum Coflux_V1_ScreenModifier: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case shift // = 1
+  case control // = 2
+  case option // = 4
+  case command // = 8
+  case capsLock // = 16
+  case function // = 32
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .shift
+    case 2: self = .control
+    case 4: self = .option
+    case 8: self = .command
+    case 16: self = .capsLock
+    case 32: self = .function
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .shift: return 1
+    case .control: return 2
+    case .option: return 4
+    case .command: return 8
+    case .capsLock: return 16
+    case .function: return 32
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ScreenModifier] = [
+    .unspecified,
+    .shift,
+    .control,
+    .option,
+    .command,
+    .capsLock,
+    .function,
+  ]
+
+}
+
 /// Native Tailcat candidate transport. These messages are distinct from legacy
 /// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
 public struct Coflux_V1_DeviceTailcatIdentity: Sendable {
@@ -3453,6 +3648,873 @@ public struct Coflux_V1_DeviceAnnotationHandOffResult: Sendable {
   public init() {}
 }
 
+/// TCC state of the helper's process tree on the remote Mac. Without accessibility the picture is
+/// read-only (input is ignored); without screen_recording there is no picture.
+public struct Coflux_V1_ScreenPermissions: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var screenRecording: Bool = false
+
+  public var accessibility: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The virtual display as applied on the remote: points × scale = pixels. Pointer coordinates in
+/// ScreenInput are in these points; video frames are in these pixels.
+public struct Coflux_V1_ScreenDisplayGeometry: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var widthPoints: UInt32 = 0
+
+  public var heightPoints: UInt32 = 0
+
+  /// 1 or 2 (HiDPI).
+  public var scale: UInt32 = 0
+
+  public var widthPixels: UInt32 = 0
+
+  public var heightPixels: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The full state of a session: carried in ScreenSessionOpened and, on every change, in
+/// ScreenSessionState. `error` is diagnostic text for the last failure, if any.
+public struct Coflux_V1_ScreenSessionStatus: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var phase: Coflux_V1_ScreenSessionPhase = .unspecified
+
+  public var permissions: Coflux_V1_ScreenPermissions {
+    get {_permissions ?? Coflux_V1_ScreenPermissions()}
+    set {_permissions = newValue}
+  }
+  /// Returns true if `permissions` has been explicitly set.
+  public var hasPermissions: Bool {self._permissions != nil}
+  /// Clears the value of `permissions`. Subsequent reads from it will return its default value.
+  public mutating func clearPermissions() {self._permissions = nil}
+
+  public var locked: Bool = false
+
+  public var display: Coflux_V1_ScreenDisplayGeometry {
+    get {_display ?? Coflux_V1_ScreenDisplayGeometry()}
+    set {_display = newValue}
+  }
+  /// Returns true if `display` has been explicitly set.
+  public var hasDisplay: Bool {self._display != nil}
+  /// Clears the value of `display`. Subsequent reads from it will return its default value.
+  public mutating func clearDisplay() {self._display = nil}
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _permissions: Coflux_V1_ScreenPermissions? = nil
+  fileprivate var _display: Coflux_V1_ScreenDisplayGeometry? = nil
+  fileprivate var _error: String? = nil
+}
+
+/// client→worker (RPC), CONTROL lane: open or reattach a session.
+public struct Coflux_V1_ScreenSessionOpen: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  /// Client-chosen, stable for the life of the tab across reconnects and app restarts, so that a
+  /// reconnect reattaches to the same remote session and virtual display.
+  public var sessionID: String = String()
+
+  public var clientInstanceID: String = String()
+
+  public var transportGeneration: UInt64 = 0
+
+  /// Preempt the current holder.
+  public var force: Bool = false
+
+  /// The size of the tab in points and the local scale; the remote virtual display follows them.
+  public var widthPoints: UInt32 = 0
+
+  public var heightPoints: UInt32 = 0
+
+  public var scale: UInt32 = 0
+
+  /// The client's decoders, most preferred first.
+  public var codecs: [Coflux_V1_ScreenVideoCodec] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), CONTROL lane. On ok the session is held by this channel with holder_epoch
+/// and every later control request must carry that epoch. Codes on failure: "held" (another client
+/// holds it and force was not set), "unsupported_codec", "no_helper" (the helper could not be
+/// started or reached), "no_display" (the virtual display could not be created), "invalid".
+public struct Coflux_V1_ScreenSessionOpened: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String {
+    get {_storage._requestID}
+    set {_uniqueStorage()._requestID = newValue}
+  }
+
+  public var sessionID: String {
+    get {_storage._sessionID}
+    set {_uniqueStorage()._sessionID = newValue}
+  }
+
+  public var ok: Bool {
+    get {_storage._ok}
+    set {_uniqueStorage()._ok = newValue}
+  }
+
+  public var error: String {
+    get {_storage._error ?? String()}
+    set {_uniqueStorage()._error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {_storage._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {_uniqueStorage()._error = nil}
+
+  public var code: String {
+    get {_storage._code}
+    set {_uniqueStorage()._code = newValue}
+  }
+
+  public var holderEpoch: UInt64 {
+    get {_storage._holderEpoch}
+    set {_uniqueStorage()._holderEpoch = newValue}
+  }
+
+  public var codec: Coflux_V1_ScreenVideoCodec {
+    get {_storage._codec}
+    set {_uniqueStorage()._codec = newValue}
+  }
+
+  public var status: Coflux_V1_ScreenSessionStatus {
+    get {_storage._status ?? Coflux_V1_ScreenSessionStatus()}
+    set {_uniqueStorage()._status = newValue}
+  }
+  /// Returns true if `status` has been explicitly set.
+  public var hasStatus: Bool {_storage._status != nil}
+  /// Clears the value of `status`. Subsequent reads from it will return its default value.
+  public mutating func clearStatus() {_uniqueStorage()._status = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// worker→client (RPC), CONTROL lane: the session's state changed (permissions, lock, display
+/// geometry, phase).
+public struct Coflux_V1_ScreenSessionState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var status: Coflux_V1_ScreenSessionStatus {
+    get {_status ?? Coflux_V1_ScreenSessionStatus()}
+    set {_status = newValue}
+  }
+  /// Returns true if `status` has been explicitly set.
+  public var hasStatus: Bool {self._status != nil}
+  /// Clears the value of `status`. Subsequent reads from it will return its default value.
+  public mutating func clearStatus() {self._status = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _status: Coflux_V1_ScreenSessionStatus? = nil
+}
+
+/// client→worker (RPC), CONTROL lane: end the session (the tab was closed). The virtual display is
+/// removed and the remote's previous display arrangement restored.
+public struct Coflux_V1_ScreenSessionClose: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), CONTROL lane.
+public struct Coflux_V1_ScreenSessionClosed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var sessionID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
+/// client→worker (RPC), CONTROL lane: the tab changed size; the virtual display follows. resize_seq
+/// starts at 1 and is monotonic per holder; a smaller seq is stale and ignored. The new geometry is
+/// reported back in ScreenSessionState and the next frame is a keyframe at the new size.
+public struct Coflux_V1_ScreenSessionResize: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var resizeSeq: UInt64 = 0
+
+  public var widthPoints: UInt32 = 0
+
+  public var heightPoints: UInt32 = 0
+
+  public var scale: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (RPC), CONTROL lane: stop capturing (background tab). The virtual display, the
+/// mirror and the power assertions stay so remote windows are not reshuffled.
+public struct Coflux_V1_ScreenSessionPause: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (RPC), CONTROL lane: capture again; the next frame is a keyframe.
+public struct Coflux_V1_ScreenSessionResume: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), CONTROL lane: another client took the session over (「已被其它客户端接管」).
+/// The virtual display now belongs to the new holder; this channel's epoch is dead.
+public struct Coflux_V1_ScreenSessionDetached: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var reason: String {
+    get {_reason ?? String()}
+    set {_reason = newValue}
+  }
+  /// Returns true if `reason` has been explicitly set.
+  public var hasReason: Bool {self._reason != nil}
+  /// Clears the value of `reason`. Subsequent reads from it will return its default value.
+  public mutating func clearReason() {self._reason = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _reason: String? = nil
+}
+
+/// worker→client (RPC), CONTROL lane: the helper ended the session on its own: the orphan grace
+/// expired, the helper is stopping, or the session was closed from another channel. Terminal.
+public struct Coflux_V1_ScreenSessionEnded: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (RPC), VIDEO lane: bind this channel as the session's video sink and grant the
+/// initial credit. Replaces any previous video lane of the session; the next frame is a keyframe.
+public struct Coflux_V1_ScreenVideoAttach: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var creditBytes: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), VIDEO lane.
+public struct Coflux_V1_ScreenVideoAttached: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
+/// client→worker (RPC), VIDEO lane: return credit for frame bytes handed to the decoder.
+public struct Coflux_V1_ScreenVideoCredit: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var bytes: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (RPC), VIDEO lane: the decoder needs a keyframe (after a decode error, a reconnect
+/// or a discarded frame).
+public struct Coflux_V1_ScreenKeyframeRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), VIDEO lane: one encoded frame, or one chunk of it. width/height are the
+/// coded size and are set on every chunk. pts_us is the capture time in microseconds on the
+/// remote's monotonic clock, for pacing only.
+public struct Coflux_V1_ScreenVideoFrame: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var frameSeq: UInt64 = 0
+
+  public var keyframe: Bool = false
+
+  public var ptsUs: UInt64 = 0
+
+  public var widthPixels: UInt32 = 0
+
+  public var heightPixels: UInt32 = 0
+
+  public var codec: Coflux_V1_ScreenVideoCodec = .unspecified
+
+  public var data: Data = Data()
+
+  public var last: Bool = false
+
+  /// Position of this chunk within the frame (0-based) and the frame's chunk count, so a receiver
+  /// detects a missing chunk instead of assembling a frame with a hole: any gap discards the frame
+  /// and asks for a keyframe. `last` == (chunk_index + 1 == chunk_count).
+  public var chunkIndex: UInt32 = 0
+
+  public var chunkCount: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A key by physical position: `code` is the DOM KeyboardEvent.code ("KeyA", "MetaLeft", "Digit1",
+/// "ArrowUp"…), mapped to a macOS virtual key code on the remote, so neither side's layout or input
+/// method interferes.
+public struct Coflux_V1_ScreenKeyEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var code: String = String()
+
+  public var down: Bool = false
+
+  public var modifiers: UInt32 = 0
+
+  /// An auto-repeat of a held key (DOM KeyboardEvent.repeat); the remote posts it as an autorepeat
+  /// key-down (kCGKeyboardEventAutorepeat) so held arrows and Delete repeat as they would locally.
+  public var `repeat`: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Pointer in display points, origin top-left of the virtual display. button: 0 left, 1 right,
+/// 2 middle, 3+ other. click_count is macOS's click count (1 single, 2 double…).
+public struct Coflux_V1_ScreenPointerEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var action: Coflux_V1_ScreenPointerAction = .unspecified
+
+  public var x: Double = 0
+
+  public var y: Double = 0
+
+  public var button: UInt32 = 0
+
+  public var modifiers: UInt32 = 0
+
+  public var clickCount: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Scroll at a position, deltas in points (precise = trackpad pixel deltas) or lines.
+public struct Coflux_V1_ScreenScrollEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var x: Double = 0
+
+  public var y: Double = 0
+
+  public var deltaX: Double = 0
+
+  public var deltaY: Double = 0
+
+  public var modifiers: UInt32 = 0
+
+  public var precise: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (RPC), CONTROL lane. Ignored without accessibility on the remote.
+public struct Coflux_V1_ScreenInput: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var event: Coflux_V1_ScreenInput.OneOf_Event? = nil
+
+  public var key: Coflux_V1_ScreenKeyEvent {
+    get {
+      if case .key(let v)? = event {return v}
+      return Coflux_V1_ScreenKeyEvent()
+    }
+    set {event = .key(newValue)}
+  }
+
+  public var pointer: Coflux_V1_ScreenPointerEvent {
+    get {
+      if case .pointer(let v)? = event {return v}
+      return Coflux_V1_ScreenPointerEvent()
+    }
+    set {event = .pointer(newValue)}
+  }
+
+  public var scroll: Coflux_V1_ScreenScrollEvent {
+    get {
+      if case .scroll(let v)? = event {return v}
+      return Coflux_V1_ScreenScrollEvent()
+    }
+    set {event = .scroll(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Event: Equatable, Sendable {
+    case key(Coflux_V1_ScreenKeyEvent)
+    case pointer(Coflux_V1_ScreenPointerEvent)
+    case scroll(Coflux_V1_ScreenScrollEvent)
+
+  }
+
+  public init() {}
+}
+
+/// The remote cursor image (PNG, sized in points at the remote scale) and its hotspot.
+public struct Coflux_V1_ScreenCursorShape: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var png: Data = Data()
+
+  public var widthPoints: UInt32 = 0
+
+  public var heightPoints: UInt32 = 0
+
+  public var hotspotX: Double = 0
+
+  public var hotspotY: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (RPC), CONTROL lane: the remote cursor moved or changed; `shape` is present only
+/// when it changed. x/y are display points. The client draws it locally so pointer feel does not
+/// wait for video.
+public struct Coflux_V1_ScreenCursor: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var x: Double = 0
+
+  public var y: Double = 0
+
+  public var visible: Bool = false
+
+  public var shape: Coflux_V1_ScreenCursorShape {
+    get {_shape ?? Coflux_V1_ScreenCursorShape()}
+    set {_shape = newValue}
+  }
+  /// Returns true if `shape` has been explicitly set.
+  public var hasShape: Bool {self._shape != nil}
+  /// Clears the value of `shape`. Subsequent reads from it will return its default value.
+  public mutating func clearShape() {self._shape = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _shape: Coflux_V1_ScreenCursorShape? = nil
+}
+
+public struct Coflux_V1_ScreenClipboardContent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var content: Coflux_V1_ScreenClipboardContent.OneOf_Content? = nil
+
+  public var text: String {
+    get {
+      if case .text(let v)? = content {return v}
+      return String()
+    }
+    set {content = .text(newValue)}
+  }
+
+  public var png: Data {
+    get {
+      if case .png(let v)? = content {return v}
+      return Data()
+    }
+    set {content = .png(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Content: Equatable, Sendable {
+    case text(String)
+    case png(Data)
+
+  }
+
+  public init() {}
+}
+
+/// client→worker (RPC), CONTROL lane: the local clipboard changed; put it on the remote pasteboard.
+public struct Coflux_V1_ScreenClipboardSet: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var holderEpoch: UInt64 = 0
+
+  public var content: Coflux_V1_ScreenClipboardContent {
+    get {_content ?? Coflux_V1_ScreenClipboardContent()}
+    set {_content = newValue}
+  }
+  /// Returns true if `content` has been explicitly set.
+  public var hasContent: Bool {self._content != nil}
+  /// Clears the value of `content`. Subsequent reads from it will return its default value.
+  public mutating func clearContent() {self._content = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _content: Coflux_V1_ScreenClipboardContent? = nil
+}
+
+/// worker→client (RPC), CONTROL lane: the remote pasteboard changed.
+public struct Coflux_V1_ScreenClipboardChanged: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var sessionID: String = String()
+
+  public var content: Coflux_V1_ScreenClipboardContent {
+    get {_content ?? Coflux_V1_ScreenClipboardContent()}
+    set {_content = newValue}
+  }
+  /// Returns true if `content` has been explicitly set.
+  public var hasContent: Bool {self._content != nil}
+  /// Clears the value of `content`. Subsequent reads from it will return its default value.
+  public mutating func clearContent() {self._content = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _content: Coflux_V1_ScreenClipboardContent? = nil
+}
+
+public struct Coflux_V1_ScreenHelperHello: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var protocolVersion: UInt32 = 0
+
+  public var workerVersion: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ScreenHelperHelloAck: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var protocolVersion: UInt32 = 0
+
+  public var helperVersion: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  public var permissions: Coflux_V1_ScreenPermissions {
+    get {_permissions ?? Coflux_V1_ScreenPermissions()}
+    set {_permissions = newValue}
+  }
+  /// Returns true if `permissions` has been explicitly set.
+  public var hasPermissions: Bool {self._permissions != nil}
+  /// Clears the value of `permissions`. Subsequent reads from it will return its default value.
+  public mutating func clearPermissions() {self._permissions = nil}
+
+  /// A session survives from before this worker connection (a worker restart).
+  public var sessionActive: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+  fileprivate var _permissions: Coflux_V1_ScreenPermissions? = nil
+}
+
+public struct Coflux_V1_ScreenHelperChannelClosed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var channelID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→helper: this helper is not the one the runtime ships (typically after a desktop update).
+/// The helper stops listening at once — closes and unlinks its socket so the current binary can take
+/// the path — while the connection this arrived on stays up. Without `tear_down` (a compatible
+/// helper of another version) it keeps serving the session it holds over that connection and exits
+/// once that session ends (close or orphan grace) or at once when it holds none; the worker's normal
+/// reconnect then starts the shipped binary. With `tear_down` (a protocol the worker cannot serve
+/// through) it ends its session immediately — virtual display removed, arrangement restored, no
+/// grace — and exits. Either way two helpers never hold virtual displays at the same time.
+public struct Coflux_V1_ScreenHelperRetire: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var tearDown: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_ScreenHelperFrame: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var payload: Coflux_V1_ScreenHelperFrame.OneOf_Payload? = nil
+
+  public var hello: Coflux_V1_ScreenHelperHello {
+    get {
+      if case .hello(let v)? = payload {return v}
+      return Coflux_V1_ScreenHelperHello()
+    }
+    set {payload = .hello(newValue)}
+  }
+
+  public var helloAck: Coflux_V1_ScreenHelperHelloAck {
+    get {
+      if case .helloAck(let v)? = payload {return v}
+      return Coflux_V1_ScreenHelperHelloAck()
+    }
+    set {payload = .helloAck(newValue)}
+  }
+
+  public var channelClosed: Coflux_V1_ScreenHelperChannelClosed {
+    get {
+      if case .channelClosed(let v)? = payload {return v}
+      return Coflux_V1_ScreenHelperChannelClosed()
+    }
+    set {payload = .channelClosed(newValue)}
+  }
+
+  public var envelope: Coflux_V1_DeviceEnvelope {
+    get {
+      if case .envelope(let v)? = payload {return v}
+      return Coflux_V1_DeviceEnvelope()
+    }
+    set {payload = .envelope(newValue)}
+  }
+
+  public var retire: Coflux_V1_ScreenHelperRetire {
+    get {
+      if case .retire(let v)? = payload {return v}
+      return Coflux_V1_ScreenHelperRetire()
+    }
+    set {payload = .retire(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Payload: Equatable, Sendable {
+    case hello(Coflux_V1_ScreenHelperHello)
+    case helloAck(Coflux_V1_ScreenHelperHelloAck)
+    case channelClosed(Coflux_V1_ScreenHelperChannelClosed)
+    case envelope(Coflux_V1_DeviceEnvelope)
+    case retire(Coflux_V1_ScreenHelperRetire)
+
+  }
+
+  public init() {}
+}
+
 public struct Coflux_V1_DeviceEnvelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -4018,6 +5080,158 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .executorStop(newValue)}
   }
 
+  public var screenSessionOpen: Coflux_V1_ScreenSessionOpen {
+    get {
+      if case .screenSessionOpen(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionOpen()
+    }
+    set {payload = .screenSessionOpen(newValue)}
+  }
+
+  public var screenSessionOpened: Coflux_V1_ScreenSessionOpened {
+    get {
+      if case .screenSessionOpened(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionOpened()
+    }
+    set {payload = .screenSessionOpened(newValue)}
+  }
+
+  public var screenSessionState: Coflux_V1_ScreenSessionState {
+    get {
+      if case .screenSessionState(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionState()
+    }
+    set {payload = .screenSessionState(newValue)}
+  }
+
+  public var screenSessionClose: Coflux_V1_ScreenSessionClose {
+    get {
+      if case .screenSessionClose(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionClose()
+    }
+    set {payload = .screenSessionClose(newValue)}
+  }
+
+  public var screenSessionClosed: Coflux_V1_ScreenSessionClosed {
+    get {
+      if case .screenSessionClosed(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionClosed()
+    }
+    set {payload = .screenSessionClosed(newValue)}
+  }
+
+  public var screenSessionResize: Coflux_V1_ScreenSessionResize {
+    get {
+      if case .screenSessionResize(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionResize()
+    }
+    set {payload = .screenSessionResize(newValue)}
+  }
+
+  public var screenSessionPause: Coflux_V1_ScreenSessionPause {
+    get {
+      if case .screenSessionPause(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionPause()
+    }
+    set {payload = .screenSessionPause(newValue)}
+  }
+
+  public var screenSessionResume: Coflux_V1_ScreenSessionResume {
+    get {
+      if case .screenSessionResume(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionResume()
+    }
+    set {payload = .screenSessionResume(newValue)}
+  }
+
+  public var screenSessionDetached: Coflux_V1_ScreenSessionDetached {
+    get {
+      if case .screenSessionDetached(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionDetached()
+    }
+    set {payload = .screenSessionDetached(newValue)}
+  }
+
+  public var screenSessionEnded: Coflux_V1_ScreenSessionEnded {
+    get {
+      if case .screenSessionEnded(let v)? = payload {return v}
+      return Coflux_V1_ScreenSessionEnded()
+    }
+    set {payload = .screenSessionEnded(newValue)}
+  }
+
+  public var screenVideoAttach: Coflux_V1_ScreenVideoAttach {
+    get {
+      if case .screenVideoAttach(let v)? = payload {return v}
+      return Coflux_V1_ScreenVideoAttach()
+    }
+    set {payload = .screenVideoAttach(newValue)}
+  }
+
+  public var screenVideoAttached: Coflux_V1_ScreenVideoAttached {
+    get {
+      if case .screenVideoAttached(let v)? = payload {return v}
+      return Coflux_V1_ScreenVideoAttached()
+    }
+    set {payload = .screenVideoAttached(newValue)}
+  }
+
+  public var screenVideoCredit: Coflux_V1_ScreenVideoCredit {
+    get {
+      if case .screenVideoCredit(let v)? = payload {return v}
+      return Coflux_V1_ScreenVideoCredit()
+    }
+    set {payload = .screenVideoCredit(newValue)}
+  }
+
+  public var screenKeyframeRequest: Coflux_V1_ScreenKeyframeRequest {
+    get {
+      if case .screenKeyframeRequest(let v)? = payload {return v}
+      return Coflux_V1_ScreenKeyframeRequest()
+    }
+    set {payload = .screenKeyframeRequest(newValue)}
+  }
+
+  public var screenVideoFrame: Coflux_V1_ScreenVideoFrame {
+    get {
+      if case .screenVideoFrame(let v)? = payload {return v}
+      return Coflux_V1_ScreenVideoFrame()
+    }
+    set {payload = .screenVideoFrame(newValue)}
+  }
+
+  public var screenInput: Coflux_V1_ScreenInput {
+    get {
+      if case .screenInput(let v)? = payload {return v}
+      return Coflux_V1_ScreenInput()
+    }
+    set {payload = .screenInput(newValue)}
+  }
+
+  public var screenCursor: Coflux_V1_ScreenCursor {
+    get {
+      if case .screenCursor(let v)? = payload {return v}
+      return Coflux_V1_ScreenCursor()
+    }
+    set {payload = .screenCursor(newValue)}
+  }
+
+  public var screenClipboardSet: Coflux_V1_ScreenClipboardSet {
+    get {
+      if case .screenClipboardSet(let v)? = payload {return v}
+      return Coflux_V1_ScreenClipboardSet()
+    }
+    set {payload = .screenClipboardSet(newValue)}
+  }
+
+  public var screenClipboardChanged: Coflux_V1_ScreenClipboardChanged {
+    get {
+      if case .screenClipboardChanged(let v)? = payload {return v}
+      return Coflux_V1_ScreenClipboardChanged()
+    }
+    set {payload = .screenClipboardChanged(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -4090,6 +5304,25 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case executorTranscriptUnsubscribe(Coflux_V1_DeviceExecutorTranscriptUnsubscribe)
     case executorTranscript(Coflux_V1_DeviceExecutorTranscript)
     case executorStop(Coflux_V1_DeviceExecutorStop)
+    case screenSessionOpen(Coflux_V1_ScreenSessionOpen)
+    case screenSessionOpened(Coflux_V1_ScreenSessionOpened)
+    case screenSessionState(Coflux_V1_ScreenSessionState)
+    case screenSessionClose(Coflux_V1_ScreenSessionClose)
+    case screenSessionClosed(Coflux_V1_ScreenSessionClosed)
+    case screenSessionResize(Coflux_V1_ScreenSessionResize)
+    case screenSessionPause(Coflux_V1_ScreenSessionPause)
+    case screenSessionResume(Coflux_V1_ScreenSessionResume)
+    case screenSessionDetached(Coflux_V1_ScreenSessionDetached)
+    case screenSessionEnded(Coflux_V1_ScreenSessionEnded)
+    case screenVideoAttach(Coflux_V1_ScreenVideoAttach)
+    case screenVideoAttached(Coflux_V1_ScreenVideoAttached)
+    case screenVideoCredit(Coflux_V1_ScreenVideoCredit)
+    case screenKeyframeRequest(Coflux_V1_ScreenKeyframeRequest)
+    case screenVideoFrame(Coflux_V1_ScreenVideoFrame)
+    case screenInput(Coflux_V1_ScreenInput)
+    case screenCursor(Coflux_V1_ScreenCursor)
+    case screenClipboardSet(Coflux_V1_ScreenClipboardSet)
+    case screenClipboardChanged(Coflux_V1_ScreenClipboardChanged)
 
   }
 
@@ -4142,6 +5375,22 @@ extension Coflux_V1_AnnotationStatus: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_AnnotationImageKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ANNOTATION_IMAGE_KIND_UNSPECIFIED\0\u{1}ANNOTATION_IMAGE_KIND_SCREENSHOT\0\u{1}ANNOTATION_IMAGE_KIND_REFERENCE\0")
+}
+
+extension Coflux_V1_ScreenVideoCodec: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCREEN_VIDEO_CODEC_UNSPECIFIED\0\u{1}SCREEN_VIDEO_CODEC_H264\0\u{1}SCREEN_VIDEO_CODEC_HEVC\0")
+}
+
+extension Coflux_V1_ScreenSessionPhase: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCREEN_SESSION_PHASE_UNSPECIFIED\0\u{1}SCREEN_SESSION_PHASE_STARTING\0\u{1}SCREEN_SESSION_PHASE_STREAMING\0\u{1}SCREEN_SESSION_PHASE_PAUSED\0\u{1}SCREEN_SESSION_PHASE_NO_PERMISSION\0\u{1}SCREEN_SESSION_PHASE_LOCKED\0")
+}
+
+extension Coflux_V1_ScreenPointerAction: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCREEN_POINTER_ACTION_UNSPECIFIED\0\u{1}SCREEN_POINTER_ACTION_MOVE\0\u{1}SCREEN_POINTER_ACTION_DOWN\0\u{1}SCREEN_POINTER_ACTION_UP\0")
+}
+
+extension Coflux_V1_ScreenModifier: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SCREEN_MODIFIER_UNSPECIFIED\0\u{1}SCREEN_MODIFIER_SHIFT\0\u{1}SCREEN_MODIFIER_CONTROL\0\u{2}\u{2}SCREEN_MODIFIER_OPTION\0\u{2}\u{4}SCREEN_MODIFIER_COMMAND\0\u{2}\u{8}SCREEN_MODIFIER_CAPS_LOCK\0\u{2}\u{10}SCREEN_MODIFIER_FUNCTION\0")
 }
 
 extension Coflux_V1_DeviceTailcatIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -9639,9 +10888,1663 @@ extension Coflux_V1_DeviceAnnotationHandOffResult: SwiftProtobuf.Message, SwiftP
   }
 }
 
+extension Coflux_V1_ScreenPermissions: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenPermissions"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}screen_recording\0\u{1}accessibility\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.screenRecording) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.accessibility) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.screenRecording != false {
+      try visitor.visitSingularBoolField(value: self.screenRecording, fieldNumber: 1)
+    }
+    if self.accessibility != false {
+      try visitor.visitSingularBoolField(value: self.accessibility, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenPermissions, rhs: Coflux_V1_ScreenPermissions) -> Bool {
+    if lhs.screenRecording != rhs.screenRecording {return false}
+    if lhs.accessibility != rhs.accessibility {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenDisplayGeometry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenDisplayGeometry"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}width_points\0\u{3}height_points\0\u{1}scale\0\u{3}width_pixels\0\u{3}height_pixels\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.widthPoints) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.heightPoints) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.scale) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.widthPixels) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.heightPixels) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.widthPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPoints, fieldNumber: 1)
+    }
+    if self.heightPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPoints, fieldNumber: 2)
+    }
+    if self.scale != 0 {
+      try visitor.visitSingularUInt32Field(value: self.scale, fieldNumber: 3)
+    }
+    if self.widthPixels != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPixels, fieldNumber: 4)
+    }
+    if self.heightPixels != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPixels, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenDisplayGeometry, rhs: Coflux_V1_ScreenDisplayGeometry) -> Bool {
+    if lhs.widthPoints != rhs.widthPoints {return false}
+    if lhs.heightPoints != rhs.heightPoints {return false}
+    if lhs.scale != rhs.scale {return false}
+    if lhs.widthPixels != rhs.widthPixels {return false}
+    if lhs.heightPixels != rhs.heightPixels {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionStatus"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}phase\0\u{1}permissions\0\u{1}locked\0\u{1}display\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.phase) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._permissions) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.locked) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._display) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.phase != .unspecified {
+      try visitor.visitSingularEnumField(value: self.phase, fieldNumber: 1)
+    }
+    try { if let v = self._permissions {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.locked != false {
+      try visitor.visitSingularBoolField(value: self.locked, fieldNumber: 3)
+    }
+    try { if let v = self._display {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionStatus, rhs: Coflux_V1_ScreenSessionStatus) -> Bool {
+    if lhs.phase != rhs.phase {return false}
+    if lhs._permissions != rhs._permissions {return false}
+    if lhs.locked != rhs.locked {return false}
+    if lhs._display != rhs._display {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionOpen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionOpen"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}client_instance_id\0\u{3}transport_generation\0\u{1}force\0\u{3}width_points\0\u{3}height_points\0\u{1}scale\0\u{1}codecs\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.clientInstanceID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.transportGeneration) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.force) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.widthPoints) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.heightPoints) }()
+      case 8: try { try decoder.decodeSingularUInt32Field(value: &self.scale) }()
+      case 9: try { try decoder.decodeRepeatedEnumField(value: &self.codecs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    if !self.clientInstanceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientInstanceID, fieldNumber: 3)
+    }
+    if self.transportGeneration != 0 {
+      try visitor.visitSingularUInt64Field(value: self.transportGeneration, fieldNumber: 4)
+    }
+    if self.force != false {
+      try visitor.visitSingularBoolField(value: self.force, fieldNumber: 5)
+    }
+    if self.widthPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPoints, fieldNumber: 6)
+    }
+    if self.heightPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPoints, fieldNumber: 7)
+    }
+    if self.scale != 0 {
+      try visitor.visitSingularUInt32Field(value: self.scale, fieldNumber: 8)
+    }
+    if !self.codecs.isEmpty {
+      try visitor.visitPackedEnumField(value: self.codecs, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionOpen, rhs: Coflux_V1_ScreenSessionOpen) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.clientInstanceID != rhs.clientInstanceID {return false}
+    if lhs.transportGeneration != rhs.transportGeneration {return false}
+    if lhs.force != rhs.force {return false}
+    if lhs.widthPoints != rhs.widthPoints {return false}
+    if lhs.heightPoints != rhs.heightPoints {return false}
+    if lhs.scale != rhs.scale {return false}
+    if lhs.codecs != rhs.codecs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionOpened: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionOpened"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{1}ok\0\u{1}error\0\u{1}code\0\u{3}holder_epoch\0\u{1}codec\0\u{1}status\0")
+
+  fileprivate class _StorageClass {
+    var _requestID: String = String()
+    var _sessionID: String = String()
+    var _ok: Bool = false
+    var _error: String? = nil
+    var _code: String = String()
+    var _holderEpoch: UInt64 = 0
+    var _codec: Coflux_V1_ScreenVideoCodec = .unspecified
+    var _status: Coflux_V1_ScreenSessionStatus? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _requestID = source._requestID
+      _sessionID = source._sessionID
+      _ok = source._ok
+      _error = source._error
+      _code = source._code
+      _holderEpoch = source._holderEpoch
+      _codec = source._codec
+      _status = source._status
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._requestID) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._sessionID) }()
+        case 3: try { try decoder.decodeSingularBoolField(value: &_storage._ok) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._error) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._code) }()
+        case 6: try { try decoder.decodeSingularUInt64Field(value: &_storage._holderEpoch) }()
+        case 7: try { try decoder.decodeSingularEnumField(value: &_storage._codec) }()
+        case 8: try { try decoder.decodeSingularMessageField(value: &_storage._status) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._requestID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._requestID, fieldNumber: 1)
+      }
+      if !_storage._sessionID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._sessionID, fieldNumber: 2)
+      }
+      if _storage._ok != false {
+        try visitor.visitSingularBoolField(value: _storage._ok, fieldNumber: 3)
+      }
+      try { if let v = _storage._error {
+        try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+      } }()
+      if !_storage._code.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._code, fieldNumber: 5)
+      }
+      if _storage._holderEpoch != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._holderEpoch, fieldNumber: 6)
+      }
+      if _storage._codec != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._codec, fieldNumber: 7)
+      }
+      try { if let v = _storage._status {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+      } }()
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionOpened, rhs: Coflux_V1_ScreenSessionOpened) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._requestID != rhs_storage._requestID {return false}
+        if _storage._sessionID != rhs_storage._sessionID {return false}
+        if _storage._ok != rhs_storage._ok {return false}
+        if _storage._error != rhs_storage._error {return false}
+        if _storage._code != rhs_storage._code {return false}
+        if _storage._holderEpoch != rhs_storage._holderEpoch {return false}
+        if _storage._codec != rhs_storage._codec {return false}
+        if _storage._status != rhs_storage._status {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionState"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}status\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._status) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    try { if let v = self._status {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionState, rhs: Coflux_V1_ScreenSessionState) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs._status != rhs._status {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionClose: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionClose"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{3}holder_epoch\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionClose, rhs: Coflux_V1_ScreenSessionClose) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionClosed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}session_id\0\u{1}ok\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 3)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionClosed, rhs: Coflux_V1_ScreenSessionClosed) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionResize: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionResize"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0\u{3}resize_seq\0\u{3}width_points\0\u{3}height_points\0\u{1}scale\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.resizeSeq) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.widthPoints) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.heightPoints) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.scale) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    if self.resizeSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.resizeSeq, fieldNumber: 3)
+    }
+    if self.widthPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPoints, fieldNumber: 4)
+    }
+    if self.heightPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPoints, fieldNumber: 5)
+    }
+    if self.scale != 0 {
+      try visitor.visitSingularUInt32Field(value: self.scale, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionResize, rhs: Coflux_V1_ScreenSessionResize) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.resizeSeq != rhs.resizeSeq {return false}
+    if lhs.widthPoints != rhs.widthPoints {return false}
+    if lhs.heightPoints != rhs.heightPoints {return false}
+    if lhs.scale != rhs.scale {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionPause: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionPause"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionPause, rhs: Coflux_V1_ScreenSessionPause) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionResume: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionResume"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionResume, rhs: Coflux_V1_ScreenSessionResume) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionDetached: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionDetached"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    try { if let v = self._reason {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionDetached, rhs: Coflux_V1_ScreenSessionDetached) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs._reason != rhs._reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenSessionEnded: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenSessionEnded"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenSessionEnded, rhs: Coflux_V1_ScreenSessionEnded) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenVideoAttach: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenVideoAttach"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0\u{3}credit_bytes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.creditBytes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    if self.creditBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.creditBytes, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenVideoAttach, rhs: Coflux_V1_ScreenVideoAttach) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.creditBytes != rhs.creditBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenVideoAttached: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenVideoAttached"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}ok\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenVideoAttached, rhs: Coflux_V1_ScreenVideoAttached) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenVideoCredit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenVideoCredit"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}bytes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.bytes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.bytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytes, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenVideoCredit, rhs: Coflux_V1_ScreenVideoCredit) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.bytes != rhs.bytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenKeyframeRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenKeyframeRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenKeyframeRequest, rhs: Coflux_V1_ScreenKeyframeRequest) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenVideoFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenVideoFrame"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}frame_seq\0\u{1}keyframe\0\u{3}pts_us\0\u{3}width_pixels\0\u{3}height_pixels\0\u{1}codec\0\u{1}data\0\u{1}last\0\u{3}chunk_index\0\u{3}chunk_count\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.frameSeq) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.keyframe) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.ptsUs) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.widthPixels) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.heightPixels) }()
+      case 7: try { try decoder.decodeSingularEnumField(value: &self.codec) }()
+      case 8: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.last) }()
+      case 10: try { try decoder.decodeSingularUInt32Field(value: &self.chunkIndex) }()
+      case 11: try { try decoder.decodeSingularUInt32Field(value: &self.chunkCount) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.frameSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.frameSeq, fieldNumber: 2)
+    }
+    if self.keyframe != false {
+      try visitor.visitSingularBoolField(value: self.keyframe, fieldNumber: 3)
+    }
+    if self.ptsUs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.ptsUs, fieldNumber: 4)
+    }
+    if self.widthPixels != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPixels, fieldNumber: 5)
+    }
+    if self.heightPixels != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPixels, fieldNumber: 6)
+    }
+    if self.codec != .unspecified {
+      try visitor.visitSingularEnumField(value: self.codec, fieldNumber: 7)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 8)
+    }
+    if self.last != false {
+      try visitor.visitSingularBoolField(value: self.last, fieldNumber: 9)
+    }
+    if self.chunkIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkIndex, fieldNumber: 10)
+    }
+    if self.chunkCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.chunkCount, fieldNumber: 11)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenVideoFrame, rhs: Coflux_V1_ScreenVideoFrame) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.frameSeq != rhs.frameSeq {return false}
+    if lhs.keyframe != rhs.keyframe {return false}
+    if lhs.ptsUs != rhs.ptsUs {return false}
+    if lhs.widthPixels != rhs.widthPixels {return false}
+    if lhs.heightPixels != rhs.heightPixels {return false}
+    if lhs.codec != rhs.codec {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.last != rhs.last {return false}
+    if lhs.chunkIndex != rhs.chunkIndex {return false}
+    if lhs.chunkCount != rhs.chunkCount {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenKeyEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenKeyEvent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}down\0\u{1}modifiers\0\u{1}repeat\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.code) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.down) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.modifiers) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.`repeat`) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.code.isEmpty {
+      try visitor.visitSingularStringField(value: self.code, fieldNumber: 1)
+    }
+    if self.down != false {
+      try visitor.visitSingularBoolField(value: self.down, fieldNumber: 2)
+    }
+    if self.modifiers != 0 {
+      try visitor.visitSingularUInt32Field(value: self.modifiers, fieldNumber: 3)
+    }
+    if self.`repeat` != false {
+      try visitor.visitSingularBoolField(value: self.`repeat`, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenKeyEvent, rhs: Coflux_V1_ScreenKeyEvent) -> Bool {
+    if lhs.code != rhs.code {return false}
+    if lhs.down != rhs.down {return false}
+    if lhs.modifiers != rhs.modifiers {return false}
+    if lhs.`repeat` != rhs.`repeat` {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenPointerEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenPointerEvent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}action\0\u{1}x\0\u{1}y\0\u{1}button\0\u{1}modifiers\0\u{3}click_count\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.action) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.x) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.y) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.button) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.modifiers) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.clickCount) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.action != .unspecified {
+      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 1)
+    }
+    if self.x.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.x, fieldNumber: 2)
+    }
+    if self.y.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.y, fieldNumber: 3)
+    }
+    if self.button != 0 {
+      try visitor.visitSingularUInt32Field(value: self.button, fieldNumber: 4)
+    }
+    if self.modifiers != 0 {
+      try visitor.visitSingularUInt32Field(value: self.modifiers, fieldNumber: 5)
+    }
+    if self.clickCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.clickCount, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenPointerEvent, rhs: Coflux_V1_ScreenPointerEvent) -> Bool {
+    if lhs.action != rhs.action {return false}
+    if lhs.x != rhs.x {return false}
+    if lhs.y != rhs.y {return false}
+    if lhs.button != rhs.button {return false}
+    if lhs.modifiers != rhs.modifiers {return false}
+    if lhs.clickCount != rhs.clickCount {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenScrollEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenScrollEvent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}x\0\u{1}y\0\u{3}delta_x\0\u{3}delta_y\0\u{1}modifiers\0\u{1}precise\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularDoubleField(value: &self.x) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.y) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.deltaX) }()
+      case 4: try { try decoder.decodeSingularDoubleField(value: &self.deltaY) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.modifiers) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.precise) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.x.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.x, fieldNumber: 1)
+    }
+    if self.y.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.y, fieldNumber: 2)
+    }
+    if self.deltaX.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.deltaX, fieldNumber: 3)
+    }
+    if self.deltaY.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.deltaY, fieldNumber: 4)
+    }
+    if self.modifiers != 0 {
+      try visitor.visitSingularUInt32Field(value: self.modifiers, fieldNumber: 5)
+    }
+    if self.precise != false {
+      try visitor.visitSingularBoolField(value: self.precise, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenScrollEvent, rhs: Coflux_V1_ScreenScrollEvent) -> Bool {
+    if lhs.x != rhs.x {return false}
+    if lhs.y != rhs.y {return false}
+    if lhs.deltaX != rhs.deltaX {return false}
+    if lhs.deltaY != rhs.deltaY {return false}
+    if lhs.modifiers != rhs.modifiers {return false}
+    if lhs.precise != rhs.precise {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenInput: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenInput"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0\u{1}key\0\u{1}pointer\0\u{1}scroll\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      case 3: try {
+        var v: Coflux_V1_ScreenKeyEvent?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .key(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .key(v)
+        }
+      }()
+      case 4: try {
+        var v: Coflux_V1_ScreenPointerEvent?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .pointer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .pointer(v)
+        }
+      }()
+      case 5: try {
+        var v: Coflux_V1_ScreenScrollEvent?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .scroll(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .scroll(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    switch self.event {
+    case .key?: try {
+      guard case .key(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case .pointer?: try {
+      guard case .pointer(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .scroll?: try {
+      guard case .scroll(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenInput, rhs: Coflux_V1_ScreenInput) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs.event != rhs.event {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenCursorShape: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenCursorShape"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}png\0\u{3}width_points\0\u{3}height_points\0\u{3}hotspot_x\0\u{3}hotspot_y\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.png) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.widthPoints) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.heightPoints) }()
+      case 4: try { try decoder.decodeSingularDoubleField(value: &self.hotspotX) }()
+      case 5: try { try decoder.decodeSingularDoubleField(value: &self.hotspotY) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.png.isEmpty {
+      try visitor.visitSingularBytesField(value: self.png, fieldNumber: 1)
+    }
+    if self.widthPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.widthPoints, fieldNumber: 2)
+    }
+    if self.heightPoints != 0 {
+      try visitor.visitSingularUInt32Field(value: self.heightPoints, fieldNumber: 3)
+    }
+    if self.hotspotX.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.hotspotX, fieldNumber: 4)
+    }
+    if self.hotspotY.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.hotspotY, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenCursorShape, rhs: Coflux_V1_ScreenCursorShape) -> Bool {
+    if lhs.png != rhs.png {return false}
+    if lhs.widthPoints != rhs.widthPoints {return false}
+    if lhs.heightPoints != rhs.heightPoints {return false}
+    if lhs.hotspotX != rhs.hotspotX {return false}
+    if lhs.hotspotY != rhs.hotspotY {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenCursor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenCursor"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}x\0\u{1}y\0\u{1}visible\0\u{1}shape\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.x) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.y) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.visible) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._shape) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.x.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.x, fieldNumber: 2)
+    }
+    if self.y.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.y, fieldNumber: 3)
+    }
+    if self.visible != false {
+      try visitor.visitSingularBoolField(value: self.visible, fieldNumber: 4)
+    }
+    try { if let v = self._shape {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenCursor, rhs: Coflux_V1_ScreenCursor) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.x != rhs.x {return false}
+    if lhs.y != rhs.y {return false}
+    if lhs.visible != rhs.visible {return false}
+    if lhs._shape != rhs._shape {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenClipboardContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenClipboardContent"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}png\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: String?
+        try decoder.decodeSingularStringField(value: &v)
+        if let v = v {
+          if self.content != nil {try decoder.handleConflictingOneOf()}
+          self.content = .text(v)
+        }
+      }()
+      case 2: try {
+        var v: Data?
+        try decoder.decodeSingularBytesField(value: &v)
+        if let v = v {
+          if self.content != nil {try decoder.handleConflictingOneOf()}
+          self.content = .png(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.content {
+    case .text?: try {
+      guard case .text(let v)? = self.content else { preconditionFailure() }
+      try visitor.visitSingularStringField(value: v, fieldNumber: 1)
+    }()
+    case .png?: try {
+      guard case .png(let v)? = self.content else { preconditionFailure() }
+      try visitor.visitSingularBytesField(value: v, fieldNumber: 2)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenClipboardContent, rhs: Coflux_V1_ScreenClipboardContent) -> Bool {
+    if lhs.content != rhs.content {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenClipboardSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenClipboardSet"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}holder_epoch\0\u{1}content\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.holderEpoch) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._content) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    if self.holderEpoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.holderEpoch, fieldNumber: 2)
+    }
+    try { if let v = self._content {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenClipboardSet, rhs: Coflux_V1_ScreenClipboardSet) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.holderEpoch != rhs.holderEpoch {return false}
+    if lhs._content != rhs._content {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenClipboardChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenClipboardChanged"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{1}content\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._content) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 1)
+    }
+    try { if let v = self._content {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenClipboardChanged, rhs: Coflux_V1_ScreenClipboardChanged) -> Bool {
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs._content != rhs._content {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenHelperHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperHello"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}worker_version\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workerVersion) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.protocolVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 1)
+    }
+    if !self.workerVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.workerVersion, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperHello, rhs: Coflux_V1_ScreenHelperHello) -> Bool {
+    if lhs.protocolVersion != rhs.protocolVersion {return false}
+    if lhs.workerVersion != rhs.workerVersion {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenHelperHelloAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperHelloAck"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}helper_version\0\u{1}ok\0\u{1}error\0\u{1}permissions\0\u{3}session_active\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.helperVersion) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._permissions) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.sessionActive) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.protocolVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 1)
+    }
+    if !self.helperVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.helperVersion, fieldNumber: 2)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 3)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
+    try { if let v = self._permissions {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if self.sessionActive != false {
+      try visitor.visitSingularBoolField(value: self.sessionActive, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperHelloAck, rhs: Coflux_V1_ScreenHelperHelloAck) -> Bool {
+    if lhs.protocolVersion != rhs.protocolVersion {return false}
+    if lhs.helperVersion != rhs.helperVersion {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs._permissions != rhs._permissions {return false}
+    if lhs.sessionActive != rhs.sessionActive {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenHelperChannelClosed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperChannelClosed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}channel_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.channelID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.channelID.isEmpty {
+      try visitor.visitSingularStringField(value: self.channelID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperChannelClosed, rhs: Coflux_V1_ScreenHelperChannelClosed) -> Bool {
+    if lhs.channelID != rhs.channelID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenHelperRetire: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperRetire"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}tear_down\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.tearDown) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.tearDown != false {
+      try visitor.visitSingularBoolField(value: self.tearDown, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperRetire, rhs: Coflux_V1_ScreenHelperRetire) -> Bool {
+    if lhs.tearDown != rhs.tearDown {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ScreenHelperFrame"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}hello\0\u{3}hello_ack\0\u{3}channel_closed\0\u{1}envelope\0\u{1}retire\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: Coflux_V1_ScreenHelperHello?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .hello(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .hello(v)
+        }
+      }()
+      case 2: try {
+        var v: Coflux_V1_ScreenHelperHelloAck?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .helloAck(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .helloAck(v)
+        }
+      }()
+      case 3: try {
+        var v: Coflux_V1_ScreenHelperChannelClosed?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .channelClosed(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .channelClosed(v)
+        }
+      }()
+      case 4: try {
+        var v: Coflux_V1_DeviceEnvelope?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .envelope(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .envelope(v)
+        }
+      }()
+      case 5: try {
+        var v: Coflux_V1_ScreenHelperRetire?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .retire(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .retire(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.payload {
+    case .hello?: try {
+      guard case .hello(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    }()
+    case .helloAck?: try {
+      guard case .helloAck(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .channelClosed?: try {
+      guard case .channelClosed(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case .envelope?: try {
+      guard case .envelope(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .retire?: try {
+      guard case .retire(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ScreenHelperFrame, rhs: Coflux_V1_ScreenHelperFrame) -> Bool {
+    if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0\u{3}screen_session_open\0\u{3}screen_session_opened\0\u{3}screen_session_state\0\u{3}screen_session_close\0\u{3}screen_session_closed\0\u{3}screen_session_resize\0\u{3}screen_session_pause\0\u{3}screen_session_resume\0\u{3}screen_session_detached\0\u{3}screen_session_ended\0\u{3}screen_video_attach\0\u{3}screen_video_attached\0\u{3}screen_video_credit\0\u{3}screen_keyframe_request\0\u{3}screen_video_frame\0\u{3}screen_input\0\u{3}screen_cursor\0\u{3}screen_clipboard_set\0\u{3}screen_clipboard_changed\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10548,6 +13451,253 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .executorStop(v)
         }
       }()
+      case 125: try {
+        var v: Coflux_V1_ScreenSessionOpen?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionOpen(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionOpen(v)
+        }
+      }()
+      case 126: try {
+        var v: Coflux_V1_ScreenSessionOpened?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionOpened(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionOpened(v)
+        }
+      }()
+      case 127: try {
+        var v: Coflux_V1_ScreenSessionState?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionState(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionState(v)
+        }
+      }()
+      case 128: try {
+        var v: Coflux_V1_ScreenSessionClose?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionClose(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionClose(v)
+        }
+      }()
+      case 129: try {
+        var v: Coflux_V1_ScreenSessionClosed?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionClosed(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionClosed(v)
+        }
+      }()
+      case 130: try {
+        var v: Coflux_V1_ScreenSessionResize?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionResize(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionResize(v)
+        }
+      }()
+      case 131: try {
+        var v: Coflux_V1_ScreenSessionPause?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionPause(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionPause(v)
+        }
+      }()
+      case 132: try {
+        var v: Coflux_V1_ScreenSessionResume?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionResume(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionResume(v)
+        }
+      }()
+      case 133: try {
+        var v: Coflux_V1_ScreenSessionDetached?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionDetached(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionDetached(v)
+        }
+      }()
+      case 134: try {
+        var v: Coflux_V1_ScreenSessionEnded?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenSessionEnded(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenSessionEnded(v)
+        }
+      }()
+      case 135: try {
+        var v: Coflux_V1_ScreenVideoAttach?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenVideoAttach(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenVideoAttach(v)
+        }
+      }()
+      case 136: try {
+        var v: Coflux_V1_ScreenVideoAttached?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenVideoAttached(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenVideoAttached(v)
+        }
+      }()
+      case 137: try {
+        var v: Coflux_V1_ScreenVideoCredit?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenVideoCredit(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenVideoCredit(v)
+        }
+      }()
+      case 138: try {
+        var v: Coflux_V1_ScreenKeyframeRequest?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenKeyframeRequest(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenKeyframeRequest(v)
+        }
+      }()
+      case 139: try {
+        var v: Coflux_V1_ScreenVideoFrame?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenVideoFrame(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenVideoFrame(v)
+        }
+      }()
+      case 140: try {
+        var v: Coflux_V1_ScreenInput?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenInput(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenInput(v)
+        }
+      }()
+      case 141: try {
+        var v: Coflux_V1_ScreenCursor?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenCursor(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenCursor(v)
+        }
+      }()
+      case 142: try {
+        var v: Coflux_V1_ScreenClipboardSet?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenClipboardSet(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenClipboardSet(v)
+        }
+      }()
+      case 143: try {
+        var v: Coflux_V1_ScreenClipboardChanged?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .screenClipboardChanged(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .screenClipboardChanged(v)
+        }
+      }()
       default: break
       }
     }
@@ -10840,6 +13990,82 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .executorStop?: try {
       guard case .executorStop(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 124)
+    }()
+    case .screenSessionOpen?: try {
+      guard case .screenSessionOpen(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 125)
+    }()
+    case .screenSessionOpened?: try {
+      guard case .screenSessionOpened(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 126)
+    }()
+    case .screenSessionState?: try {
+      guard case .screenSessionState(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 127)
+    }()
+    case .screenSessionClose?: try {
+      guard case .screenSessionClose(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 128)
+    }()
+    case .screenSessionClosed?: try {
+      guard case .screenSessionClosed(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 129)
+    }()
+    case .screenSessionResize?: try {
+      guard case .screenSessionResize(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 130)
+    }()
+    case .screenSessionPause?: try {
+      guard case .screenSessionPause(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 131)
+    }()
+    case .screenSessionResume?: try {
+      guard case .screenSessionResume(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 132)
+    }()
+    case .screenSessionDetached?: try {
+      guard case .screenSessionDetached(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 133)
+    }()
+    case .screenSessionEnded?: try {
+      guard case .screenSessionEnded(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 134)
+    }()
+    case .screenVideoAttach?: try {
+      guard case .screenVideoAttach(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 135)
+    }()
+    case .screenVideoAttached?: try {
+      guard case .screenVideoAttached(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 136)
+    }()
+    case .screenVideoCredit?: try {
+      guard case .screenVideoCredit(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 137)
+    }()
+    case .screenKeyframeRequest?: try {
+      guard case .screenKeyframeRequest(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 138)
+    }()
+    case .screenVideoFrame?: try {
+      guard case .screenVideoFrame(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 139)
+    }()
+    case .screenInput?: try {
+      guard case .screenInput(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 140)
+    }()
+    case .screenCursor?: try {
+      guard case .screenCursor(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 141)
+    }()
+    case .screenClipboardSet?: try {
+      guard case .screenClipboardSet(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 142)
+    }()
+    case .screenClipboardChanged?: try {
+      guard case .screenClipboardChanged(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 143)
     }()
     case nil: break
     }

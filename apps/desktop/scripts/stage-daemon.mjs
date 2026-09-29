@@ -22,7 +22,7 @@ const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..");
 // 与 src/main/daemon-paths.ts 的 DAEMON_BINARIES / DAEMON_VERSION_FILE / CLAUDE_PLUGIN_RESOURCE_DIR 同值；
 // test/config.test.ts 守住两边一致
-const BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd"];
+const BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd", "coflux-screen"];
 const VERSION_FILE = "VERSION";
 const CLAUDE_PLUGIN_DIR = "claude-plugin";
 // 插件来源在仓库里（不是 CI 的新输入），与三件同一口径：缺失即失败

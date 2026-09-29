@@ -8,9 +8,20 @@ import { join } from "node:path";
 
 /** 内置三件在 Contents/Resources 下的子目录名（electron-builder.yml extraResources 的 to） */
 export const DAEMON_RESOURCE_DIR = "daemon";
-/** 内置与落盘的五个二进制文件名 */
-export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd"] as const;
+/** 内置与落盘的六个二进制文件名 */
+export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd", "coflux-screen"] as const;
 export type DaemonBinaryName = (typeof DAEMON_BINARIES)[number];
+/**
+ * The remote screen helper (plan 20260929-remote-desktop): a Swift binary built from native/screen,
+ * staged, signed and bundled with the runtime like the others and part of the runtime id. The
+ * worker learns where it is from SCREEN_HELPER_ENV on the supervisor's environment (a hot-upgraded
+ * worker runs from ~/.coflux/workers/<v>/ and cannot find siblings) and advertises `screen_v1`
+ * only once the helper answered its hello. Never part of the daemon release tarballs.
+ */
+export const SCREEN_HELPER_BINARY: DaemonBinaryName = "coflux-screen";
+export const SCREEN_HELPER_ENV = "COFLUX_SCREEN_HELPER";
+/** The helper reports this as its version in the hello; the bundle's VERSION stamp. */
+export const SCREEN_HELPER_VERSION_ENV = "COFLUX_SCREEN_VERSION";
 /**
  * PTY 托管进程（plan 20260918-ptyd-terminal-custody）。它随 daemon 五件一起打包、签名、落盘，但**不**参与
  * `bundleRuntimeId`：ptyd 的身份单独跟踪（`bundlePtydId`），否则一次只换 supervisor 的更新会清掉「有更新」

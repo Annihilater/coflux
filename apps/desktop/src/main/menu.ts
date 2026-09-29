@@ -60,6 +60,7 @@ export function buildAppMenu(actions: MenuActions): Menu {
         pageShortcut("新建标签页…", "CmdOrCtrl+T", "new-tab"),
         { label: "新建终端", click: () => actions.sendCommand("create-terminal") },
         { label: "新建浏览器标签页", click: () => actions.sendCommand("new-browser-tab") },
+        { label: "新建屏幕标签页", click: () => actions.sendCommand("new-screen-tab") },
         pageShortcut("关闭终端", "CmdOrCtrl+W", "close-terminal"),
         { type: "separator" },
         { role: "close", label: "关闭窗口", accelerator: "Shift+CmdOrCtrl+W" },
