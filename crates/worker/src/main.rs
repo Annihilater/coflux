@@ -872,6 +872,10 @@ async fn worker_main() {
                 let live: std::collections::HashSet<String> =
                     state.lock().unwrap().alive.keys().cloned().collect();
                 device.secrets().retain_sessions(&live);
+                // The executor ledger's sweep has no timer of its own (plan 20260929-executor-pip):
+                // drive it here so a run whose host went silent leaves every desktop's screen
+                // even when no CLI is polling it.
+                device.executor_tick();
             }
         });
     }
@@ -1529,6 +1533,8 @@ async fn run_server_connection(
                     force_report_agents(state, observed, to_server_tx).await;
                     // Pending secret requests are memory-only in the center, like presence.
                     device.secrets().publish();
+                    // So are the live executor runs (plan 20260929-executor-pip).
+                    device.executor_publish();
                     // So is the annotation summary (plan 20260929-browser-annotations).
                     if let Some(annotations) = device.annotations() {
                         annotations.publish();

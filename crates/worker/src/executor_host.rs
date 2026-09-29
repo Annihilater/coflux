@@ -31,7 +31,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::device::DeviceRuntime;
-use coflux_protocol::logln;
+use coflux_protocol::{logln, wire};
 
 /// The channel id the ledger files the daemon's own host under. It is deliberately not a real
 /// device channel: nothing looks it up in the channels table, and `DeviceRuntime` routes effects
@@ -81,9 +81,58 @@ enum Outbound {
         #[serde(default)]
         error: String,
     },
+    /// One transcript fragment of a run (plan 20260929-executor-pip); the fragment mirrors
+    /// `ExecutorTranscriptFragment` in `packages/executor/src/runner-protocol.ts`.
+    #[serde(rename_all = "camelCase")]
+    Transcript {
+        run_id: String,
+        fragment: FragmentJson,
+    },
     Log {
         message: String,
     },
+}
+
+/// The JSONL shape of a fragment: a `kind` discriminator plus the fields of that kind. Unknown
+/// kinds map to an unspecified wire kind and are dropped by the ledger's consumer.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FragmentJson {
+    kind: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    tool: String,
+    #[serde(default)]
+    argument: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    failed: bool,
+    #[serde(default)]
+    at: f64,
+}
+
+impl FragmentJson {
+    /// The wire fragment, or `None` for a kind this worker does not know.
+    fn into_wire(self) -> Option<wire::ExecutorTranscriptFragment> {
+        let kind = match self.kind.as_str() {
+            "assistant" => wire::ExecutorFragmentKind::Assistant,
+            "tool" => wire::ExecutorFragmentKind::Tool,
+            "error" => wire::ExecutorFragmentKind::Error,
+            _ => return None,
+        };
+        Some(wire::ExecutorTranscriptFragment {
+            seq: 0,
+            kind: kind as i32,
+            text: self.text,
+            tool: self.tool,
+            argument: self.argument,
+            output: self.output,
+            failed: self.failed,
+            at: self.at,
+        })
+    }
 }
 
 /// Worker -> host. Mirrors `ExecutorHostInbound` in `packages/executor/src/host-protocol.ts`.
@@ -281,6 +330,43 @@ fn consume(device: &Arc<DeviceRuntime>, message: Outbound) {
             changed_files,
             &error,
         ),
+        Outbound::Transcript { run_id, fragment } => {
+            if let Some(fragment) = fragment.into_wire() {
+                device.executor_local_host_transcript(&run_id, fragment);
+            }
+        }
         Outbound::Log { message } => logln!("[executor] {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_frames_decode_into_wire_fragments_and_unknown_kinds_are_dropped() {
+        let line = r#"{"type":"transcript","runId":"run-1","fragment":{"kind":"tool","tool":"bash","argument":"ls","output":"a\nb","failed":false,"at":5}}"#;
+        let Outbound::Transcript { run_id, fragment } = serde_json::from_str(line).unwrap() else {
+            panic!("expected a transcript frame");
+        };
+        assert_eq!(run_id, "run-1");
+        let wire = fragment.into_wire().unwrap();
+        assert_eq!(wire.kind, wire::ExecutorFragmentKind::Tool as i32);
+        assert_eq!(wire.tool, "bash");
+        assert_eq!(wire.argument, "ls");
+        assert_eq!(wire.output, "a\nb");
+        assert_eq!(wire.at, 5.0);
+        assert_eq!(wire.seq, 0);
+
+        let unknown = FragmentJson {
+            kind: "thinking".into(),
+            text: String::new(),
+            tool: String::new(),
+            argument: String::new(),
+            output: String::new(),
+            failed: false,
+            at: 0.0,
+        };
+        assert!(unknown.into_wire().is_none());
     }
 }

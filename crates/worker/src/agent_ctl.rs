@@ -535,8 +535,7 @@ async fn handle(
             submission_id,
             prompt,
             write,
-            // Recorded on the run from milestone 3 of plan 20260929-executor-pip onwards.
-            title: _,
+            title,
         } => {
             // 工作区边界在**提交这一刻**就固定（plan 116 Landmine 4）：之后父 agent 再 `cd` 或
             // 进 worktree 挪窝，都不改变已在跑任务的边界。
@@ -545,7 +544,27 @@ async fn handle(
                 Err(response) => return response,
             };
             let root = scope.effective_path.clone().unwrap_or_default();
-            match device.executor_submit(&submission_id, &effective, &root, &prompt, write) {
+            // The card is bound to the caller's terminal (plan 20260929-executor-pip), which is
+            // the process-tree-attested session and the task the ledger files it under — not the
+            // effective workspace, which may be a worktree the agent moved into.
+            let task_id = state
+                .lock()
+                .unwrap()
+                .ledger
+                .session(&session_id)
+                .map(|record| record.task_id.clone());
+            let Some(task_id) = task_id else {
+                return AgentResponse::err(
+                    "409 Conflict",
+                    "本终端早于 daemon 升级，缺少终端坐标：重开终端后再用 executor",
+                );
+            };
+            let caller = executor::RunCaller {
+                session_id: session_id.clone(),
+                task_id,
+                title,
+            };
+            match device.executor_submit(&submission_id, &caller, &effective, &root, &prompt, write) {
                 Ok(run_id) => AgentResponse::ok(serde_json::json!({ "runId": run_id })),
                 Err(message) => AgentResponse::err("409 Conflict", message),
             }
