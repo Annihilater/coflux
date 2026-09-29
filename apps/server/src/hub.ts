@@ -56,6 +56,7 @@ import {
   type DeviceSessionInfo,
   type SessionAgentRef,
   type SecretRequestRef,
+  type WorkspaceAnnotationSummary,
   type SessionCheckpoint,
   type AgentControlRequest,
   type AgentControlResultPayload,
@@ -111,6 +112,9 @@ const MAX_AGENT_ENTRIES = 1024;
 const MAX_SECRET_REQUEST_ENTRIES = 64;
 const MAX_SECRET_REASON_BYTES = 2000;
 const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/** Workspaces per daemon in one annotation summary (plan 20260929-browser-annotations); the worker
+ * applies the same cap. */
+const MAX_ANNOTATION_SUMMARY_ENTRIES = 1024;
 const MAX_ENROLL_NAME_BYTES = 256;
 const MAX_ENROLL_HOST_BYTES = 256;
 const MAX_ENROLL_PLATFORM_BYTES = 64;
@@ -217,6 +221,15 @@ interface SecretRequestData {
   reason: string;
   createdAt: number;
   expiresAt: number;
+}
+
+/** One workspace's browser annotation summary (plan 20260929-browser-annotations): a revision and
+ * counts, never content. Plain object like SecretRequestData. */
+interface AnnotationSummaryData {
+  workspaceId: WorkspaceId;
+  revision: number;
+  pending: number;
+  resolved: number;
 }
 
 interface DaemonResyncAuthority {
@@ -538,6 +551,14 @@ export class Hub {
    * resurrect requests nobody can answer. Cleared and broadcast empty when the daemon disconnects;
    * re-sent per device on subscribe. */
   private secretRequests = new Map<DaemonId, { accountId: AccountId; requests: SecretRequestData[] }>();
+  /** Browser annotation summaries (plan 20260929-browser-annotations): the daemon's latest
+   * AnnotationsSummary, each workspace checked against the store. Memory only: revision and counts,
+   * never content (which travels only end to end between desktops and the worker). Cleared and
+   * broadcast empty when the daemon disconnects; re-sent per device on subscribe. */
+  private annotationSummaries = new Map<DaemonId, { accountId: AccountId; workspaces: AnnotationSummaryData[] }>();
+  /** Per daemon, the sequence of the latest AnnotationsSummary received: validation awaits the
+   * store, and only the latest snapshot may land. */
+  private annotationSummarySeq = new Map<DaemonId, number>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
@@ -1935,6 +1956,50 @@ export class Hub {
     this.broadcast(daemon.accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: valid } });
   }
 
+  /** Browser annotation summaries (plan 20260929-browser-annotations): each entry must name a
+   * workspace of this daemon in the store; malformed or foreign entries are dropped. The store read
+   * is awaited, so the daemon connection and the snapshot's sequence are re-checked afterwards: a
+   * reconnect or a newer snapshot must not be overwritten by a stale one. An unchanged snapshot is
+   * absorbed (the worker re-sends unconditionally after authentication). */
+  private async acceptAnnotationsSummary(daemon: DaemonConn, entries: readonly WorkspaceAnnotationSummary[]): Promise<void> {
+    const daemonId = daemon.info.daemonId;
+    const seq = (this.annotationSummarySeq.get(daemonId) ?? 0) + 1;
+    this.annotationSummarySeq.set(daemonId, seq);
+    const candidates: AnnotationSummaryData[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries.slice(0, MAX_ANNOTATION_SUMMARY_ENTRIES)) {
+      if (!validControlId(entry.workspaceId) || seen.has(entry.workspaceId)) continue;
+      if (![entry.revision, entry.pending, entry.resolved].every((value) => Number.isSafeInteger(value) && value >= 0)) continue;
+      seen.add(entry.workspaceId);
+      candidates.push({ workspaceId: entry.workspaceId as WorkspaceId, revision: entry.revision, pending: entry.pending, resolved: entry.resolved });
+    }
+    let owned: Set<string>;
+    try {
+      owned = candidates.length === 0 ? new Set() : new Set((await this.store.listWorkspacesByDaemon(daemonId)).map((workspace) => workspace.id));
+    } catch (error) {
+      log.warn("annotation summary validation failed", { daemonId, error: String(error) });
+      return;
+    }
+    if (!this.isCurrentDaemon(daemon) || this.annotationSummarySeq.get(daemonId) !== seq) return;
+    const valid = candidates.filter((entry) => owned.has(entry.workspaceId));
+    const previous = this.annotationSummaries.get(daemonId);
+    const unchanged =
+      previous !== undefined &&
+      previous.workspaces.length === valid.length &&
+      previous.workspaces.every(
+        (p, i) =>
+          p.workspaceId === valid[i]!.workspaceId &&
+          p.revision === valid[i]!.revision &&
+          p.pending === valid[i]!.pending &&
+          p.resolved === valid[i]!.resolved,
+      );
+    if (unchanged) return;
+    if (valid.length === 0 && previous === undefined) return;
+    if (valid.length === 0) this.annotationSummaries.delete(daemonId);
+    else this.annotationSummaries.set(daemonId, { accountId: daemon.accountId, workspaces: valid });
+    this.broadcast(daemon.accountId, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: valid } });
+  }
+
   /* ----------------------- durable prepared op ----------------------- */
 
   private async handleDeviceOperationReport(daemon: DaemonConn, report: DeviceOperationReport): Promise<void> {
@@ -2369,6 +2434,12 @@ export class Hub {
       case "secretRequests": {
         const daemon = this.currentDaemon(conn);
         if (daemon) this.acceptSecretRequests(daemon, msg.payload.value.requests);
+        break;
+      }
+      case "annotationsSummary": {
+        const daemon = this.currentDaemon(conn);
+        // Not awaited: validation reads the store, and a sequence check makes the latest snapshot win.
+        if (daemon) void this.acceptAnnotationsSummary(daemon, msg.payload.value.workspaces);
         break;
       }
       case "agentControlRequest": {
@@ -2818,6 +2889,12 @@ export class Hub {
       if (this.secretRequests.delete(daemonId)) {
         this.broadcast(accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: [] } });
       }
+      // Annotation summaries are the connection's derived fact too; a validation still in flight
+      // for this connection is discarded by the sequence bump.
+      this.annotationSummarySeq.set(daemonId, (this.annotationSummarySeq.get(daemonId) ?? 0) + 1);
+      if (this.annotationSummaries.delete(daemonId)) {
+        this.broadcast(accountId, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: [] } });
+      }
       // close 清理也持 generation gate：后继连接只能在 lease/route/offline 广播全部收口后上线，
       // 避免旧 close continuation 在新连接 online 之后撤销新 lease 或补发 offline。
       await this.localControl.daemonDisconnected(daemonId);
@@ -2907,6 +2984,10 @@ export class Hub {
         // Pending secret requests follow the same rule: the client clears them with the snapshot.
         for (const [daemonId, entry] of this.secretRequests) {
           if (entry.accountId === accountId) this.sendClientNow(client, { case: "secretRequestsUpdated", value: { daemonId, requests: entry.requests } });
+        }
+        // Annotation summaries too (plan 20260929-browser-annotations).
+        for (const [daemonId, entry] of this.annotationSummaries) {
+          if (entry.accountId === accountId) this.sendClientNow(client, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: entry.workspaces } });
         }
         try {
           // ready prepared 列表也必须跨 complete 稳定：查询和投递都收进 service 的同一代际，

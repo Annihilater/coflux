@@ -472,6 +472,91 @@ public enum Coflux_V1_DeviceChangeStatus: SwiftProtobuf.Enum, Swift.CaseIterable
 
 }
 
+public enum Coflux_V1_AnnotationStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// Waiting for an agent.
+  case pending // = 1
+
+  /// An agent ran `coflux annotations resolve` with a note; waiting for the user to confirm
+  /// (delete) or reopen it.
+  case resolved // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .pending
+    case 2: self = .resolved
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .pending: return 1
+    case .resolved: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_AnnotationStatus] = [
+    .unspecified,
+    .pending,
+    .resolved,
+  ]
+
+}
+
+public enum Coflux_V1_AnnotationImageKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// Captured automatically from the page when the element was picked: its current state.
+  case screenshot // = 1
+
+  /// Pasted or attached by the user: what it should look like, or any other reference.
+  case reference // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .screenshot
+    case 2: self = .reference
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .screenshot: return 1
+    case .reference: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_AnnotationImageKind] = [
+    .unspecified,
+    .screenshot,
+    .reference,
+  ]
+
+}
+
 /// Native Tailcat candidate transport. These messages are distinct from legacy
 /// relay URLs and WebRTC signaling; DeviceEnvelope remains unchanged.
 public struct Coflux_V1_DeviceTailcatIdentity: Sendable {
@@ -2622,6 +2707,487 @@ public struct Coflux_V1_DeviceChangesFile: Sendable {
   fileprivate var _error: String? = nil
 }
 
+/// Enough about the annotated element to find it again on the page and in the code. Every field is
+/// best effort; the desktop fills what it could read.
+public struct Coflux_V1_AnnotationElement: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// A CSS selector that matched exactly this element when it was picked.
+  public var selector: String = String()
+
+  /// The element's path from <html>, as tag:nth-of-type(n) steps joined by " > ".
+  public var domPath: String = String()
+
+  public var tag: String = String()
+
+  /// The element's visible text, trimmed and shortened.
+  public var text: String = String()
+
+  public var elementID: String = String()
+
+  public var classes: [String] = []
+
+  /// A few identifying attributes (role, aria-label, name, type, href, alt, placeholder, data-testid…).
+  public var attributes: Dictionary<String,String> = [:]
+
+  /// A few computed styles (color, font-size, padding…), for mapping onto the design system.
+  public var styles: Dictionary<String,String> = [:]
+
+  /// Size in CSS pixels when picked.
+  public var width: Double = 0
+
+  public var height: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Framework source identity of the element, read from the page's own development data.
+public struct Coflux_V1_AnnotationSource: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "react", "vue", or empty when none was recognised.
+  public var framework: String = String()
+
+  /// Component names from the innermost outwards.
+  public var components: [String] = []
+
+  /// Source location when the page exposes it (React <= 18 development builds, Vue's __file).
+  public var file: String = String()
+
+  public var line: UInt32 = 0
+
+  public var column: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_AnnotationImage: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Assigned by the worker.
+  public var imageID: String = String()
+
+  public var kind: Coflux_V1_AnnotationImageKind = .unspecified
+
+  public var mimeType: String = String()
+
+  public var size: UInt32 = 0
+
+  /// Absolute path of the file on the workspace's device (read-only, filled by the worker).
+  public var path: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A comment added when a resolved annotation was reopened.
+public struct Coflux_V1_AnnotationFollowUp: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var comment: String = String()
+
+  /// The agent's note the comment answers.
+  public var previousNote: String = String()
+
+  public var createdAt: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_Annotation: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Assigned by the worker on creation.
+  public var annotationID: String {
+    get {_storage._annotationID}
+    set {_uniqueStorage()._annotationID = newValue}
+  }
+
+  /// Stable display number within the workspace (#1, #2…), assigned by the worker.
+  public var number: UInt32 {
+    get {_storage._number}
+    set {_uniqueStorage()._number = newValue}
+  }
+
+  public var status: Coflux_V1_AnnotationStatus {
+    get {_storage._status}
+    set {_uniqueStorage()._status = newValue}
+  }
+
+  public var pageURL: String {
+    get {_storage._pageURL}
+    set {_uniqueStorage()._pageURL = newValue}
+  }
+
+  public var pageTitle: String {
+    get {_storage._pageTitle}
+    set {_uniqueStorage()._pageTitle = newValue}
+  }
+
+  public var comment: String {
+    get {_storage._comment}
+    set {_uniqueStorage()._comment = newValue}
+  }
+
+  public var element: Coflux_V1_AnnotationElement {
+    get {_storage._element ?? Coflux_V1_AnnotationElement()}
+    set {_uniqueStorage()._element = newValue}
+  }
+  /// Returns true if `element` has been explicitly set.
+  public var hasElement: Bool {_storage._element != nil}
+  /// Clears the value of `element`. Subsequent reads from it will return its default value.
+  public mutating func clearElement() {_uniqueStorage()._element = nil}
+
+  public var source: Coflux_V1_AnnotationSource {
+    get {_storage._source ?? Coflux_V1_AnnotationSource()}
+    set {_uniqueStorage()._source = newValue}
+  }
+  /// Returns true if `source` has been explicitly set.
+  public var hasSource: Bool {_storage._source != nil}
+  /// Clears the value of `source`. Subsequent reads from it will return its default value.
+  public mutating func clearSource() {_uniqueStorage()._source = nil}
+
+  public var images: [Coflux_V1_AnnotationImage] {
+    get {_storage._images}
+    set {_uniqueStorage()._images = newValue}
+  }
+
+  /// The agent's note from `coflux annotations resolve`.
+  public var resolutionNote: String {
+    get {_storage._resolutionNote}
+    set {_uniqueStorage()._resolutionNote = newValue}
+  }
+
+  public var followUps: [Coflux_V1_AnnotationFollowUp] {
+    get {_storage._followUps}
+    set {_uniqueStorage()._followUps = newValue}
+  }
+
+  public var createdAt: Double {
+    get {_storage._createdAt}
+    set {_uniqueStorage()._createdAt = newValue}
+  }
+
+  public var updatedAt: Double {
+    get {_storage._updatedAt}
+    set {_uniqueStorage()._updatedAt = newValue}
+  }
+
+  public var resolvedAt: Double {
+    get {_storage._resolvedAt}
+    set {_uniqueStorage()._resolvedAt = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
+public struct Coflux_V1_AnnotationImageUpload: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var kind: Coflux_V1_AnnotationImageKind = .unspecified
+
+  public var mimeType: String = String()
+
+  public var data: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Create (empty annotation_id) or edit an annotation. On edit only the comment, the element
+/// context, the source and the images change; status and numbering are the worker's.
+public struct Coflux_V1_AnnotationPut: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var annotation: Coflux_V1_Annotation {
+    get {_annotation ?? Coflux_V1_Annotation()}
+    set {_annotation = newValue}
+  }
+  /// Returns true if `annotation` has been explicitly set.
+  public var hasAnnotation: Bool {self._annotation != nil}
+  /// Clears the value of `annotation`. Subsequent reads from it will return its default value.
+  public mutating func clearAnnotation() {self._annotation = nil}
+
+  public var addImages: [Coflux_V1_AnnotationImageUpload] = []
+
+  public var removeImageIds: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _annotation: Coflux_V1_Annotation? = nil
+}
+
+/// Confirm (or delete) annotations: their image files are deleted with them.
+public struct Coflux_V1_AnnotationDelete: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var annotationIds: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A resolved annotation goes back to pending with an added comment.
+public struct Coflux_V1_AnnotationReopen: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var annotationID: String = String()
+
+  public var comment: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Delete every resolved annotation of the workspace.
+public struct Coflux_V1_AnnotationClearResolved: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_CONTROL): the workspace's annotations, every status.
+public struct Coflux_V1_DeviceAnnotationsList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL).
+public struct Coflux_V1_DeviceAnnotationsListed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String = String()
+
+  public var revision: UInt32 = 0
+
+  public var annotations: [Coflux_V1_Annotation] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
+public struct Coflux_V1_DeviceAnnotationsMutate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var action: Coflux_V1_DeviceAnnotationsMutate.OneOf_Action? = nil
+
+  public var put: Coflux_V1_AnnotationPut {
+    get {
+      if case .put(let v)? = action {return v}
+      return Coflux_V1_AnnotationPut()
+    }
+    set {action = .put(newValue)}
+  }
+
+  public var delete: Coflux_V1_AnnotationDelete {
+    get {
+      if case .delete(let v)? = action {return v}
+      return Coflux_V1_AnnotationDelete()
+    }
+    set {action = .delete(newValue)}
+  }
+
+  public var reopen: Coflux_V1_AnnotationReopen {
+    get {
+      if case .reopen(let v)? = action {return v}
+      return Coflux_V1_AnnotationReopen()
+    }
+    set {action = .reopen(newValue)}
+  }
+
+  public var clearResolved_p: Coflux_V1_AnnotationClearResolved {
+    get {
+      if case .clearResolved_p(let v)? = action {return v}
+      return Coflux_V1_AnnotationClearResolved()
+    }
+    set {action = .clearResolved_p(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public enum OneOf_Action: Equatable, Sendable {
+    case put(Coflux_V1_AnnotationPut)
+    case delete(Coflux_V1_AnnotationDelete)
+    case reopen(Coflux_V1_AnnotationReopen)
+    case clearResolved_p(Coflux_V1_AnnotationClearResolved)
+
+  }
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL): the outcome; `annotation` is the stored result of a put or reopen.
+public struct Coflux_V1_DeviceAnnotationsMutated: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String = String()
+
+  public var revision: UInt32 = 0
+
+  public var annotation: Coflux_V1_Annotation {
+    get {_annotation ?? Coflux_V1_Annotation()}
+    set {_annotation = newValue}
+  }
+  /// Returns true if `annotation` has been explicitly set.
+  public var hasAnnotation: Bool {self._annotation != nil}
+  /// Clears the value of `annotation`. Subsequent reads from it will return its default value.
+  public mutating func clearAnnotation() {self._annotation = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _annotation: Coflux_V1_Annotation? = nil
+}
+
+/// client→worker (SESSION_CONTROL): one image file of an annotation.
+public struct Coflux_V1_DeviceAnnotationImageRead: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var annotationID: String = String()
+
+  public var imageID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL).
+public struct Coflux_V1_DeviceAnnotationImageData: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String = String()
+
+  public var mimeType: String = String()
+
+  public var data: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_CONTROL): type `text` into an agent's terminal of the workspace, then
+/// Enter, as the worker's agent input does (refused while another person holds the terminal).
+/// Used only when this desktop does not itself hold the terminal.
+public struct Coflux_V1_DeviceAnnotationHandOff: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var sessionID: String = String()
+
+  public var text: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL). `held` is set when the refusal is a person holding the terminal.
+public struct Coflux_V1_DeviceAnnotationHandOffResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String = String()
+
+  public var held: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_DeviceEnvelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3083,6 +3649,70 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .changesFile(newValue)}
   }
 
+  public var annotationsList: Coflux_V1_DeviceAnnotationsList {
+    get {
+      if case .annotationsList(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationsList()
+    }
+    set {payload = .annotationsList(newValue)}
+  }
+
+  public var annotationsListed: Coflux_V1_DeviceAnnotationsListed {
+    get {
+      if case .annotationsListed(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationsListed()
+    }
+    set {payload = .annotationsListed(newValue)}
+  }
+
+  public var annotationsMutate: Coflux_V1_DeviceAnnotationsMutate {
+    get {
+      if case .annotationsMutate(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationsMutate()
+    }
+    set {payload = .annotationsMutate(newValue)}
+  }
+
+  public var annotationsMutated: Coflux_V1_DeviceAnnotationsMutated {
+    get {
+      if case .annotationsMutated(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationsMutated()
+    }
+    set {payload = .annotationsMutated(newValue)}
+  }
+
+  public var annotationImageRead: Coflux_V1_DeviceAnnotationImageRead {
+    get {
+      if case .annotationImageRead(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationImageRead()
+    }
+    set {payload = .annotationImageRead(newValue)}
+  }
+
+  public var annotationImageData: Coflux_V1_DeviceAnnotationImageData {
+    get {
+      if case .annotationImageData(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationImageData()
+    }
+    set {payload = .annotationImageData(newValue)}
+  }
+
+  public var annotationHandOff: Coflux_V1_DeviceAnnotationHandOff {
+    get {
+      if case .annotationHandOff(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationHandOff()
+    }
+    set {payload = .annotationHandOff(newValue)}
+  }
+
+  public var annotationHandOffResult: Coflux_V1_DeviceAnnotationHandOffResult {
+    get {
+      if case .annotationHandOffResult(let v)? = payload {return v}
+      return Coflux_V1_DeviceAnnotationHandOffResult()
+    }
+    set {payload = .annotationHandOffResult(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -3142,6 +3772,14 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case changesList(Coflux_V1_DeviceChangesList)
     case changesFileRequest(Coflux_V1_DeviceChangesFileRequest)
     case changesFile(Coflux_V1_DeviceChangesFile)
+    case annotationsList(Coflux_V1_DeviceAnnotationsList)
+    case annotationsListed(Coflux_V1_DeviceAnnotationsListed)
+    case annotationsMutate(Coflux_V1_DeviceAnnotationsMutate)
+    case annotationsMutated(Coflux_V1_DeviceAnnotationsMutated)
+    case annotationImageRead(Coflux_V1_DeviceAnnotationImageRead)
+    case annotationImageData(Coflux_V1_DeviceAnnotationImageData)
+    case annotationHandOff(Coflux_V1_DeviceAnnotationHandOff)
+    case annotationHandOffResult(Coflux_V1_DeviceAnnotationHandOffResult)
 
   }
 
@@ -3182,6 +3820,14 @@ extension Coflux_V1_SecretAnswerStatus: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_DeviceChangeStatus: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DEVICE_CHANGE_STATUS_UNSPECIFIED\0\u{1}DEVICE_CHANGE_STATUS_ADDED\0\u{1}DEVICE_CHANGE_STATUS_MODIFIED\0\u{1}DEVICE_CHANGE_STATUS_DELETED\0\u{1}DEVICE_CHANGE_STATUS_RENAMED\0\u{1}DEVICE_CHANGE_STATUS_UNTRACKED\0")
+}
+
+extension Coflux_V1_AnnotationStatus: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ANNOTATION_STATUS_UNSPECIFIED\0\u{1}ANNOTATION_STATUS_PENDING\0\u{1}ANNOTATION_STATUS_RESOLVED\0")
+}
+
+extension Coflux_V1_AnnotationImageKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ANNOTATION_IMAGE_KIND_UNSPECIFIED\0\u{1}ANNOTATION_IMAGE_KIND_SCREENSHOT\0\u{1}ANNOTATION_IMAGE_KIND_REFERENCE\0")
 }
 
 extension Coflux_V1_DeviceTailcatIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -7300,9 +7946,988 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
   }
 }
 
+extension Coflux_V1_AnnotationElement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationElement"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}selector\0\u{3}dom_path\0\u{1}tag\0\u{1}text\0\u{3}element_id\0\u{1}classes\0\u{1}attributes\0\u{1}styles\0\u{1}width\0\u{1}height\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.selector) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.domPath) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.tag) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.elementID) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.classes) }()
+      case 7: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.attributes) }()
+      case 8: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.styles) }()
+      case 9: try { try decoder.decodeSingularDoubleField(value: &self.width) }()
+      case 10: try { try decoder.decodeSingularDoubleField(value: &self.height) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.selector.isEmpty {
+      try visitor.visitSingularStringField(value: self.selector, fieldNumber: 1)
+    }
+    if !self.domPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.domPath, fieldNumber: 2)
+    }
+    if !self.tag.isEmpty {
+      try visitor.visitSingularStringField(value: self.tag, fieldNumber: 3)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 4)
+    }
+    if !self.elementID.isEmpty {
+      try visitor.visitSingularStringField(value: self.elementID, fieldNumber: 5)
+    }
+    if !self.classes.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.classes, fieldNumber: 6)
+    }
+    if !self.attributes.isEmpty {
+      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.attributes, fieldNumber: 7)
+    }
+    if !self.styles.isEmpty {
+      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.styles, fieldNumber: 8)
+    }
+    if self.width.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.width, fieldNumber: 9)
+    }
+    if self.height.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.height, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationElement, rhs: Coflux_V1_AnnotationElement) -> Bool {
+    if lhs.selector != rhs.selector {return false}
+    if lhs.domPath != rhs.domPath {return false}
+    if lhs.tag != rhs.tag {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.elementID != rhs.elementID {return false}
+    if lhs.classes != rhs.classes {return false}
+    if lhs.attributes != rhs.attributes {return false}
+    if lhs.styles != rhs.styles {return false}
+    if lhs.width != rhs.width {return false}
+    if lhs.height != rhs.height {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationSource"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}framework\0\u{1}components\0\u{1}file\0\u{1}line\0\u{1}column\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.framework) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.components) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.file) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.line) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.column) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.framework.isEmpty {
+      try visitor.visitSingularStringField(value: self.framework, fieldNumber: 1)
+    }
+    if !self.components.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.components, fieldNumber: 2)
+    }
+    if !self.file.isEmpty {
+      try visitor.visitSingularStringField(value: self.file, fieldNumber: 3)
+    }
+    if self.line != 0 {
+      try visitor.visitSingularUInt32Field(value: self.line, fieldNumber: 4)
+    }
+    if self.column != 0 {
+      try visitor.visitSingularUInt32Field(value: self.column, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationSource, rhs: Coflux_V1_AnnotationSource) -> Bool {
+    if lhs.framework != rhs.framework {return false}
+    if lhs.components != rhs.components {return false}
+    if lhs.file != rhs.file {return false}
+    if lhs.line != rhs.line {return false}
+    if lhs.column != rhs.column {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationImage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationImage"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}image_id\0\u{1}kind\0\u{3}mime_type\0\u{1}size\0\u{1}path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.imageID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.mimeType) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.size) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.imageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.imageID, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if !self.mimeType.isEmpty {
+      try visitor.visitSingularStringField(value: self.mimeType, fieldNumber: 3)
+    }
+    if self.size != 0 {
+      try visitor.visitSingularUInt32Field(value: self.size, fieldNumber: 4)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationImage, rhs: Coflux_V1_AnnotationImage) -> Bool {
+    if lhs.imageID != rhs.imageID {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.mimeType != rhs.mimeType {return false}
+    if lhs.size != rhs.size {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationFollowUp: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationFollowUp"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}comment\0\u{3}previous_note\0\u{3}created_at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.comment) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.previousNote) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.createdAt) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.comment.isEmpty {
+      try visitor.visitSingularStringField(value: self.comment, fieldNumber: 1)
+    }
+    if !self.previousNote.isEmpty {
+      try visitor.visitSingularStringField(value: self.previousNote, fieldNumber: 2)
+    }
+    if self.createdAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.createdAt, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationFollowUp, rhs: Coflux_V1_AnnotationFollowUp) -> Bool {
+    if lhs.comment != rhs.comment {return false}
+    if lhs.previousNote != rhs.previousNote {return false}
+    if lhs.createdAt != rhs.createdAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_Annotation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Annotation"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}annotation_id\0\u{1}number\0\u{1}status\0\u{3}page_url\0\u{3}page_title\0\u{1}comment\0\u{1}element\0\u{1}source\0\u{1}images\0\u{3}resolution_note\0\u{3}follow_ups\0\u{3}created_at\0\u{3}updated_at\0\u{3}resolved_at\0")
+
+  fileprivate class _StorageClass {
+    var _annotationID: String = String()
+    var _number: UInt32 = 0
+    var _status: Coflux_V1_AnnotationStatus = .unspecified
+    var _pageURL: String = String()
+    var _pageTitle: String = String()
+    var _comment: String = String()
+    var _element: Coflux_V1_AnnotationElement? = nil
+    var _source: Coflux_V1_AnnotationSource? = nil
+    var _images: [Coflux_V1_AnnotationImage] = []
+    var _resolutionNote: String = String()
+    var _followUps: [Coflux_V1_AnnotationFollowUp] = []
+    var _createdAt: Double = 0
+    var _updatedAt: Double = 0
+    var _resolvedAt: Double = 0
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _annotationID = source._annotationID
+      _number = source._number
+      _status = source._status
+      _pageURL = source._pageURL
+      _pageTitle = source._pageTitle
+      _comment = source._comment
+      _element = source._element
+      _source = source._source
+      _images = source._images
+      _resolutionNote = source._resolutionNote
+      _followUps = source._followUps
+      _createdAt = source._createdAt
+      _updatedAt = source._updatedAt
+      _resolvedAt = source._resolvedAt
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._annotationID) }()
+        case 2: try { try decoder.decodeSingularUInt32Field(value: &_storage._number) }()
+        case 3: try { try decoder.decodeSingularEnumField(value: &_storage._status) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._pageURL) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._pageTitle) }()
+        case 6: try { try decoder.decodeSingularStringField(value: &_storage._comment) }()
+        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._element) }()
+        case 8: try { try decoder.decodeSingularMessageField(value: &_storage._source) }()
+        case 9: try { try decoder.decodeRepeatedMessageField(value: &_storage._images) }()
+        case 10: try { try decoder.decodeSingularStringField(value: &_storage._resolutionNote) }()
+        case 11: try { try decoder.decodeRepeatedMessageField(value: &_storage._followUps) }()
+        case 12: try { try decoder.decodeSingularDoubleField(value: &_storage._createdAt) }()
+        case 13: try { try decoder.decodeSingularDoubleField(value: &_storage._updatedAt) }()
+        case 14: try { try decoder.decodeSingularDoubleField(value: &_storage._resolvedAt) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._annotationID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._annotationID, fieldNumber: 1)
+      }
+      if _storage._number != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._number, fieldNumber: 2)
+      }
+      if _storage._status != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._status, fieldNumber: 3)
+      }
+      if !_storage._pageURL.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._pageURL, fieldNumber: 4)
+      }
+      if !_storage._pageTitle.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._pageTitle, fieldNumber: 5)
+      }
+      if !_storage._comment.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._comment, fieldNumber: 6)
+      }
+      try { if let v = _storage._element {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      } }()
+      try { if let v = _storage._source {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+      } }()
+      if !_storage._images.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._images, fieldNumber: 9)
+      }
+      if !_storage._resolutionNote.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._resolutionNote, fieldNumber: 10)
+      }
+      if !_storage._followUps.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._followUps, fieldNumber: 11)
+      }
+      if _storage._createdAt.bitPattern != 0 {
+        try visitor.visitSingularDoubleField(value: _storage._createdAt, fieldNumber: 12)
+      }
+      if _storage._updatedAt.bitPattern != 0 {
+        try visitor.visitSingularDoubleField(value: _storage._updatedAt, fieldNumber: 13)
+      }
+      if _storage._resolvedAt.bitPattern != 0 {
+        try visitor.visitSingularDoubleField(value: _storage._resolvedAt, fieldNumber: 14)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_Annotation, rhs: Coflux_V1_Annotation) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._annotationID != rhs_storage._annotationID {return false}
+        if _storage._number != rhs_storage._number {return false}
+        if _storage._status != rhs_storage._status {return false}
+        if _storage._pageURL != rhs_storage._pageURL {return false}
+        if _storage._pageTitle != rhs_storage._pageTitle {return false}
+        if _storage._comment != rhs_storage._comment {return false}
+        if _storage._element != rhs_storage._element {return false}
+        if _storage._source != rhs_storage._source {return false}
+        if _storage._images != rhs_storage._images {return false}
+        if _storage._resolutionNote != rhs_storage._resolutionNote {return false}
+        if _storage._followUps != rhs_storage._followUps {return false}
+        if _storage._createdAt != rhs_storage._createdAt {return false}
+        if _storage._updatedAt != rhs_storage._updatedAt {return false}
+        if _storage._resolvedAt != rhs_storage._resolvedAt {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationImageUpload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationImageUpload"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{3}mime_type\0\u{1}data\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.mimeType) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if !self.mimeType.isEmpty {
+      try visitor.visitSingularStringField(value: self.mimeType, fieldNumber: 2)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationImageUpload, rhs: Coflux_V1_AnnotationImageUpload) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.mimeType != rhs.mimeType {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationPut: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationPut"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}annotation\0\u{3}add_images\0\u{3}remove_image_ids\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._annotation) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.addImages) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.removeImageIds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._annotation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if !self.addImages.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.addImages, fieldNumber: 2)
+    }
+    if !self.removeImageIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.removeImageIds, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationPut, rhs: Coflux_V1_AnnotationPut) -> Bool {
+    if lhs._annotation != rhs._annotation {return false}
+    if lhs.addImages != rhs.addImages {return false}
+    if lhs.removeImageIds != rhs.removeImageIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationDelete: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationDelete"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}annotation_ids\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedStringField(value: &self.annotationIds) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.annotationIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.annotationIds, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationDelete, rhs: Coflux_V1_AnnotationDelete) -> Bool {
+    if lhs.annotationIds != rhs.annotationIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationReopen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationReopen"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}annotation_id\0\u{1}comment\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.annotationID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.comment) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.annotationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.annotationID, fieldNumber: 1)
+    }
+    if !self.comment.isEmpty {
+      try visitor.visitSingularStringField(value: self.comment, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationReopen, rhs: Coflux_V1_AnnotationReopen) -> Bool {
+    if lhs.annotationID != rhs.annotationID {return false}
+    if lhs.comment != rhs.comment {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_AnnotationClearResolved: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AnnotationClearResolved"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_AnnotationClearResolved, rhs: Coflux_V1_AnnotationClearResolved) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationsList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationsList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationsList, rhs: Coflux_V1_DeviceAnnotationsList) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationsListed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}revision\0\u{1}annotations\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.revision) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.annotations) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 3)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt32Field(value: self.revision, fieldNumber: 4)
+    }
+    if !self.annotations.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.annotations, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationsListed, rhs: Coflux_V1_DeviceAnnotationsListed) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.annotations != rhs.annotations {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationsMutate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationsMutate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}put\0\u{1}delete\0\u{1}reopen\0\u{3}clear_resolved\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 3: try {
+        var v: Coflux_V1_AnnotationPut?
+        var hadOneofValue = false
+        if let current = self.action {
+          hadOneofValue = true
+          if case .put(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.action = .put(v)
+        }
+      }()
+      case 4: try {
+        var v: Coflux_V1_AnnotationDelete?
+        var hadOneofValue = false
+        if let current = self.action {
+          hadOneofValue = true
+          if case .delete(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.action = .delete(v)
+        }
+      }()
+      case 5: try {
+        var v: Coflux_V1_AnnotationReopen?
+        var hadOneofValue = false
+        if let current = self.action {
+          hadOneofValue = true
+          if case .reopen(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.action = .reopen(v)
+        }
+      }()
+      case 6: try {
+        var v: Coflux_V1_AnnotationClearResolved?
+        var hadOneofValue = false
+        if let current = self.action {
+          hadOneofValue = true
+          if case .clearResolved_p(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.action = .clearResolved_p(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    switch self.action {
+    case .put?: try {
+      guard case .put(let v)? = self.action else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case .delete?: try {
+      guard case .delete(let v)? = self.action else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .reopen?: try {
+      guard case .reopen(let v)? = self.action else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .clearResolved_p?: try {
+      guard case .clearResolved_p(let v)? = self.action else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationsMutate, rhs: Coflux_V1_DeviceAnnotationsMutate) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.action != rhs.action {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationsMutated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationsMutated"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}revision\0\u{1}annotation\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.revision) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._annotation) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 3)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt32Field(value: self.revision, fieldNumber: 4)
+    }
+    try { if let v = self._annotation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationsMutated, rhs: Coflux_V1_DeviceAnnotationsMutated) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs._annotation != rhs._annotation {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationImageRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationImageRead"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{3}annotation_id\0\u{3}image_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.annotationID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.imageID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    if !self.annotationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.annotationID, fieldNumber: 3)
+    }
+    if !self.imageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.imageID, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationImageRead, rhs: Coflux_V1_DeviceAnnotationImageRead) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.annotationID != rhs.annotationID {return false}
+    if lhs.imageID != rhs.imageID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationImageData: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationImageData"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}mime_type\0\u{1}data\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.mimeType) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.data) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 3)
+    }
+    if !self.mimeType.isEmpty {
+      try visitor.visitSingularStringField(value: self.mimeType, fieldNumber: 4)
+    }
+    if !self.data.isEmpty {
+      try visitor.visitSingularBytesField(value: self.data, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationImageData, rhs: Coflux_V1_DeviceAnnotationImageData) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.mimeType != rhs.mimeType {return false}
+    if lhs.data != rhs.data {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationHandOff: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationHandOff"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{3}session_id\0\u{1}text\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 3)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationHandOff, rhs: Coflux_V1_DeviceAnnotationHandOff) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceAnnotationHandOffResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationHandOffResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}held\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.held) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 3)
+    }
+    if self.held != false {
+      try visitor.visitSingularBoolField(value: self.held, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceAnnotationHandOffResult, rhs: Coflux_V1_DeviceAnnotationHandOffResult) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.held != rhs.held {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8040,6 +9665,110 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .changesFile(v)
         }
       }()
+      case 110: try {
+        var v: Coflux_V1_DeviceAnnotationsList?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationsList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationsList(v)
+        }
+      }()
+      case 111: try {
+        var v: Coflux_V1_DeviceAnnotationsListed?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationsListed(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationsListed(v)
+        }
+      }()
+      case 112: try {
+        var v: Coflux_V1_DeviceAnnotationsMutate?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationsMutate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationsMutate(v)
+        }
+      }()
+      case 113: try {
+        var v: Coflux_V1_DeviceAnnotationsMutated?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationsMutated(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationsMutated(v)
+        }
+      }()
+      case 114: try {
+        var v: Coflux_V1_DeviceAnnotationImageRead?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationImageRead(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationImageRead(v)
+        }
+      }()
+      case 115: try {
+        var v: Coflux_V1_DeviceAnnotationImageData?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationImageData(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationImageData(v)
+        }
+      }()
+      case 116: try {
+        var v: Coflux_V1_DeviceAnnotationHandOff?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationHandOff(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationHandOff(v)
+        }
+      }()
+      case 117: try {
+        var v: Coflux_V1_DeviceAnnotationHandOffResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .annotationHandOffResult(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .annotationHandOffResult(v)
+        }
+      }()
       default: break
       }
     }
@@ -8280,6 +10009,38 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .changesFile?: try {
       guard case .changesFile(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 103)
+    }()
+    case .annotationsList?: try {
+      guard case .annotationsList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 110)
+    }()
+    case .annotationsListed?: try {
+      guard case .annotationsListed(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 111)
+    }()
+    case .annotationsMutate?: try {
+      guard case .annotationsMutate(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 112)
+    }()
+    case .annotationsMutated?: try {
+      guard case .annotationsMutated(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 113)
+    }()
+    case .annotationImageRead?: try {
+      guard case .annotationImageRead(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 114)
+    }()
+    case .annotationImageData?: try {
+      guard case .annotationImageData(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 115)
+    }()
+    case .annotationHandOff?: try {
+      guard case .annotationHandOff(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 116)
+    }()
+    case .annotationHandOffResult?: try {
+      guard case .annotationHandOffResult(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 117)
     }()
     case nil: break
     }

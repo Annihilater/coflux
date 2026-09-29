@@ -28,6 +28,7 @@ use crate::agent_ctl::executor::{
     self, Effect as ExecutorEffect, ExecutorLedger, HostAuthority, RegisterOutcome,
     RunRecord as ExecutorRun,
 };
+use crate::annotations::AnnotationStore;
 use crate::device_loopback::{self, LoopbackTable};
 use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
@@ -68,6 +69,10 @@ const CALL_LEDGER_BYTES: usize = 64 * 1024 * 1024;
 // 收敛成可缓存的终态，不能因账本满而遗忘已经执行过的 operation。
 const CALL_LEDGER_RESULT_RESERVE_BYTES: usize = 512;
 const PREPARED_LIMIT: usize = 1024;
+/// 「交给 agent」 (plan 20260929-browser-annotations): the instruction is one short line.
+const ANNOTATION_HAND_OFF_MAX_BYTES: usize = 4 * 1024;
+/// Pause between the instruction and its Enter, so the agent's TUI sees typing, not a paste.
+const ANNOTATION_HAND_OFF_ENTER_DELAY: Duration = Duration::from_millis(150);
 const PREPARED_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PREPARED_FRAME_BYTES: usize = 1024 * 1024;
 const OPERATION_REPORT_BYTES: usize = 64 * 1024 * 1024;
@@ -823,6 +828,9 @@ pub struct DeviceRuntime {
     /// consumers already hold it: the secret socket, the Device-channel answers, the
     /// session-exit cleanup and the snapshot redaction below.
     secrets: Arc<SecretVault>,
+    /// Browser annotations (plan 20260929-browser-annotations): the per-workspace store under
+    /// `$COFLUX_HOME/annotations`. Present in production only (it needs the home directory).
+    annotations: Option<Arc<AnnotationStore>>,
 }
 
 impl DeviceRuntime {
@@ -883,6 +891,9 @@ impl DeviceRuntime {
         channel_limit: usize,
     ) -> Arc<Self> {
         let secrets = Arc::new(SecretVault::new(to_server.clone()));
+        let annotations = services
+            .as_ref()
+            .map(|services| Arc::new(AnnotationStore::new(&services.cfg.home, to_server.clone())));
         let aggregate_queue = AggregateQueueBudget::new(
             aggregate_byte_limit,
             channel_limit.saturating_mul(CHANNEL_GAP_FRAME_BYTES),
@@ -920,6 +931,7 @@ impl DeviceRuntime {
             aggregate_queue,
             loopback_connections: Arc::new(AtomicUsize::new(0)),
             secrets,
+            annotations,
         })
     }
 
@@ -1216,6 +1228,11 @@ impl DeviceRuntime {
     /// The worker's secret custody (plan 20260926-agent-secret-input).
     pub fn secrets(&self) -> &Arc<SecretVault> {
         &self.secrets
+    }
+
+    /// The worker's browser annotation store (plan 20260929-browser-annotations).
+    pub fn annotations(&self) -> Option<&Arc<AnnotationStore>> {
+        self.annotations.as_ref()
     }
 
     /// 精确 control exit 和 catalog tombstone 共用的可靠上报入口。
@@ -2055,6 +2072,155 @@ impl DeviceRuntime {
         );
     }
 
+    /// The annotation store, or the error the desktop sees when this runtime has none.
+    fn annotation_store(&self) -> Result<Arc<AnnotationStore>, String> {
+        self.annotations
+            .clone()
+            .ok_or_else(|| "annotations are unavailable on this worker".to_string())
+    }
+
+    async fn annotations_list(&self, request: wire::DeviceAnnotationsList) -> device_envelope::Payload {
+        let workspace_id = request.workspace_id.clone();
+        let outcome = match self.annotation_store() {
+            Ok(store) => blocking(move || {
+                let (revision, list) = store.list(&workspace_id)?;
+                let annotations: Vec<wire::Annotation> = list
+                    .iter()
+                    .map(|annotation| store.to_wire(&workspace_id, annotation))
+                    .collect();
+                Ok((revision, annotations))
+            })
+            .await,
+            Err(error) => Err(error),
+        };
+        let (ok, error, revision, annotations) = match outcome {
+            Ok((revision, annotations)) => (true, String::new(), revision, annotations),
+            Err(error) => (false, error, 0, Vec::new()),
+        };
+        device_envelope::Payload::AnnotationsListed(wire::DeviceAnnotationsListed {
+            request_id: request.request_id,
+            ok,
+            error,
+            revision,
+            annotations,
+        })
+    }
+
+    async fn annotations_mutate(&self, request: wire::DeviceAnnotationsMutate) -> device_envelope::Payload {
+        use wire::device_annotations_mutate::Action;
+        let workspace_id = request.workspace_id.clone();
+        let action = request.action;
+        let outcome = match self.annotation_store() {
+            Ok(store) => blocking(move || {
+                let Some(action) = action else {
+                    return Err("the change names no action".to_string());
+                };
+                match action {
+                    Action::Put(put) => store
+                        .put(&workspace_id, put)
+                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)))),
+                    Action::Delete(delete) => store
+                        .delete(&workspace_id, &delete.annotation_ids)
+                        .map(|revision| (revision, None)),
+                    Action::Reopen(reopen) => store
+                        .reopen(&workspace_id, &reopen.annotation_id, &reopen.comment)
+                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)))),
+                    Action::ClearResolved(_) => store
+                        .clear_resolved(&workspace_id)
+                        .map(|revision| (revision, None)),
+                }
+            })
+            .await,
+            Err(error) => Err(error),
+        };
+        let (ok, error, revision, annotation) = match outcome {
+            Ok((revision, annotation)) => (true, String::new(), revision, annotation),
+            Err(error) => (false, error, 0, None),
+        };
+        if !ok {
+            logln!("[annotations] change refused: {error}");
+        }
+        device_envelope::Payload::AnnotationsMutated(wire::DeviceAnnotationsMutated {
+            request_id: request.request_id,
+            ok,
+            error,
+            revision,
+            annotation,
+        })
+    }
+
+    async fn annotation_image_read(&self, request: wire::DeviceAnnotationImageRead) -> device_envelope::Payload {
+        let workspace_id = request.workspace_id.clone();
+        let annotation_id = request.annotation_id.clone();
+        let image_id = request.image_id.clone();
+        let outcome = match self.annotation_store() {
+            Ok(store) => blocking(move || store.read_image(&workspace_id, &annotation_id, &image_id)).await,
+            Err(error) => Err(error),
+        };
+        let (ok, error, mime_type, data) = match outcome {
+            Ok((mime_type, data)) => (true, String::new(), mime_type, data),
+            Err(error) => (false, error, String::new(), Vec::new()),
+        };
+        device_envelope::Payload::AnnotationImageData(wire::DeviceAnnotationImageData {
+            request_id: request.request_id,
+            ok,
+            error,
+            mime_type,
+            data,
+        })
+    }
+
+    /// 「交给 agent」 when this desktop does not hold the terminal itself: type the instruction into
+    /// an agent terminal of the workspace through the worker's agent input (the same front door as
+    /// `coflux terminal send`), refused readably while a person holds the terminal. The text and
+    /// Enter go as two writes: an agent's TUI treats one fast burst ending in CR as a paste.
+    async fn annotation_hand_off(
+        self: &Arc<Self>,
+        services: &ProductionServices,
+        request: wire::DeviceAnnotationHandOff,
+    ) -> device_envelope::Payload {
+        let result = |ok: bool, error: String, held: bool| {
+            device_envelope::Payload::AnnotationHandOffResult(wire::DeviceAnnotationHandOffResult {
+                request_id: request.request_id.clone(),
+                ok,
+                error,
+                held,
+            })
+        };
+        let text = request.text.trim();
+        if text.is_empty() || text.len() > ANNOTATION_HAND_OFF_MAX_BYTES || text.chars().any(char::is_control) {
+            return result(false, "the instruction must be one line of text".into(), false);
+        }
+        let owned = {
+            let state = services.state.lock().unwrap();
+            state.ledger.session(&request.session_id).is_some_and(|record| {
+                record.workspace_id == request.workspace_id
+                    && record.phase == crate::session_ledger::SessionPhase::Running
+            })
+        };
+        if !owned {
+            return result(false, "the terminal is not running in this workspace".into(), false);
+        }
+        if self.human_holder_present(&request.session_id) {
+            return result(false, "someone is using this terminal on another desktop".into(), true);
+        }
+        if let Err(error) = self
+            .agent_send_input(&request.session_id, text.as_bytes().to_vec())
+            .await
+        {
+            let held = self.human_holder_present(&request.session_id);
+            return result(false, error, held);
+        }
+        tokio::time::sleep(ANNOTATION_HAND_OFF_ENTER_DELAY).await;
+        match self.agent_send_input(&request.session_id, b"\r".to_vec()).await {
+            Ok(()) => result(true, String::new(), false),
+            Err(error) => {
+                let held = self.human_holder_present(&request.session_id);
+                result(false, error, held)
+            }
+        }
+    }
+
     /// Route one client tunnel frame to the channel's table, creating it on the first open.
     fn handle_loopback_frame(self: &Arc<Self>, channel_id: &str, payload: device_envelope::Payload) {
         let handle = {
@@ -2728,7 +2894,7 @@ impl DeviceRuntime {
     }
 
     async fn execute_worker_payload(
-        &self,
+        self: &Arc<Self>,
         payload: device_envelope::Payload,
     ) -> device_envelope::Payload {
         let Some(services) = &self.services else {
@@ -2931,6 +3097,18 @@ impl DeviceRuntime {
                     request_id: request.request_id,
                     sessions,
                 })
+            }
+            device_envelope::Payload::AnnotationsList(request) => {
+                self.annotations_list(request).await
+            }
+            device_envelope::Payload::AnnotationsMutate(request) => {
+                self.annotations_mutate(request).await
+            }
+            device_envelope::Payload::AnnotationImageRead(request) => {
+                self.annotation_image_read(request).await
+            }
+            device_envelope::Payload::AnnotationHandOff(request) => {
+                self.annotation_hand_off(services, request).await
             }
             // 心跳：纯 echo，不读任何状态、不做任何副作用——往返时间才近似纯链路延迟。
             device_envelope::Payload::Ping(request) => {
@@ -4026,6 +4204,8 @@ fn worker_operation_id(payload: &device_envelope::Payload) -> Option<&str> {
         device_envelope::Payload::WorktreeRemove(value) => Some(&value.operation_id),
         device_envelope::Payload::ExecRun(value) => value.operation_id.as_deref(),
         device_envelope::Payload::FsWrite(value) => Some(&value.operation_id),
+        // Never list an annotation payload here (plan 20260929-browser-annotations): a listed
+        // payload's result frame is reported to the center, and annotation content must not be.
         _ => None,
     }
 }
@@ -4059,6 +4239,10 @@ fn clear_request_id(payload: &mut device_envelope::Payload) {
         device_envelope::Payload::PortsRequest(value) => value.request_id.clear(),
         device_envelope::Payload::ChangesListRequest(value) => value.request_id.clear(),
         device_envelope::Payload::ChangesFileRequest(value) => value.request_id.clear(),
+        device_envelope::Payload::AnnotationsList(value) => value.request_id.clear(),
+        device_envelope::Payload::AnnotationsMutate(value) => value.request_id.clear(),
+        device_envelope::Payload::AnnotationImageRead(value) => value.request_id.clear(),
+        device_envelope::Payload::AnnotationHandOff(value) => value.request_id.clear(),
         _ => {}
     }
 }
@@ -4087,6 +4271,18 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::ChangesList(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::ChangesFile(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::Pong(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::AnnotationsListed(value) => {
+            value.request_id = request_id.to_string()
+        }
+        device_envelope::Payload::AnnotationsMutated(value) => {
+            value.request_id = request_id.to_string()
+        }
+        device_envelope::Payload::AnnotationImageData(value) => {
+            value.request_id = request_id.to_string()
+        }
+        device_envelope::Payload::AnnotationHandOffResult(value) => {
+            value.request_id = request_id.to_string()
+        }
         device_envelope::Payload::Error(value) => {
             value.request_id = (!request_id.is_empty()).then(|| request_id.to_string())
         }
@@ -4189,6 +4385,14 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         // Secret answers (plan 20260926-agent-secret-input): granted per channel, not per session.
         // No attach or holder_epoch is required, so any desktop of the account can answer.
         device_envelope::Payload::SecretAnswer(_) => Some(DeviceScope::SessionControl),
+        // Browser annotations (plan 20260929-browser-annotations): SESSION_CONTROL, not RPC, so a
+        // local workspace's annotations keep working while the center is unreachable (RPC exists
+        // only under an online center lease). SESSION_CONTROL already allows typing into every
+        // terminal, so reading and writing annotations or handing them to an agent widens nothing.
+        device_envelope::Payload::AnnotationsList(_)
+        | device_envelope::Payload::AnnotationsMutate(_)
+        | device_envelope::Payload::AnnotationImageRead(_)
+        | device_envelope::Payload::AnnotationHandOff(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
@@ -4222,6 +4426,10 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::ExecutorCancel(_)
         | device_envelope::Payload::ExecutorReportAck(_) => Some(DeviceScope::SessionControl),
         device_envelope::Payload::SecretAnswerAck(_) => Some(DeviceScope::SessionControl),
+        device_envelope::Payload::AnnotationsListed(_)
+        | device_envelope::Payload::AnnotationsMutated(_)
+        | device_envelope::Payload::AnnotationImageData(_)
+        | device_envelope::Payload::AnnotationHandOffResult(_) => Some(DeviceScope::SessionControl),
         _ => None,
     }
 }
@@ -4257,6 +4465,10 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::Ping(value) => Some(value.request_id.clone()),
         // Only so a scope refusal reaches the waiting answer; answers never enter the call ledger.
         device_envelope::Payload::SecretAnswer(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::AnnotationsList(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::AnnotationsMutate(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::AnnotationImageRead(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::AnnotationHandOff(value) => Some(value.request_id.clone()),
         _ => None,
     }
 }
@@ -4277,6 +4489,17 @@ fn reserve_bytes(pending: &AtomicUsize, length: usize, limit: usize) -> bool {
             Err(actual) => current = actual,
         }
     }
+}
+
+/// Runs blocking annotation store work on the blocking pool.
+async fn blocking<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|_| Err("the annotation store task failed".into()))
 }
 
 fn epoch_ms() -> f64 {

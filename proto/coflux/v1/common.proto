@@ -219,3 +219,15 @@ message SecretRequestRef {
   // ms epoch; after it the worker answers the agent `cancelled` and drops the request.
   double expires_at = 7;
 }
+
+// One workspace's browser annotations as the center may know them (plan
+// 20260929-browser-annotations): a revision that changes on every change of the workspace's
+// annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
+// end to end between desktops and the worker, and a desktop showing the workspace refetches it over
+// the Device channel when the revision changes.
+message WorkspaceAnnotationSummary {
+  string workspace_id = 1;
+  uint32 revision = 2;
+  uint32 pending = 3;
+  uint32 resolved = 4;
+}

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 import type {
+  DesktopAnnotatorState,
   DesktopBridge,
   DesktopBrowserCertificate,
   DesktopBrowserClearTarget,
@@ -245,6 +246,10 @@ const bridge: DesktopBridge = {
   },
   onBrowserEvent(listener) {
     return subscribe<DesktopBrowserEvent>(IPC.browserEvent, listener);
+  },
+  browserAnnotatorSync(guestId: number, state: DesktopAnnotatorState) {
+    // Rebuilt as plain data; main sanitizes every field again.
+    ipcRenderer.send(IPC.browserAnnotatorSync, { guestId: Number(guestId), state: JSON.parse(JSON.stringify(state)) as unknown });
   },
 };
 

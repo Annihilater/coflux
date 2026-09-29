@@ -1,0 +1,361 @@
+//! `coflux annotations list | watch | resolve` (plan 20260929-browser-annotations).
+//!
+//! The user annotates elements of the workspace's page in Coflux's built-in browser; the worker of
+//! the workspace's device keeps them. These commands are local agent actions on `/agent`, resolved
+//! to the caller's **effective** workspace like every other local command: `list` prints the
+//! pending ones as markdown (or `--json`), `watch` blocks until there are some, and `resolve`
+//! records what the agent changed so the user can confirm it or reopen it.
+//!
+//! Rendering is pure (unit-tested); I/O only happens in [`run`].
+
+use std::time::{Duration, Instant};
+
+use serde_json::{Map, Value};
+
+use crate::args::ParsedArgs;
+use crate::gateway;
+
+/// Default `watch` budget, in seconds: the same order as `terminal wait`.
+const DEFAULT_WATCH_TIMEOUT_S: f64 = 1800.0;
+/// One `/agent` round is capped at 25 s on the loopback endpoint; the daemon blocks up to this.
+const WATCH_ROUND_MS: u64 = 20_000;
+
+fn body(action: &str) -> Map<String, Value> {
+    let mut map = Map::new();
+    map.insert("action".into(), Value::from(action));
+    map
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn number(value: &Value, key: &str) -> u64 {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Inline code that survives backticks inside the value.
+fn code(value: &str) -> String {
+    let fence = if value.contains('`') { "``" } else { "`" };
+    format!("{fence}{value}{fence}")
+}
+
+fn workspace_label(result: &Value) -> String {
+    let reference = text(result, "ref");
+    let reference = if reference.is_empty() { text(result, "workspaceId") } else { reference };
+    let path = text(result, "path");
+    if path.is_empty() {
+        reference.to_string()
+    } else {
+        format!("{reference} ({path})")
+    }
+}
+
+fn render_element(element: &Value, out: &mut Vec<String>) {
+    let tag = text(element, "tag");
+    if !tag.is_empty() {
+        let mut opening = format!("<{tag}");
+        let id = text(element, "elementId");
+        if !id.is_empty() {
+            opening.push_str(&format!(" id=\"{id}\""));
+        }
+        let classes: Vec<&str> = element
+            .get("classes")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !classes.is_empty() {
+            opening.push_str(&format!(" class=\"{}\"", classes.join(" ")));
+        }
+        if let Some(attributes) = element.get("attributes").and_then(Value::as_object) {
+            for (key, value) in attributes {
+                if let Some(value) = value.as_str() {
+                    opening.push_str(&format!(" {key}=\"{}\"", one_line(value)));
+                }
+            }
+        }
+        opening.push('>');
+        let excerpt = one_line(text(element, "text"));
+        if excerpt.is_empty() {
+            out.push(format!("- Element: {}", code(&opening)));
+        } else {
+            out.push(format!("- Element: {} with text \"{excerpt}\"", code(&opening)));
+        }
+    }
+    let selector = text(element, "selector");
+    if !selector.is_empty() {
+        out.push(format!("- Selector: {}", code(selector)));
+    }
+    let dom_path = text(element, "domPath");
+    if !dom_path.is_empty() {
+        out.push(format!("- DOM path: {}", code(dom_path)));
+    }
+    if let Some(styles) = element.get("styles").and_then(Value::as_object) {
+        let rendered: Vec<String> = styles
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| format!("{key}: {value}")))
+            .collect();
+        if !rendered.is_empty() {
+            out.push(format!("- Computed styles: {}", code(&rendered.join("; "))));
+        }
+    }
+}
+
+fn render_source(source: &Value, out: &mut Vec<String>) {
+    if source.is_null() {
+        return;
+    }
+    let components: Vec<&str> = source
+        .get("components")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let framework = text(source, "framework");
+    if !components.is_empty() {
+        let chain = components.join(" < ");
+        if framework.is_empty() {
+            out.push(format!("- Components (innermost first): {chain}"));
+        } else {
+            out.push(format!("- Components (innermost first, {framework}): {chain}"));
+        }
+    }
+    let file = text(source, "file");
+    if !file.is_empty() {
+        let mut location = file.to_string();
+        let line = number(source, "line");
+        if line > 0 {
+            location.push_str(&format!(":{line}"));
+            let column = number(source, "column");
+            if column > 0 {
+                location.push_str(&format!(":{column}"));
+            }
+        }
+        out.push(format!("- Source: {}", code(&location)));
+    }
+}
+
+/// One annotation as a markdown section.
+pub fn render_annotation(annotation: &Value) -> String {
+    let mut out = Vec::new();
+    out.push(format!(
+        "## #{} · {}",
+        number(annotation, "number"),
+        code(text(annotation, "id"))
+    ));
+    out.push(String::new());
+    let comment = text(annotation, "comment").trim();
+    if !comment.is_empty() {
+        for line in comment.lines() {
+            out.push(format!("> {line}"));
+        }
+        out.push(String::new());
+    }
+    if let Some(follow_ups) = annotation.get("followUps").and_then(Value::as_array) {
+        for follow_up in follow_ups {
+            let note = one_line(text(follow_up, "previousNote"));
+            let reply = one_line(text(follow_up, "comment"));
+            if !note.is_empty() {
+                out.push(format!("- Earlier you resolved it with: \"{note}\""));
+            }
+            out.push(format!("- The user reopened it: \"{reply}\""));
+        }
+    }
+    let page = annotation.get("page").cloned().unwrap_or(Value::Null);
+    let url = text(&page, "url");
+    let title = one_line(text(&page, "title"));
+    if !url.is_empty() {
+        if title.is_empty() {
+            out.push(format!("- Page: {url}"));
+        } else {
+            out.push(format!("- Page: {url} (\"{title}\")"));
+        }
+    }
+    render_source(annotation.get("source").unwrap_or(&Value::Null), &mut out);
+    render_element(annotation.get("element").unwrap_or(&Value::Null), &mut out);
+    if let Some(images) = annotation.get("images").and_then(Value::as_array) {
+        for image in images {
+            let label = if text(image, "kind") == "screenshot" {
+                "Screenshot of the current state"
+            } else {
+                "Reference image from the user"
+            };
+            out.push(format!("- {label}: {}", text(image, "path")));
+        }
+    }
+    out.join("\n")
+}
+
+/// `coflux annotations list`: the effective workspace's pending annotations as markdown.
+pub fn render_list(result: &Value) -> String {
+    let workspace = workspace_label(result);
+    let annotations = result
+        .get("annotations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let resolved = number(result, "resolvedCount");
+    if annotations.is_empty() {
+        let mut line = format!("No pending browser annotations in workspace {workspace}.");
+        if resolved > 0 {
+            line.push_str(&format!(" {resolved} resolved one(s) are waiting for the user to review."));
+        }
+        return line;
+    }
+    let mut out = vec![
+        format!("# Browser annotations · workspace {workspace}"),
+        String::new(),
+        format!(
+            "{} pending. The user marked these elements in Coflux's built-in browser. For each one: find the code (component names and source locations are the best leads; the selector and DOM path describe the element in the page), make the change, then run `coflux annotations resolve <id> --note \"<what you changed>\"`. Map raw values such as colors, sizes and spacing to the project's design system (its tokens and components) instead of hard-coding them. Images are files on this machine: read them to see the current state and the user's references.",
+            annotations.len()
+        ),
+    ];
+    for annotation in &annotations {
+        out.push(String::new());
+        out.push(render_annotation(annotation));
+    }
+    out.join("\n")
+}
+
+pub fn render_resolved(result: &Value) -> String {
+    let annotation = result.get("annotation").cloned().unwrap_or(Value::Null);
+    format!(
+        "Resolved #{} ({}). The user will confirm it, or reopen it with a comment.",
+        number(&annotation, "number"),
+        text(&annotation, "id")
+    )
+}
+
+fn timeout_secs(raw: Option<&str>) -> f64 {
+    raw.and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_WATCH_TIMEOUT_S)
+}
+
+fn print_listing(result: &Value, json: bool) {
+    if json {
+        println!("{result}");
+    } else {
+        println!("{}", render_list(result));
+    }
+}
+
+pub fn run(args: &ParsedArgs) {
+    let json = args.flag("json");
+    match args.positional(1) {
+        Some("list") => {
+            let result = gateway::agent_post(body("annotations.list"));
+            print_listing(&result, json);
+        }
+        Some("watch") => {
+            let timeout = timeout_secs(args.string("timeout"));
+            let deadline = Duration::try_from_secs_f64(timeout)
+                .ok()
+                .and_then(|timeout| Instant::now().checked_add(timeout));
+            loop {
+                let round_ms = deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis() as u64)
+                    .unwrap_or(WATCH_ROUND_MS)
+                    .clamp(1, WATCH_ROUND_MS);
+                let mut request = body("annotations.watch");
+                request.insert("timeoutMs".into(), Value::from(round_ms));
+                let result = gateway::agent_post(request);
+                if text(&result, "state") == "pending" {
+                    print_listing(&result, json);
+                    return;
+                }
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    crate::die(&format!(
+                        "no pending browser annotations in workspace {} within {timeout}s",
+                        workspace_label(&result)
+                    ));
+                }
+            }
+        }
+        Some("resolve") => {
+            let Some(id) = args.positional(2) else {
+                crate::die("usage: coflux annotations resolve <id> --note \"<what you changed>\"");
+            };
+            let note = args.string("note").unwrap_or("").trim().to_string();
+            if note.is_empty() {
+                crate::die("annotations resolve needs --note \"<what you changed>\": the user reads it to review the change");
+            }
+            let mut request = body("annotations.resolve");
+            request.insert("annotationId".into(), Value::from(id));
+            request.insert("note".into(), Value::from(note));
+            let result = gateway::agent_post(request);
+            if json {
+                println!("{result}");
+            } else {
+                println!("{}", render_resolved(&result));
+            }
+        }
+        _ => crate::die("annotations needs a subcommand: list | watch | resolve <id> --note \"…\""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample() -> Value {
+        json!({
+            "workspaceId": "3f2a1b7c-0000",
+            "ref": "coflux:workspace:3f2a1b7c",
+            "path": "/src/app",
+            "revision": 4,
+            "resolvedCount": 1,
+            "annotations": [{
+                "id": "ann-0011", "number": 2, "status": "pending",
+                "comment": "Make it blue",
+                "page": { "url": "http://localhost:3000/", "title": "Home" },
+                "element": { "tag": "button", "elementId": "save", "classes": ["btn"], "attributes": {},
+                    "styles": { "color": "rgb(0, 0, 0)" }, "selector": "#save", "domPath": "html > body > button", "text": "Save" },
+                "source": { "framework": "react", "components": ["SaveButton", "Toolbar"], "file": "src/Save.tsx", "line": 12, "column": 3 },
+                "images": [{ "kind": "screenshot", "path": "/h/annotations/w/ann-0011/img-1.png" }, { "kind": "reference", "path": "/h/r.jpg" }],
+                "followUps": [{ "comment": "still black", "previousNote": "set color", "createdAt": 1.0 }]
+            }]
+        })
+    }
+
+    #[test]
+    fn list_renders_everything_an_agent_needs() {
+        let rendered = render_list(&sample());
+        for phrase in [
+            "workspace coflux:workspace:3f2a1b7c (/src/app)",
+            "## #2 · `ann-0011`",
+            "> Make it blue",
+            "Components (innermost first, react): SaveButton < Toolbar",
+            "Source: `src/Save.tsx:12:3`",
+            "Element: `<button id=\"save\" class=\"btn\">` with text \"Save\"",
+            "Screenshot of the current state: /h/annotations/w/ann-0011/img-1.png",
+            "Reference image from the user: /h/r.jpg",
+            "The user reopened it: \"still black\"",
+            "coflux annotations resolve <id>",
+            "design system",
+        ] {
+            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn empty_list_names_the_workspace() {
+        let rendered = render_list(&json!({ "ref": "coflux:workspace:aa", "annotations": [], "resolvedCount": 2 }));
+        assert_eq!(
+            rendered,
+            "No pending browser annotations in workspace coflux:workspace:aa. 2 resolved one(s) are waiting for the user to review."
+        );
+    }
+
+    #[test]
+    fn resolved_line() {
+        assert_eq!(
+            render_resolved(&json!({ "annotation": { "id": "ann-1", "number": 3 } })),
+            "Resolved #3 (ann-1). The user will confirm it, or reopen it with a comment."
+        );
+    }
+}

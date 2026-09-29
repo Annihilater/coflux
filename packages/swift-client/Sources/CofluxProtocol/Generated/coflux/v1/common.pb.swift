@@ -608,6 +608,29 @@ public struct Coflux_V1_SecretRequestRef: Sendable {
   public init() {}
 }
 
+/// One workspace's browser annotations as the center may know them (plan
+/// 20260929-browser-annotations): a revision that changes on every change of the workspace's
+/// annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
+/// end to end between desktops and the worker, and a desktop showing the workspace refetches it over
+/// the Device channel when the revision changes.
+public struct Coflux_V1_WorkspaceAnnotationSummary: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workspaceID: String = String()
+
+  public var revision: UInt32 = 0
+
+  public var pending: UInt32 = 0
+
+  public var resolved: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate let _protobuf_package = "coflux.v1"
@@ -1570,6 +1593,51 @@ extension Coflux_V1_SecretRequestRef: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.reason != rhs.reason {return false}
     if lhs.createdAt != rhs.createdAt {return false}
     if lhs.expiresAt != rhs.expiresAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_WorkspaceAnnotationSummary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorkspaceAnnotationSummary"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}revision\0\u{1}pending\0\u{1}resolved\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.revision) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.pending) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.resolved) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt32Field(value: self.revision, fieldNumber: 2)
+    }
+    if self.pending != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pending, fieldNumber: 3)
+    }
+    if self.resolved != 0 {
+      try visitor.visitSingularUInt32Field(value: self.resolved, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_WorkspaceAnnotationSummary, rhs: Coflux_V1_WorkspaceAnnotationSummary) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.pending != rhs.pending {return false}
+    if lhs.resolved != rhs.resolved {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -835,37 +835,11 @@ fn write_store_atomic(
     signing_key: &SigningKey,
     state: &LocalState,
 ) -> Result<(), std::io::Error> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("local gateway store 缺少 parent"))?;
-    fs::create_dir_all(parent)?;
-    let bytes = encode_store(signing_key, state)?;
-    let mut suffix = [0u8; 8];
-    OsRng.fill_bytes(&mut suffix);
-    let temp = parent.join(format!(
-        ".{STORE_FILE}.tmp-{}-{}",
-        std::process::id(),
-        hex::encode(suffix)
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        secure_permissions_io(path)?;
-        if let Ok(directory) = OpenOptions::new().read(true).open(parent) {
-            let _ = directory.sync_all();
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+    if path.parent().is_none() {
+        return Err(std::io::Error::other("local gateway store 缺少 parent"));
     }
-    result
+    let bytes = encode_store(signing_key, state)?;
+    crate::atomic_file::write_atomic(path, &bytes)
 }
 
 fn secure_permissions(path: &Path) -> Result<(), String> {

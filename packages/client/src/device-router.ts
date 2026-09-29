@@ -11,6 +11,11 @@ import {
   SecretAnswerKind,
   SecretAnswerStatus,
   type ClientToServerPayload,
+  type DeviceAnnotationHandOffResult,
+  type DeviceAnnotationImageData,
+  type DeviceAnnotationsListed,
+  type DeviceAnnotationsMutate,
+  type DeviceAnnotationsMutated,
   type DeviceEnvelope,
   type DeviceEnvelopePayload,
   type DeviceChangesFile,
@@ -78,6 +83,17 @@ const DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新后才
 /** The changes view reads one file at a time; a file near the worker's 6 MB per-side cap on a slow
  * link needs longer than the default RPC timeout. */
 const CHANGES_FILE_TIMEOUT_MS = 45_000;
+/** The error code of an annotation request a device's worker does not support (plan
+ * 20260929-browser-annotations). Only ever derived from the worker's own request-id-less
+ * `empty_payload` reply, never from a timeout: a timeout means unreachable or slow. */
+export const ANNOTATIONS_UNSUPPORTED = "annotations_unsupported";
+/** The error code of an annotation request whose frame could not fit in one Device frame; refused
+ * before sending, because a frame `sendOn` cannot send tears the whole session lane down. */
+export const ANNOTATION_FRAME_TOO_LARGE = "annotation_frame_too_large";
+/** Room left in a Device frame for the channel id the frame is re-encoded with. */
+const ANNOTATION_FRAME_MARGIN_BYTES = 4096;
+/** A save carries images (up to a few MiB each) and may cross a relay. */
+const ANNOTATION_WRITE_TIMEOUT_MS = 60_000;
 
 const CONTROL_DATA_GRACE_MS = 15_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
@@ -329,6 +345,16 @@ interface DeviceRoute {
   heartbeatUnsupported?: boolean;
   /** 最近一次心跳往返；随 publish 一并对外暴露，见 DeviceTransportState.rttMs。 */
   rttMs?: number;
+  /** At least one pong arrived: this worker knows `ping`, so an unattributed `empty_payload`
+   * cannot be the heartbeat's (plan 20260929-browser-annotations). */
+  heartbeatConfirmed?: boolean;
+  /** The channel generation on which the worker answered annotation requests with its
+   * request-id-less `empty_payload`: annotation requests on that channel fail fast as unsupported.
+   * A new channel (a hot-upgraded worker, a reconnect) asks again. */
+  annotationsUnsupportedGeneration?: bigint;
+  /** Further `empty_payload` replies still expected on that generation for annotation requests that
+   * were already failed together with the first one; swallowed, never shown as a generic error. */
+  annotationStrayErrors?: { generation: bigint; count: number };
   /** publish 过的最后一组 (mode, detail)：心跳只更新 rtt，需要照原样重发一次状态。 */
   lastPublished?: { mode: DeviceTransportMode; detail: string };
   retainCount: number;
@@ -1440,6 +1466,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         // 故在这里自行配对：只认最后发出的那一发，迟到的旧 pong 直接丢。
         if (route.pendingPing?.requestId !== payload.value.requestId) break;
         route.rttMs = Math.max(0, clock.now() - route.pendingPing.startedAt);
+        route.heartbeatConfirmed = true;
         route.pendingPing = undefined;
         route.heartbeatMisses = 0;
         clearHeartbeatTimeout(route);
@@ -1483,6 +1510,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // 归给心跳，是新 client 对旧 daemon 唯一可能的归因；不归就会顺着默认路径落到
     // options.onError，变成每个心跳周期骚扰用户一次，且骚扰的恰恰是最该被安静降级的旧设备。
     // 归因后顺手关掉这条 route 的心跳：在旧 daemon 上它永远不会成功，再发只是白费往返。
+    // Browser annotations (plan 20260929-browser-annotations) are attributed the same way, first:
+    // an older worker answers each annotation request with a request-id-less `empty_payload`.
+    if (!requestId && code === "empty_payload" && attributeAnnotationsUnsupported(route, channel)) return true;
     // Heartbeats only travel on the session lane, so only an error that arrived there can be the
     // heartbeat's: an id-less error on the elevated lane belongs to an RPC request (below).
     if (channel.lane === "session" && route.pendingPing && (code === "empty_payload" || code === "unsupported_payload")
@@ -1594,6 +1624,30 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     reportDeviceError(route, message);
     return true;
+  }
+
+  /** Whether a request-id-less `empty_payload` belongs to annotation requests in flight on this
+   * channel. When the heartbeat is also in flight on a worker not yet known to answer pings, the
+   * reply is left to the heartbeat: the annotation request's own reply follows it. */
+  function attributeAnnotationsUnsupported(route: DeviceRoute, channel: DeviceChannel): boolean {
+    const stray = route.annotationStrayErrors;
+    if (stray && stray.generation === channel.generation && stray.count > 0) {
+      stray.count -= 1;
+      return true;
+    }
+    const pending = [...route.pendingRequests.values()].filter((entry) => isAnnotationPayload(entry.payload));
+    const sent = pending.filter((entry) => entry.sentGeneration === channel.generation);
+    if (sent.length === 0) return false;
+    if (route.pendingPing && !route.heartbeatConfirmed) return false;
+    route.annotationsUnsupportedGeneration = channel.generation;
+    route.annotationStrayErrors = { generation: channel.generation, count: sent.length - 1 };
+    for (const entry of pending) finishPendingWithError(route, entry, annotationsUnsupportedError());
+    return true;
+  }
+
+  function annotationsUnsupportedNow(route: DeviceRoute): boolean {
+    const generation = route.annotationsUnsupportedGeneration;
+    return generation !== undefined && route.sessionLane.active?.generation === generation;
   }
 
   function handleAttached(route: DeviceRoute, channel: DeviceChannel, attached: Extract<RuntimeDevicePayload, { case: "sessionAttached" }>["value"]): void {
@@ -2314,6 +2368,76 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
   }
 
+  /** Browser annotations (plan 20260929-browser-annotations). Every call needs only
+   * SESSION_CONTROL on the session lane (it works with the center down for a local device) and
+   * holds a transient demand, like answerSecret, so a device the user has not selected is reached
+   * too. An older worker fails the call with ANNOTATIONS_UNSUPPORTED. */
+  async function annotationRequest(
+    daemonId: string,
+    payload: DeviceEnvelopePayload,
+    timeoutMs = DEVICE_REQUEST_TIMEOUT_MS,
+  ): Promise<RuntimeDevicePayload> {
+    const route = routeFor(daemonId);
+    if (annotationsUnsupportedNow(route)) throw annotationsUnsupportedError();
+    const frameBytes = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, { protocolVersion: DEVICE_PROTOCOL_VERSION, channelId: "", payload })).byteLength;
+    if (frameBytes + ANNOTATION_FRAME_MARGIN_BYTES > MAX_DEVICE_FRAME_BYTES) {
+      throw new DeviceRouteError("批注内容太大，超过了单次传输上限", ANNOTATION_FRAME_TOO_LARGE);
+    }
+    route.transientDemand += 1;
+    try {
+      return await request(daemonId, DeviceScope.SESSION_CONTROL, payload, timeoutMs);
+    } finally {
+      route.transientDemand = Math.max(0, route.transientDemand - 1);
+      releaseIdle(route);
+    }
+  }
+
+  async function listAnnotations(daemonId: string, workspaceId: string): Promise<DeviceAnnotationsListed> {
+    const response = await annotationRequest(daemonId, { case: "annotationsList", value: { requestId: randomUUID(), workspaceId } });
+    if (response.case === "annotationsListed") return response.value;
+    throw unexpectedResponse("annotationsListed", response);
+  }
+
+  async function mutateAnnotations(
+    daemonId: string,
+    workspaceId: string,
+    action: DeviceAnnotationsMutate["action"],
+  ): Promise<DeviceAnnotationsMutated> {
+    const response = await annotationRequest(
+      daemonId,
+      { case: "annotationsMutate", value: { requestId: randomUUID(), workspaceId, action } },
+      ANNOTATION_WRITE_TIMEOUT_MS,
+    );
+    if (response.case === "annotationsMutated") return response.value;
+    throw unexpectedResponse("annotationsMutated", response);
+  }
+
+  async function readAnnotationImage(daemonId: string, workspaceId: string, annotationId: string, imageId: string): Promise<DeviceAnnotationImageData> {
+    const response = await annotationRequest(
+      daemonId,
+      { case: "annotationImageRead", value: { requestId: randomUUID(), workspaceId, annotationId, imageId } },
+      ANNOTATION_WRITE_TIMEOUT_MS,
+    );
+    if (response.case === "annotationImageData") return response.value;
+    throw unexpectedResponse("annotationImageData", response);
+  }
+
+  async function handOffAnnotations(daemonId: string, workspaceId: string, sessionId: string, text: string): Promise<DeviceAnnotationHandOffResult> {
+    const response = await annotationRequest(daemonId, {
+      case: "annotationHandOff",
+      value: { requestId: randomUUID(), workspaceId, sessionId, text },
+    });
+    if (response.case === "annotationHandOffResult") return response.value;
+    throw unexpectedResponse("annotationHandOffResult", response);
+  }
+
+  /** Whether this client itself drives the session's terminal (it is open and attached here):
+   * input can then be typed as the user's own, without asking the worker. */
+  function holdsSession(daemonId: string, sessionId: string): boolean {
+    const session = routes.get(daemonId)?.sessions.get(sessionId);
+    return session !== undefined && session.desired && !session.detached && session.holderEpoch !== undefined;
+  }
+
   async function requestPorts(daemonId: string): Promise<DevicePortsResult> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "portsRequest",
@@ -2606,6 +2730,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     changesFile,
     requestPorts,
     answerSecret,
+    listAnnotations,
+    mutateAnnotations,
+    readAnnotationImage,
+    handOffAnnotations,
+    holdsSession,
     executePrepared,
     reset,
     destroy,
@@ -2634,6 +2763,10 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "secretAnswer":
     case "changesListRequest":
     case "changesFileRequest":
+    case "annotationsList":
+    case "annotationsMutate":
+    case "annotationImageRead":
+    case "annotationHandOff":
       return payload.value.requestId;
     default:
       return undefined;
@@ -2661,6 +2794,10 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "secretAnswerAck":
     case "changesList":
     case "changesFile":
+    case "annotationsListed":
+    case "annotationsMutated":
+    case "annotationImageData":
+    case "annotationHandOffResult":
       return payload.value.requestId;
     case "error":
       return payload.value.requestId;
@@ -2679,6 +2816,22 @@ function preparedOperationId(payload: RuntimeDevicePayload): string | undefined 
     default:
       return undefined;
   }
+}
+
+function isAnnotationPayload(payload: RuntimeDevicePayload): boolean {
+  switch (payload.case) {
+    case "annotationsList":
+    case "annotationsMutate":
+    case "annotationImageRead":
+    case "annotationHandOff":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function annotationsUnsupportedError(): Error {
+  return new DeviceRouteError("该设备的 coflux 版本过旧，不支持浏览器批注", ANNOTATIONS_UNSUPPORTED);
 }
 
 function unexpectedResponse(expected: string, payload: RuntimeDevicePayload): Error {

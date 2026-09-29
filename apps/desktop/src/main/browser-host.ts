@@ -62,6 +62,8 @@ import {
   type GuestKeyAction,
   type TrustedCertificates,
 } from "./browser-policy";
+import { createBrowserAnnotator } from "./browser-annotator";
+import { sanitizeAnnotatorSync } from "./browser-annotator-policy";
 import { startPartitionProxy, type PartitionProxy } from "./browser-proxy";
 import { isTrustedRendererUrl } from "./ipc-trust";
 
@@ -230,6 +232,10 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   function send(event: DesktopBrowserEvent): void {
     options.sendToRenderer(IPC.browserEvent, event);
   }
+
+  // Browser annotations (plan 20260929-browser-annotations): CDP instrumentation of page guests,
+  // attached on demand. Guests keep no preload; the gate below is untouched by it.
+  const annotator = createBrowserAnnotator({ send, log: options.log });
 
   function modeOf(entry: ConfiguredPartition): DesktopBrowserMode {
     const local = options.localDaemonId();
@@ -597,6 +603,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     contents.on("zoom-changed", (_event, direction) => zoom(guest, direction));
     contents.on("devtools-closed", () => {
       devtoolsHostOf.delete(contents.id);
+      annotator.retry(contents);
       send({ kind: "devtools-closed", guestId: contents.id });
     });
     // A link clicked inside DevTools (a source URL, a docs link) opens as a browser tab too.
@@ -633,6 +640,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   }
 
   function forgetGuest(id: number): void {
+    annotator.forget(id);
     guests.delete(id);
     frozen.delete(id);
     devtoolsHostOf.delete(id);
@@ -688,8 +696,10 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     }
     guests.set(contents.id, guest);
     contents.once("destroyed", () => forgetGuest(contents.id));
-    if (guest.kind === "page") installPageGuest(guest);
-    else installDevToolsHost(guest);
+    if (guest.kind === "page") {
+      installPageGuest(guest);
+      annotator.adopt(contents);
+    } else installDevToolsHost(guest);
   }
 
   function reloadFocusedGuest(): boolean {
@@ -953,6 +963,13 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       return tunnelFailure(guest, input.url);
     });
 
+    ipcMain.on(IPC.browserAnnotatorSync, (event, payload: unknown) => {
+      if (!allowed(event)) return;
+      const input = sanitizeAnnotatorSync(payload);
+      const guest = input ? pageGuest(event, input.guestId) : null;
+      if (input && guest) annotator.sync(guest.contents, input.state);
+    });
+
     ipcMain.handle(IPC.browserTrustCertificate, (event, payload: unknown) => {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizeCertificateQuery(payload);
@@ -970,6 +987,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     // configured (their handlers read live state), and a new renderer prepares again before it
     // inserts any webview.
     prepared.clear();
+    annotator.reset();
     guests.clear();
     devtoolsHostOf.clear();
     frozen.clear();

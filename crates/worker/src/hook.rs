@@ -456,6 +456,12 @@ struct AgentBody {
     /// executor 的 run id（status / cancel）
     #[serde(default)]
     run_id: String,
+    /// `annotations.resolve` (plan 20260929-browser-annotations): the annotation's id or number,
+    /// and the agent's note saying what changed.
+    #[serde(default)]
+    annotation_id: String,
+    #[serde(default)]
+    note: String,
 }
 
 /// 单次 send 的文本上限（也是 `terminal.run` 命令行的上限）：与 MCP `send_terminal_input` 的 64 KB
@@ -626,6 +632,29 @@ async fn handle_agent(
             }
             AgentAction::ExecutorCancel {
                 run_id: parsed.run_id,
+            }
+        }
+        "annotations.list" => AgentAction::AnnotationsList,
+        "annotations.watch" => AgentAction::AnnotationsWatch {
+            timeout_ms: parsed.timeout_ms,
+        },
+        "annotations.resolve" => {
+            if parsed.annotation_id.trim().is_empty() {
+                return Err(RequestError::BadRequest("annotations.resolve needs an annotation id".into()));
+            }
+            if parsed.note.trim().is_empty() {
+                return Err(RequestError::BadRequest(
+                    "annotations.resolve needs --note saying what changed".into(),
+                ));
+            }
+            if parsed.note.len() > MAX_SEND_TEXT_BYTES {
+                return Err(RequestError::BadRequest(format!(
+                    "annotations.resolve note exceeds {MAX_SEND_TEXT_BYTES} bytes"
+                )));
+            }
+            AgentAction::AnnotationsResolve {
+                annotation_id: parsed.annotation_id,
+                note: parsed.note,
             }
         }
         other => return Err(RequestError::BadRequest(format!("未知 action {other}"))),

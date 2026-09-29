@@ -941,6 +941,208 @@ message DeviceChangesFile {
   bool binary = 9;
 }
 
+// ===== Browser annotations (plan 20260929-browser-annotations) =====
+//
+// A desktop annotates elements of a page in its built-in browser tab; the annotations belong to
+// the workspace and are kept by the worker of the device hosting it, under
+// $COFLUX_HOME/annotations/<workspace_id>/ (an index plus one file per image). Their content —
+// comments, element context, images — travels only over this end-to-end channel: none of these
+// payloads carries an operation_id and none is ever reported to the center. The center only sees
+// the metadata-only WorkspaceAnnotationSummary (revision and counts).
+//
+// Every request requires DEVICE_SCOPE_SESSION_CONTROL (not RPC): a local workspace's annotations
+// keep working while the center is unreachable. A worker that predates these payloads decodes them
+// as an empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients treat
+// exactly that as "the device's worker does not support annotations", never a timeout.
+
+enum AnnotationStatus {
+  ANNOTATION_STATUS_UNSPECIFIED = 0;
+  // Waiting for an agent.
+  ANNOTATION_STATUS_PENDING = 1;
+  // An agent ran `coflux annotations resolve` with a note; waiting for the user to confirm
+  // (delete) or reopen it.
+  ANNOTATION_STATUS_RESOLVED = 2;
+}
+
+enum AnnotationImageKind {
+  ANNOTATION_IMAGE_KIND_UNSPECIFIED = 0;
+  // Captured automatically from the page when the element was picked: its current state.
+  ANNOTATION_IMAGE_KIND_SCREENSHOT = 1;
+  // Pasted or attached by the user: what it should look like, or any other reference.
+  ANNOTATION_IMAGE_KIND_REFERENCE = 2;
+}
+
+// Enough about the annotated element to find it again on the page and in the code. Every field is
+// best effort; the desktop fills what it could read.
+message AnnotationElement {
+  // A CSS selector that matched exactly this element when it was picked.
+  string selector = 1;
+  // The element's path from <html>, as tag:nth-of-type(n) steps joined by " > ".
+  string dom_path = 2;
+  string tag = 3;
+  // The element's visible text, trimmed and shortened.
+  string text = 4;
+  string element_id = 5;
+  repeated string classes = 6;
+  // A few identifying attributes (role, aria-label, name, type, href, alt, placeholder, data-testid…).
+  map<string, string> attributes = 7;
+  // A few computed styles (color, font-size, padding…), for mapping onto the design system.
+  map<string, string> styles = 8;
+  // Size in CSS pixels when picked.
+  double width = 9;
+  double height = 10;
+}
+
+// Framework source identity of the element, read from the page's own development data.
+message AnnotationSource {
+  // "react", "vue", or empty when none was recognised.
+  string framework = 1;
+  // Component names from the innermost outwards.
+  repeated string components = 2;
+  // Source location when the page exposes it (React <= 18 development builds, Vue's __file).
+  string file = 3;
+  uint32 line = 4;
+  uint32 column = 5;
+}
+
+message AnnotationImage {
+  // Assigned by the worker.
+  string image_id = 1;
+  AnnotationImageKind kind = 2;
+  string mime_type = 3;
+  uint32 size = 4;
+  // Absolute path of the file on the workspace's device (read-only, filled by the worker).
+  string path = 5;
+}
+
+// A comment added when a resolved annotation was reopened.
+message AnnotationFollowUp {
+  string comment = 1;
+  // The agent's note the comment answers.
+  string previous_note = 2;
+  double created_at = 3;
+}
+
+message Annotation {
+  // Assigned by the worker on creation.
+  string annotation_id = 1;
+  // Stable display number within the workspace (#1, #2…), assigned by the worker.
+  uint32 number = 2;
+  AnnotationStatus status = 3;
+  string page_url = 4;
+  string page_title = 5;
+  string comment = 6;
+  AnnotationElement element = 7;
+  AnnotationSource source = 8;
+  repeated AnnotationImage images = 9;
+  // The agent's note from `coflux annotations resolve`.
+  string resolution_note = 10;
+  repeated AnnotationFollowUp follow_ups = 11;
+  double created_at = 12;
+  double updated_at = 13;
+  double resolved_at = 14;
+}
+
+// An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
+message AnnotationImageUpload {
+  AnnotationImageKind kind = 1;
+  string mime_type = 2;
+  bytes data = 3;
+}
+
+// Create (empty annotation_id) or edit an annotation. On edit only the comment, the element
+// context, the source and the images change; status and numbering are the worker's.
+message AnnotationPut {
+  Annotation annotation = 1;
+  repeated AnnotationImageUpload add_images = 2;
+  repeated string remove_image_ids = 3;
+}
+
+// Confirm (or delete) annotations: their image files are deleted with them.
+message AnnotationDelete {
+  repeated string annotation_ids = 1;
+}
+
+// A resolved annotation goes back to pending with an added comment.
+message AnnotationReopen {
+  string annotation_id = 1;
+  string comment = 2;
+}
+
+// Delete every resolved annotation of the workspace.
+message AnnotationClearResolved {}
+
+// client→worker (SESSION_CONTROL): the workspace's annotations, every status.
+message DeviceAnnotationsList {
+  string request_id = 1;
+  string workspace_id = 2;
+}
+
+// worker→client (SESSION_CONTROL).
+message DeviceAnnotationsListed {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  uint32 revision = 4;
+  repeated Annotation annotations = 5;
+}
+
+// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
+message DeviceAnnotationsMutate {
+  string request_id = 1;
+  string workspace_id = 2;
+  oneof action {
+    AnnotationPut put = 3;
+    AnnotationDelete delete = 4;
+    AnnotationReopen reopen = 5;
+    AnnotationClearResolved clear_resolved = 6;
+  }
+}
+
+// worker→client (SESSION_CONTROL): the outcome; `annotation` is the stored result of a put or reopen.
+message DeviceAnnotationsMutated {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  uint32 revision = 4;
+  Annotation annotation = 5;
+}
+
+// client→worker (SESSION_CONTROL): one image file of an annotation.
+message DeviceAnnotationImageRead {
+  string request_id = 1;
+  string workspace_id = 2;
+  string annotation_id = 3;
+  string image_id = 4;
+}
+
+// worker→client (SESSION_CONTROL).
+message DeviceAnnotationImageData {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  string mime_type = 4;
+  bytes data = 5;
+}
+
+// client→worker (SESSION_CONTROL): type `text` into an agent's terminal of the workspace, then
+// Enter, as the worker's agent input does (refused while another person holds the terminal).
+// Used only when this desktop does not itself hold the terminal.
+message DeviceAnnotationHandOff {
+  string request_id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string text = 4;
+}
+
+// worker→client (SESSION_CONTROL). `held` is set when the refusal is a person holding the terminal.
+message DeviceAnnotationHandOffResult {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  bool held = 4;
+}
+
 message DeviceEnvelope {
   uint32 protocol_version = 1;
   // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
@@ -1003,5 +1205,13 @@ message DeviceEnvelope {
     DeviceChangesList changes_list = 101;
     DeviceChangesFileRequest changes_file_request = 102;
     DeviceChangesFile changes_file = 103;
+    DeviceAnnotationsList annotations_list = 110;
+    DeviceAnnotationsListed annotations_listed = 111;
+    DeviceAnnotationsMutate annotations_mutate = 112;
+    DeviceAnnotationsMutated annotations_mutated = 113;
+    DeviceAnnotationImageRead annotation_image_read = 114;
+    DeviceAnnotationImageData annotation_image_data = 115;
+    DeviceAnnotationHandOff annotation_hand_off = 116;
+    DeviceAnnotationHandOffResult annotation_hand_off_result = 117;
   }
 }

@@ -1,5 +1,7 @@
 export type { AuthCredential, ClientKind, ConnectionStatus } from "./connection";
 export {
+  ANNOTATION_UPLOAD_TOO_LARGE,
+  MAX_ANNOTATION_UPLOAD_BYTES,
   createCofluxClient,
   isDirWorkspace,
   workspaceActivity,
@@ -31,6 +33,13 @@ export {
   type SecretAnswer,
   type SecretAnswerResult,
   type WorkspaceActivity,
+  type AnnotationSummaryState,
+  type AnnotationFailure,
+  type AnnotationListResult,
+  type AnnotationMutateResult,
+  type AnnotationImageResult,
+  type AnnotationHandOffResult,
+  type AnnotationChange,
 } from "./store";
 export {
   type NativeRemoteTransport,
