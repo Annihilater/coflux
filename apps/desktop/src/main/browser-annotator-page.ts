@@ -40,6 +40,8 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   var frame = 0;
   var observer = null;
   var relocateTimer = 0;
+  // An annotation to scroll into view once its element is found (it may render after the page loads).
+  var pendingScroll = null;
 
   function emit(message) {
     try {
@@ -335,6 +337,13 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
       }
       if (!current) missing.push(pin.id);
     }
+    if (pendingScroll) {
+      var target = located.get(pendingScroll);
+      if (target) {
+        pendingScroll = null;
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }
     located.forEach(function (_, id) { if (!alive.has(id)) located.delete(id); });
     var key = location.href + "|" + missing.join(",");
     if (key !== lastMissing) {
@@ -448,13 +457,14 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
         document.head.appendChild(cursorStyle);
       }
       if (!state.mode && hoverBox) { hoverBox.style.display = "none"; hoverLabel.style.display = "none"; }
-      if (state.pins.length) { watchDom(); relocate(); }
-      else if (lastMissing) { lastMissing = ""; }
       var anchor = state.anchor;
       if (anchor && anchor.kind === "pin" && anchor.scroll && (!previous || previous.kind !== "pin" || previous.id !== anchor.id)) {
-        var element = located.get(anchor.id);
-        if (element) element.scrollIntoView({ block: "center", behavior: "smooth" });
+        pendingScroll = anchor.id;
+      } else if (!anchor || anchor.kind !== "pin") {
+        pendingScroll = null;
       }
+      if (state.pins.length) { watchDom(); relocate(); }
+      else if (lastMissing) { lastMissing = ""; }
       lastAnchor = "";
       schedule();
       return true;
