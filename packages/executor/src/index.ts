@@ -91,6 +91,7 @@ export {
   type ExecutorRunnerInbound,
   type ExecutorRunnerOutbound,
   type ExecutorRunnerStart,
+  type ExecutorTranscriptFragment,
 } from "./runner-protocol.js";
 
 export {

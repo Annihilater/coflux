@@ -118,6 +118,15 @@ message AnnotationsSummary {
   repeated WorkspaceAnnotationSummary workspaces = 1;
 }
 
+// Full idempotent snapshot of this daemon's live executor runs (plan 20260929-executor-pip), same
+// shape as SecretRequests: sent on every change of the ledger (including a sweep that turned a run
+// unknown) and unconditionally after authentication; empty = none running. The server validates
+// each entry's session/task against its catalog, keeps the result in memory only and fans it out to
+// the account's clients. Metadata only: no prompt, no transcript.
+message ExecutorRuns {
+  repeated ExecutorRunRef runs = 1;
+}
+
 // ===== agent 协同控制（plan 074）=====
 //
 // 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
@@ -342,6 +351,7 @@ message DaemonToServer {
     DeviceTailcatOpened device_tailcat_opened = 38;
     SecretRequests secret_requests = 39;
     AnnotationsSummary annotations_summary = 40;
+    ExecutorRuns executor_runs = 41;
   }
 }
 

@@ -58,14 +58,35 @@ export type ExecutorRunnerStart = {
 
 export type ExecutorRunnerInbound = ExecutorRunnerStart | { type: "abort" };
 
-/** Runner -> main process. `progress` is one sentence for the user; the transcript stays inside the
- * desktop app and never passes through the daemon. */
+/**
+ * One transcript fragment (plan 20260929-executor-pip): a whole unit, never a per-token delta.
+ *
+ * Structured rather than pre-formatted so the desktop can fold a tool's output and render the
+ * prose as markdown. It is the shape the host forwards to the daemon and the daemon serves to
+ * viewing desktops (`ExecutorTranscriptFragment` on the wire), minus the worker-assigned `seq`.
+ *
+ * **The credential must never appear in any field.** The runner never puts it in a child's
+ * environment, and `capToolOutput` bounds what a tool's output can echo — but the invariant is the
+ * runner's, and `runner.test.ts` asserts it.
+ */
+export type ExecutorTranscriptFragment =
+  /** One assistant message: that message's text only, not everything said so far. */
+  | { kind: "assistant"; text: string; at: number }
+  /** One tool call: its name, its salient argument (the command for bash, the path for file
+   * tools), its capped output, and whether it failed. */
+  | { kind: "tool"; tool: string; argument: string; output: string; failed: boolean; at: number }
+  /** A blocked tool call or a model failure. */
+  | { kind: "error"; text: string; at: number };
+
+/** Runner -> host. `progress` is one sentence for the user (it rides the daemon's status report);
+ * `transcript` fragments are forwarded by the host to the daemon, which buffers them per run for the
+ * picture-in-picture card. They never reach the center. */
 export type ExecutorRunnerOutbound =
   | { type: "ready" }
   | { type: "running" }
   | { type: "progress"; note: string }
-  /** One transcript fragment, for the second slice's floating window to consume; this slice only logs it. */
-  | { type: "transcript"; seq: number; kind: "assistant" | "tool" | "error"; text: string }
+  /** One transcript fragment; `seq` is the runner's own count and is re-assigned by the daemon. */
+  | { type: "transcript"; seq: number; fragment: ExecutorTranscriptFragment }
   | {
       type: "done";
       outcome: "succeeded" | "model_error" | "tool_failed" | "cancelled";

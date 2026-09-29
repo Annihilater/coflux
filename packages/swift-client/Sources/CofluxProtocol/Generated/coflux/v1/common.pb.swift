@@ -608,6 +608,49 @@ public struct Coflux_V1_SecretRequestRef: Sendable {
   public init() {}
 }
 
+/// A live executor run as the center may know it (plan 20260929-executor-pip): the metadata that
+/// decides whether a desktop shows a card for it and on which terminal. It is bound to the
+/// **caller's terminal** (the session that ran `coflux executor run`), never to the run's workspace.
+/// Deliberately nothing else: the prompt, the transcript, notes and summaries travel only over the
+/// end-to-end Device channel. Derived runtime fact: the center mirrors it in memory, never persists
+/// it, and clears it when the daemon disconnects. Only unfinished runs are listed; a run that reaches
+/// a terminal state leaves the set.
+public struct Coflux_V1_ExecutorRunRef: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Worker-generated, unique within the worker runtime.
+  public var runID: String = String()
+
+  public var sessionID: String = String()
+
+  public var taskID: String = String()
+
+  /// Resolved by the worker: the agent's `--title`, else the prompt's first line. Agent-written
+  /// text; clients must present it as the agent's words.
+  public var title: String = String()
+
+  public var write: Bool = false
+
+  /// queued | accepted | running (the ledger's phase; never done).
+  public var phase: String = String()
+
+  /// ms epoch
+  public var submittedAt: Double = 0
+
+  /// ms epoch; 0 until the host reported the run running.
+  public var startedAt: Double = 0
+
+  /// The host the run was assigned to is not connected to the worker right now: the run may still
+  /// finish, or turn unknown when the reconcile window closes.
+  public var hostLost: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// One workspace's browser annotations as the center may know them (plan
 /// 20260929-browser-annotations): a revision that changes on every change of the workspace's
 /// annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
@@ -1593,6 +1636,76 @@ extension Coflux_V1_SecretRequestRef: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.reason != rhs.reason {return false}
     if lhs.createdAt != rhs.createdAt {return false}
     if lhs.expiresAt != rhs.expiresAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_ExecutorRunRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorRunRef"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{3}session_id\0\u{3}task_id\0\u{1}title\0\u{1}write\0\u{1}phase\0\u{3}submitted_at\0\u{3}started_at\0\u{3}host_lost\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.sessionID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.write) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.phase) }()
+      case 7: try { try decoder.decodeSingularDoubleField(value: &self.submittedAt) }()
+      case 8: try { try decoder.decodeSingularDoubleField(value: &self.startedAt) }()
+      case 9: try { try decoder.decodeSingularBoolField(value: &self.hostLost) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    if !self.sessionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sessionID, fieldNumber: 2)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 3)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 4)
+    }
+    if self.write != false {
+      try visitor.visitSingularBoolField(value: self.write, fieldNumber: 5)
+    }
+    if !self.phase.isEmpty {
+      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 6)
+    }
+    if self.submittedAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.submittedAt, fieldNumber: 7)
+    }
+    if self.startedAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.startedAt, fieldNumber: 8)
+    }
+    if self.hostLost != false {
+      try visitor.visitSingularBoolField(value: self.hostLost, fieldNumber: 9)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorRunRef, rhs: Coflux_V1_ExecutorRunRef) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs.sessionID != rhs.sessionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.write != rhs.write {return false}
+    if lhs.phase != rhs.phase {return false}
+    if lhs.submittedAt != rhs.submittedAt {return false}
+    if lhs.startedAt != rhs.startedAt {return false}
+    if lhs.hostLost != rhs.hostLost {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

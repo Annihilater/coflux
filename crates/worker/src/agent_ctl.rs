@@ -155,6 +155,9 @@ pub enum AgentAction {
         submission_id: String,
         prompt: String,
         write: bool,
+        /// `--title` (plan 20260929-executor-pip): the card's title; empty = the worker falls back
+        /// to the prompt's first line.
+        title: String,
     },
     /// 轮询原语：本地账本直接答，不经中心，也不经桌面 app。
     ExecutorStatus { run_id: String },
@@ -532,6 +535,8 @@ async fn handle(
             submission_id,
             prompt,
             write,
+            // Recorded on the run from milestone 3 of plan 20260929-executor-pip onwards.
+            title: _,
         } => {
             // 工作区边界在**提交这一刻**就固定（plan 116 Landmine 4）：之后父 agent 再 `cd` 或
             // 进 worktree 挪窝，都不改变已在跑任务的边界。

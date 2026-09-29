@@ -258,6 +258,55 @@ public enum Coflux_V1_ExecutorRunState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+public enum Coflux_V1_ExecutorFragmentKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// One assistant message: `text` is that message's prose.
+  case assistant // = 1
+
+  /// One tool call: `tool`, its salient `argument` (the shell command for bash, the path for file
+  /// tools), its capped `output` and whether it `failed`.
+  case tool // = 2
+
+  /// An error the runner recorded (a blocked tool call, a model failure): `text`.
+  case error // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .assistant
+    case 2: self = .tool
+    case 3: self = .error
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .assistant: return 1
+    case .tool: return 2
+    case .error: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ExecutorFragmentKind] = [
+    .unspecified,
+    .assistant,
+    .tool,
+    .error,
+  ]
+
+}
+
 public enum Coflux_V1_DeviceLoopbackFailure: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -2422,6 +2471,136 @@ public struct Coflux_V1_DeviceExecutorReportAck: Sendable {
   public init() {}
 }
 
+public struct Coflux_V1_ExecutorTranscriptFragment: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Assigned by the worker; 0 when the host sends it.
+  public var seq: UInt64 = 0
+
+  public var kind: Coflux_V1_ExecutorFragmentKind = .unspecified
+
+  public var text: String = String()
+
+  public var tool: String = String()
+
+  public var argument: String = String()
+
+  /// Bounded by the runner to a head and a tail with an explicit omission marker between them.
+  public var output: String = String()
+
+  public var failed: Bool = false
+
+  /// ms epoch, the host's clock.
+  public var at: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// host→worker: one fragment of a run this host is executing.
+public struct Coflux_V1_DeviceExecutorTranscriptFragment: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var runID: String = String()
+
+  public var fragment: Coflux_V1_ExecutorTranscriptFragment {
+    get {_fragment ?? Coflux_V1_ExecutorTranscriptFragment()}
+    set {_fragment = newValue}
+  }
+  /// Returns true if `fragment` has been explicitly set.
+  public var hasFragment: Bool {self._fragment != nil}
+  /// Clears the value of `fragment`. Subsequent reads from it will return its default value.
+  public mutating func clearFragment() {self._fragment = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _fragment: Coflux_V1_ExecutorTranscriptFragment? = nil
+}
+
+/// client→worker (SESSION_READ): follow a run's transcript on this channel. The worker answers with
+/// the backlog after `from_seq` (0 = everything it has) in one or more DeviceExecutorTranscript
+/// frames, then pushes each new fragment as it arrives, until the run ends or the channel closes.
+/// Re-subscribing on the same channel replaces the cursor.
+public struct Coflux_V1_DeviceExecutorTranscriptSubscribe: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var runID: String = String()
+
+  public var fromSeq: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_READ): stop following the run on this channel.
+public struct Coflux_V1_DeviceExecutorTranscriptUnsubscribe: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var runID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_READ): a batch of a run's transcript, backlog or live.
+public struct Coflux_V1_DeviceExecutorTranscript: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var runID: String = String()
+
+  /// In seq order.
+  public var fragments: [Coflux_V1_ExecutorTranscriptFragment] = []
+
+  /// Fragments older than the first one here were dropped by the worker's buffer cap and are gone;
+  /// the card renders an "earlier output omitted" marker. Set on the first backlog batch only.
+  public var omitted: Bool = false
+
+  /// The run reached a terminal state: no more fragments follow and the subscription is closed.
+  /// `terminal` is the ledger's word (succeeded | rejected | model_error | tool_failed | cancelled
+  /// | unknown); `summary` and `error` are the outcome the host reported.
+  public var ended: Bool = false
+
+  public var terminal: String = String()
+
+  public var summary: String = String()
+
+  public var error: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_CONTROL): cancel a run, through the ledger's ordinary cancel path (the
+/// one the `/agent` ExecutorCancel action uses). Idempotent; no acknowledgement — the outcome shows
+/// up in the center's ExecutorRuns snapshot and on the transcript subscription as `ended`.
+public struct Coflux_V1_DeviceExecutorStop: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var runID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// client→worker (RPC): open a TCP connection to the device's loopback port.
 public struct Coflux_V1_DeviceLoopbackOpen: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -3713,6 +3892,46 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .annotationHandOffResult(newValue)}
   }
 
+  public var executorTranscriptFragment: Coflux_V1_DeviceExecutorTranscriptFragment {
+    get {
+      if case .executorTranscriptFragment(let v)? = payload {return v}
+      return Coflux_V1_DeviceExecutorTranscriptFragment()
+    }
+    set {payload = .executorTranscriptFragment(newValue)}
+  }
+
+  public var executorTranscriptSubscribe: Coflux_V1_DeviceExecutorTranscriptSubscribe {
+    get {
+      if case .executorTranscriptSubscribe(let v)? = payload {return v}
+      return Coflux_V1_DeviceExecutorTranscriptSubscribe()
+    }
+    set {payload = .executorTranscriptSubscribe(newValue)}
+  }
+
+  public var executorTranscriptUnsubscribe: Coflux_V1_DeviceExecutorTranscriptUnsubscribe {
+    get {
+      if case .executorTranscriptUnsubscribe(let v)? = payload {return v}
+      return Coflux_V1_DeviceExecutorTranscriptUnsubscribe()
+    }
+    set {payload = .executorTranscriptUnsubscribe(newValue)}
+  }
+
+  public var executorTranscript: Coflux_V1_DeviceExecutorTranscript {
+    get {
+      if case .executorTranscript(let v)? = payload {return v}
+      return Coflux_V1_DeviceExecutorTranscript()
+    }
+    set {payload = .executorTranscript(newValue)}
+  }
+
+  public var executorStop: Coflux_V1_DeviceExecutorStop {
+    get {
+      if case .executorStop(let v)? = payload {return v}
+      return Coflux_V1_DeviceExecutorStop()
+    }
+    set {payload = .executorStop(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -3780,6 +3999,11 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case annotationImageData(Coflux_V1_DeviceAnnotationImageData)
     case annotationHandOff(Coflux_V1_DeviceAnnotationHandOff)
     case annotationHandOffResult(Coflux_V1_DeviceAnnotationHandOffResult)
+    case executorTranscriptFragment(Coflux_V1_DeviceExecutorTranscriptFragment)
+    case executorTranscriptSubscribe(Coflux_V1_DeviceExecutorTranscriptSubscribe)
+    case executorTranscriptUnsubscribe(Coflux_V1_DeviceExecutorTranscriptUnsubscribe)
+    case executorTranscript(Coflux_V1_DeviceExecutorTranscript)
+    case executorStop(Coflux_V1_DeviceExecutorStop)
 
   }
 
@@ -3804,6 +4028,10 @@ extension Coflux_V1_LocalAuthErrorCode: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_ExecutorRunState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0EXECUTOR_RUN_STATE_UNSPECIFIED\0\u{1}EXECUTOR_RUN_STATE_ACCEPTED\0\u{1}EXECUTOR_RUN_STATE_RUNNING\0\u{1}EXECUTOR_RUN_STATE_SUCCEEDED\0\u{1}EXECUTOR_RUN_STATE_REJECTED\0\u{1}EXECUTOR_RUN_STATE_MODEL_ERROR\0\u{1}EXECUTOR_RUN_STATE_TOOL_FAILED\0\u{1}EXECUTOR_RUN_STATE_CANCELLED\0\u{1}EXECUTOR_RUN_STATE_UNKNOWN\0")
+}
+
+extension Coflux_V1_ExecutorFragmentKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0EXECUTOR_FRAGMENT_KIND_UNSPECIFIED\0\u{1}EXECUTOR_FRAGMENT_KIND_ASSISTANT\0\u{1}EXECUTOR_FRAGMENT_KIND_TOOL\0\u{1}EXECUTOR_FRAGMENT_KIND_ERROR\0")
 }
 
 extension Coflux_V1_DeviceLoopbackFailure: SwiftProtobuf._ProtoNameProviding {
@@ -7385,6 +7613,265 @@ extension Coflux_V1_DeviceExecutorReportAck: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
+extension Coflux_V1_ExecutorTranscriptFragment: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ExecutorTranscriptFragment"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}seq\0\u{1}kind\0\u{1}text\0\u{1}tool\0\u{1}argument\0\u{1}output\0\u{1}failed\0\u{1}at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.seq) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.tool) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.argument) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.output) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.failed) }()
+      case 8: try { try decoder.decodeSingularDoubleField(value: &self.at) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.seq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.seq, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 3)
+    }
+    if !self.tool.isEmpty {
+      try visitor.visitSingularStringField(value: self.tool, fieldNumber: 4)
+    }
+    if !self.argument.isEmpty {
+      try visitor.visitSingularStringField(value: self.argument, fieldNumber: 5)
+    }
+    if !self.output.isEmpty {
+      try visitor.visitSingularStringField(value: self.output, fieldNumber: 6)
+    }
+    if self.failed != false {
+      try visitor.visitSingularBoolField(value: self.failed, fieldNumber: 7)
+    }
+    if self.at.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.at, fieldNumber: 8)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_ExecutorTranscriptFragment, rhs: Coflux_V1_ExecutorTranscriptFragment) -> Bool {
+    if lhs.seq != rhs.seq {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.tool != rhs.tool {return false}
+    if lhs.argument != rhs.argument {return false}
+    if lhs.output != rhs.output {return false}
+    if lhs.failed != rhs.failed {return false}
+    if lhs.at != rhs.at {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceExecutorTranscriptFragment: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorTranscriptFragment"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{1}fragment\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._fragment) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    try { if let v = self._fragment {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceExecutorTranscriptFragment, rhs: Coflux_V1_DeviceExecutorTranscriptFragment) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs._fragment != rhs._fragment {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceExecutorTranscriptSubscribe: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorTranscriptSubscribe"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{3}from_seq\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.fromSeq) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    if self.fromSeq != 0 {
+      try visitor.visitSingularUInt64Field(value: self.fromSeq, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceExecutorTranscriptSubscribe, rhs: Coflux_V1_DeviceExecutorTranscriptSubscribe) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs.fromSeq != rhs.fromSeq {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceExecutorTranscriptUnsubscribe: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorTranscriptUnsubscribe"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceExecutorTranscriptUnsubscribe, rhs: Coflux_V1_DeviceExecutorTranscriptUnsubscribe) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceExecutorTranscript: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorTranscript"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{1}fragments\0\u{1}omitted\0\u{1}ended\0\u{1}terminal\0\u{1}summary\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.fragments) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.omitted) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.ended) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.terminal) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.summary) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    if !self.fragments.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.fragments, fieldNumber: 2)
+    }
+    if self.omitted != false {
+      try visitor.visitSingularBoolField(value: self.omitted, fieldNumber: 3)
+    }
+    if self.ended != false {
+      try visitor.visitSingularBoolField(value: self.ended, fieldNumber: 4)
+    }
+    if !self.terminal.isEmpty {
+      try visitor.visitSingularStringField(value: self.terminal, fieldNumber: 5)
+    }
+    if !self.summary.isEmpty {
+      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 6)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceExecutorTranscript, rhs: Coflux_V1_DeviceExecutorTranscript) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs.fragments != rhs.fragments {return false}
+    if lhs.omitted != rhs.omitted {return false}
+    if lhs.ended != rhs.ended {return false}
+    if lhs.terminal != rhs.terminal {return false}
+    if lhs.summary != rhs.summary {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceExecutorStop: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorStop"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.runID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.runID.isEmpty {
+      try visitor.visitSingularStringField(value: self.runID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceExecutorStop, rhs: Coflux_V1_DeviceExecutorStop) -> Bool {
+    if lhs.runID != rhs.runID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceLoopbackOpen: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceLoopbackOpen"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}connection_id\0\u{1}port\0")
@@ -8927,7 +9414,7 @@ extension Coflux_V1_DeviceAnnotationHandOffResult: SwiftProtobuf.Message, SwiftP
 
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9769,6 +10256,71 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .annotationHandOffResult(v)
         }
       }()
+      case 120: try {
+        var v: Coflux_V1_DeviceExecutorTranscriptFragment?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorTranscriptFragment(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorTranscriptFragment(v)
+        }
+      }()
+      case 121: try {
+        var v: Coflux_V1_DeviceExecutorTranscriptSubscribe?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorTranscriptSubscribe(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorTranscriptSubscribe(v)
+        }
+      }()
+      case 122: try {
+        var v: Coflux_V1_DeviceExecutorTranscriptUnsubscribe?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorTranscriptUnsubscribe(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorTranscriptUnsubscribe(v)
+        }
+      }()
+      case 123: try {
+        var v: Coflux_V1_DeviceExecutorTranscript?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorTranscript(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorTranscript(v)
+        }
+      }()
+      case 124: try {
+        var v: Coflux_V1_DeviceExecutorStop?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .executorStop(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .executorStop(v)
+        }
+      }()
       default: break
       }
     }
@@ -10041,6 +10593,26 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .annotationHandOffResult?: try {
       guard case .annotationHandOffResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 117)
+    }()
+    case .executorTranscriptFragment?: try {
+      guard case .executorTranscriptFragment(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 120)
+    }()
+    case .executorTranscriptSubscribe?: try {
+      guard case .executorTranscriptSubscribe(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 121)
+    }()
+    case .executorTranscriptUnsubscribe?: try {
+      guard case .executorTranscriptUnsubscribe(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 122)
+    }()
+    case .executorTranscript?: try {
+      guard case .executorTranscript(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 123)
+    }()
+    case .executorStop?: try {
+      guard case .executorStop(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 124)
     }()
     case nil: break
     }

@@ -616,6 +616,7 @@ async fn handle_agent(
                 submission_id: parsed.submission_id,
                 prompt: parsed.prompt,
                 write: parsed.write,
+                title: parsed.title,
             }
         }
         "executor.status" => {

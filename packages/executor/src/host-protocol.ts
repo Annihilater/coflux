@@ -14,6 +14,7 @@
  */
 
 import type { ExecutorRunState } from "./jobs.js";
+import type { ExecutorTranscriptFragment } from "./runner-protocol.js";
 
 /** Host -> whoever started it. */
 export type ExecutorHostOutbound =
@@ -40,6 +41,9 @@ export type ExecutorHostOutbound =
       changedFiles?: string[];
       error?: string;
     }
+  /** One transcript fragment of a run this host is executing (plan 20260929-executor-pip). The
+   * daemon assigns the seq, buffers it under a byte cap and serves it to viewing desktops. */
+  | { type: "transcript"; runId: string; fragment: ExecutorTranscriptFragment }
   /** A line for the daemon's log. The host has no log file of its own. */
   | { type: "log"; message: string };
 

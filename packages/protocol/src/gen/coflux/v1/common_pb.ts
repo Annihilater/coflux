@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file coflux/v1/common.proto.
  */
 export const file_coflux_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("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KAkSDAoEc2l6ZRgDIAEoBBIZChFyZWxlYXNlX3NpZ25hdHVyZRgEIAEoCSLoAQoTQWNjb3VudE5vdGlmaWNhdGlvbhIKCgJpZBgBIAEoCRIQCghzZXF1ZW5jZRgCIAEoARIPCgdtZXNzYWdlGAMgASgJEhEKCWRhZW1vbl9pZBgEIAEoCRITCgtkZXZpY2VfbmFtZRgFIAEoCRIUCgx3b3Jrc3BhY2VfaWQYBiABKAkSFgoOd29ya3NwYWNlX25hbWUYByABKAkSDwoHdGFza19pZBgIIAEoCRIWCg50ZXJtaW5hbF90aXRsZRgJIAEoCRISCgpjcmVhdGVkX2F0GAogASgBEg8KB3JlYWRfYXQYCyABKAEikQEKEFNlY3JldFJlcXVlc3RSZWYSEgoKcmVxdWVzdF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEg8KB3Rhc2tfaWQYAyABKAkSDAoEbmFtZRgEIAEoCRIOCgZyZWFzb24YBSABKAkSEgoKY3JlYXRlZF9hdBgGIAEoARISCgpleHBpcmVzX2F0GAcgASgBImcKGldvcmtzcGFjZUFubm90YXRpb25TdW1tYXJ5EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIQCghyZXZpc2lvbhgCIAEoDRIPCgdwZW5kaW5nGAMgASgNEhAKCHJlc29sdmVkGAQgASgNKnAKClRhc2tTdGF0dXMSGwoXVEFTS19TVEFUVVNfVU5TUEVDSUZJRUQQABIUChBUQVNLX1NUQVRVU19JRExFEAESFwoTVEFTS19TVEFUVVNfUlVOTklORxACEhYKElRBU0tfU1RBVFVTX0VYSVRFRBADKo8BCgtGc0VudHJ5S2luZBIdChlGU19FTlRSWV9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSRlNfRU5UUllfS0lORF9GSUxFEAESFQoRRlNfRU5UUllfS0lORF9ESVIQAhIZChVGU19FTlRSWV9LSU5EX1NZTUxJTksQAxIXChNGU19FTlRSWV9LSU5EX09USEVSEARiBnByb3RvMw");
+  fileDesc("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KAkSDAoEc2l6ZRgDIAEoBBIZChFyZWxlYXNlX3NpZ25hdHVyZRgEIAEoCSLoAQoTQWNjb3VudE5vdGlmaWNhdGlvbhIKCgJpZBgBIAEoCRIQCghzZXF1ZW5jZRgCIAEoARIPCgdtZXNzYWdlGAMgASgJEhEKCWRhZW1vbl9pZBgEIAEoCRITCgtkZXZpY2VfbmFtZRgFIAEoCRIUCgx3b3Jrc3BhY2VfaWQYBiABKAkSFgoOd29ya3NwYWNlX25hbWUYByABKAkSDwoHdGFza19pZBgIIAEoCRIWCg50ZXJtaW5hbF90aXRsZRgJIAEoCRISCgpjcmVhdGVkX2F0GAogASgBEg8KB3JlYWRfYXQYCyABKAEikQEKEFNlY3JldFJlcXVlc3RSZWYSEgoKcmVxdWVzdF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEg8KB3Rhc2tfaWQYAyABKAkSDAoEbmFtZRgEIAEoCRIOCgZyZWFzb24YBSABKAkSEgoKY3JlYXRlZF9hdBgGIAEoARISCgpleHBpcmVzX2F0GAcgASgBIq8BCg5FeGVjdXRvclJ1blJlZhIOCgZydW5faWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCRIPCgd0YXNrX2lkGAMgASgJEg0KBXRpdGxlGAQgASgJEg0KBXdyaXRlGAUgASgIEg0KBXBoYXNlGAYgASgJEhQKDHN1Ym1pdHRlZF9hdBgHIAEoARISCgpzdGFydGVkX2F0GAggASgBEhEKCWhvc3RfbG9zdBgJIAEoCCJnChpXb3Jrc3BhY2VBbm5vdGF0aW9uU3VtbWFyeRIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEAoIcmV2aXNpb24YAiABKA0SDwoHcGVuZGluZxgDIAEoDRIQCghyZXNvbHZlZBgEIAEoDSpwCgpUYXNrU3RhdHVzEhsKF1RBU0tfU1RBVFVTX1VOU1BFQ0lGSUVEEAASFAoQVEFTS19TVEFUVVNfSURMRRABEhcKE1RBU0tfU1RBVFVTX1JVTk5JTkcQAhIWChJUQVNLX1NUQVRVU19FWElURUQQAyqPAQoLRnNFbnRyeUtpbmQSHQoZRlNfRU5UUllfS0lORF9VTlNQRUNJRklFRBAAEhYKEkZTX0VOVFJZX0tJTkRfRklMRRABEhUKEUZTX0VOVFJZX0tJTkRfRElSEAISGQoVRlNfRU5UUllfS0lORF9TWU1MSU5LEAMSFwoTRlNfRU5UUllfS0lORF9PVEhFUhAEYgZwcm90bzM");
 
 /**
  * @generated from message coflux.v1.DaemonInfo
@@ -792,6 +792,85 @@ export const SecretRequestRefSchema: GenMessage<SecretRequestRef> = /*@__PURE__*
   messageDesc(file_coflux_v1_common, 17);
 
 /**
+ * A live executor run as the center may know it (plan 20260929-executor-pip): the metadata that
+ * decides whether a desktop shows a card for it and on which terminal. It is bound to the
+ * **caller's terminal** (the session that ran `coflux executor run`), never to the run's workspace.
+ * Deliberately nothing else: the prompt, the transcript, notes and summaries travel only over the
+ * end-to-end Device channel. Derived runtime fact: the center mirrors it in memory, never persists
+ * it, and clears it when the daemon disconnects. Only unfinished runs are listed; a run that reaches
+ * a terminal state leaves the set.
+ *
+ * @generated from message coflux.v1.ExecutorRunRef
+ */
+export type ExecutorRunRef = Message<"coflux.v1.ExecutorRunRef"> & {
+  /**
+   * Worker-generated, unique within the worker runtime.
+   *
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string session_id = 2;
+   */
+  sessionId: string;
+
+  /**
+   * @generated from field: string task_id = 3;
+   */
+  taskId: string;
+
+  /**
+   * Resolved by the worker: the agent's `--title`, else the prompt's first line. Agent-written
+   * text; clients must present it as the agent's words.
+   *
+   * @generated from field: string title = 4;
+   */
+  title: string;
+
+  /**
+   * @generated from field: bool write = 5;
+   */
+  write: boolean;
+
+  /**
+   * queued | accepted | running (the ledger's phase; never done).
+   *
+   * @generated from field: string phase = 6;
+   */
+  phase: string;
+
+  /**
+   * ms epoch
+   *
+   * @generated from field: double submitted_at = 7;
+   */
+  submittedAt: number;
+
+  /**
+   * ms epoch; 0 until the host reported the run running.
+   *
+   * @generated from field: double started_at = 8;
+   */
+  startedAt: number;
+
+  /**
+   * The host the run was assigned to is not connected to the worker right now: the run may still
+   * finish, or turn unknown when the reconcile window closes.
+   *
+   * @generated from field: bool host_lost = 9;
+   */
+  hostLost: boolean;
+};
+
+/**
+ * Describes the message coflux.v1.ExecutorRunRef.
+ * Use `create(ExecutorRunRefSchema)` to create a new message.
+ */
+export const ExecutorRunRefSchema: GenMessage<ExecutorRunRef> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_common, 18);
+
+/**
  * One workspace's browser annotations as the center may know them (plan
  * 20260929-browser-annotations): a revision that changes on every change of the workspace's
  * annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
@@ -827,7 +906,7 @@ export type WorkspaceAnnotationSummary = Message<"coflux.v1.WorkspaceAnnotationS
  * Use `create(WorkspaceAnnotationSummarySchema)` to create a new message.
  */
 export const WorkspaceAnnotationSummarySchema: GenMessage<WorkspaceAnnotationSummary> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 18);
+  messageDesc(file_coflux_v1_common, 19);
 
 /**
  * @generated from enum coflux.v1.TaskStatus
