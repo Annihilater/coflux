@@ -2,8 +2,8 @@ import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
-import { AlertCircle, FileDiff, FolderGit2, LoaderCircle, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
-import { type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
+import { AlertCircle, FileDiff, FolderGit2, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
+import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, LoginScreen, authFooterText } from "@/components/auth/auth-shell";
 import { dismissBootOverlay } from "@/boot-overlay";
@@ -39,6 +39,9 @@ import { browserScopeOfWorkspace } from "../../../shared/browser-partitions";
 import { createBrowserTabId, readBrowserTabRecords, restoreBrowserTabs, type BrowserTabStore } from "@/components/workbench/browser-tabs";
 import type { BrowserLibraryStore } from "@/components/workbench/browser-library";
 import { localPortUrl, normalizeIncomingUrl } from "@/components/workbench/browser-address";
+import { ScreenViews, type ScreenViewEntry } from "@/components/workbench/screen-view";
+import { createScreenRuntime } from "@/components/workbench/screen-runtime";
+import { createScreenSessionId, createScreenTabId, readScreenTabRecords, restoreScreenTabs, type ScreenTabStore } from "@/components/workbench/screen-tabs";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
@@ -61,6 +64,7 @@ import {
   groupBodyStyle,
   groupOfTab,
   isBrowserTabId,
+  isScreenTabId,
   isTaskTabId,
   layoutGeometry,
   openTabBeside,
@@ -88,6 +92,7 @@ import {
   BROWSER_TABS_KEY,
   COMMAND_PALETTE_RECENT_KEY,
   DAEMON_ONBOARDING_DISMISSED_KEY,
+  SCREEN_TABS_KEY,
   TERMINAL_LAYOUTS_KEY,
   WORKSPACE_KEY,
   desktop,
@@ -158,6 +163,8 @@ const TERMINAL_LAYOUT_STORE: TerminalLayoutStore = { storage: localStorage, key:
  */
 const BROWSER_TAB_STORE: BrowserTabStore = { storage: localStorage, key: BROWSER_TABS_KEY };
 const BROWSER_LIBRARY_STORE: BrowserLibraryStore = { storage: localStorage, key: BROWSER_LIBRARY_KEY };
+/** Remote screen tabs' records (plan 20260929-remote-desktop): workspace, device and remote session id per tab. */
+const SCREEN_TAB_STORE: ScreenTabStore = { storage: localStorage, key: SCREEN_TABS_KEY };
 
 /** Nothing on screen: no workspace selected, or its changes overlay covers the groups. */
 const NO_SCREEN: { visible: ReadonlySet<string>; focused: string | null } = { visible: new Set(), focused: null };
@@ -316,8 +323,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // unreconciled — before the first snapshot there is nothing to reconcile them against.
   // Browser tabs come back with the layouts: a browser id without a stored record is dropped, and so
   // is a record no layout references (plan 20260924-desktop-browser-tab).
-  const [initialState] = useState(() => restoreBrowserTabs(readStoredLayouts(TERMINAL_LAYOUT_STORE), readBrowserTabRecords(BROWSER_TAB_STORE)));
+  const [initialState] = useState(() => {
+    const browserRestored = restoreBrowserTabs(readStoredLayouts(TERMINAL_LAYOUT_STORE), readBrowserTabRecords(BROWSER_TAB_STORE));
+    // Screen tabs come back the same way (plan 20260929-remote-desktop): id without record dropped, and vice versa.
+    const screenRestored = restoreScreenTabs(browserRestored.layouts, readScreenTabRecords(SCREEN_TAB_STORE));
+    return { layouts: screenRestored.layouts, records: browserRestored.records, screenRecords: screenRestored.records };
+  });
   const layoutsRef = useRef<Record<string, TerminalLayout>>(initialState.layouts);
+  // Remote screen tabs' runtime: records and the live sessions of mounted views.
+  const [screens] = useState(() => createScreenRuntime({ desktop, tabStore: SCREEN_TAB_STORE, initialRecords: initialState.screenRecords }));
+  // The screen tab in immersive mode (plan 20260929-remote-desktop): sidebar and tab strips hidden,
+  // the window full screen, the picture filling it. ⌃⌥⌘F toggles it both ways; leaving full screen
+  // by any other means ends it too (main reports it).
+  const [immersiveTabId, setImmersiveTabId] = useState<string | null>(null);
+  const immersiveTabIdRef = useRef<string | null>(null);
+  immersiveTabIdRef.current = immersiveTabId;
+  // Whether a screen picture holds keyboard focus: the global shortcuts yield to it (ref: read per key).
+  const screenFocusedRef = useRef(false);
   // Built-in browser tabs' runtime: what each tab shows, the library, prepared partitions, guests.
   const [browser] = useState(() =>
     createBrowserRuntime({ desktop, tabStore: BROWSER_TAB_STORE, libraryStore: BROWSER_LIBRARY_STORE, initialRecords: initialState.records }),
@@ -428,6 +450,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
    */
   function focusTab(tabId: string) {
     if (isBrowserTabId(tabId)) browser.focus(tabId);
+    else if (isScreenTabId(tabId)) screens.focus(tabId);
     else if (isTaskTabId(tabId)) attach.focusTask(tabId);
   }
 
@@ -487,6 +510,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (taskId.startsWith(PENDING_TAB_PREFIX)) return;
     if (isBrowserTabId(taskId)) {
       browser.focus(taskId);
+      return;
+    }
+    if (isScreenTabId(taskId)) {
+      screens.focus(taskId);
       return;
     }
     const task = client.store.getState().tasks.find((item) => item.id === taskId);
@@ -554,6 +581,88 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (workspaceId !== activeWorkspaceIdRef.current) return;
     const next = focusedTabId(layoutOf(workspaceId));
     if (next) focusTab(next);
+  }
+
+  /**
+   * Whether 「屏幕」 may be opened for a device (plan 20260929-remote-desktop): its worker advertised
+   * the screen helper (`screen_v1`, which only a macOS desktop runtime with the helper does) and it is
+   * not this Mac. Read from the daemons list so a `daemonUpdated` that drops the capability hides it.
+   */
+  function canOpenScreenOn(daemonId: string | null | undefined): boolean {
+    if (!daemonId) return false;
+    const daemon = daemons.find((item) => item.daemonId === daemonId);
+    return Boolean(daemon && daemon.capabilities.includes(SCREEN_CAPABILITY) && daemon.daemonId !== daemonState?.daemonId);
+  }
+
+  /**
+   * A new remote screen tab (plan 20260929-remote-desktop) for the workspace's device, in the focused
+   * group and active there. Its record (with a fresh remote session id) is written before the layout.
+   */
+  function openScreenTab(workspaceId: string, daemonId: string) {
+    setWorkspaceChangesOpen(workspaceId, false);
+    const unique = crypto.randomUUID();
+    const tabId = createScreenTabId(unique);
+    screens.createTab(tabId, { workspaceId, daemonId, sessionId: createScreenSessionId(unique) });
+    commitLayout(workspaceId, revealTab(layoutOf(workspaceId), tabId));
+    if (workspaceId === activeWorkspaceIdRef.current) screens.focus(tabId);
+  }
+
+  /** Closing a screen tab ends its remote session: the virtual display goes away and the remote's arrangement is restored. */
+  function closeScreenTab(workspaceId: string, tabId: string) {
+    if (immersiveTabIdRef.current === tabId) setImmersive(null);
+    commitLayout(workspaceId, removeTab(layoutOf(workspaceId), tabId));
+    screens.removeTab(tabId);
+    if (workspaceId !== activeWorkspaceIdRef.current) return;
+    const next = focusedTabId(layoutOf(workspaceId));
+    if (next) focusTab(next);
+  }
+
+  /** Immersive mode on or off: the window follows (full screen), the sidebar and strips hide with the state. */
+  function setImmersive(tabId: string | null) {
+    setImmersiveTabId(tabId);
+    desktop.screenImmersive(tabId !== null);
+    if (tabId) screens.focus(tabId);
+  }
+  function toggleImmersive(tabId: string) {
+    setImmersive(immersiveTabIdRef.current === tabId ? null : tabId);
+  }
+  // Leaving full screen by the OS's own gesture ends immersive mode too.
+  useEffect(
+    () =>
+      desktop.onScreenEvent((event) => {
+        if (event.kind === "fullscreen" && !event.on && immersiveTabIdRef.current) setImmersiveTabId(null);
+      }),
+    [],
+  );
+
+  /**
+   * 「打开屏幕」 from the device page, its sidebar row or the palette: opens a screen tab in the device's
+   * canonical directory workspace, creating that workspace first (without a shell) when the device
+   * has none yet. The device gets selected so the tab is on screen.
+   */
+  async function openDeviceScreen(daemonId: string) {
+    if (!canOpenScreenOn(daemonId)) return;
+    selectDevice(daemonId);
+    const existing = canonicalDirWorkspaceOf(daemonId, client.store.getState().workspaces);
+    if (existing) {
+      openScreenTab(existing.id, daemonId);
+      return;
+    }
+    setDeviceTerminalBusy(true);
+    setDeviceTerminalError(null);
+    const home = await client.listDeviceDirectory(daemonId, "~");
+    if (!home.ok || !home.path) {
+      setDeviceTerminalBusy(false);
+      setDeviceTerminalError(home.error || "无法解析设备 HOME 目录");
+      return;
+    }
+    const ensured = await client.ensureDirectoryWorkspace(daemonId, home.path);
+    setDeviceTerminalBusy(false);
+    if (!ensured.ok) {
+      setDeviceTerminalError(ensured.error);
+      return;
+    }
+    openScreenTab(ensured.workspaceId, daemonId);
   }
 
   // Main-process browser events that change the layout: a click into a page focuses its group; a
@@ -1010,6 +1119,26 @@ export function Workbench({ client }: { client: CofluxClient }) {
     }
   }
   browserEntries.sort((left, right) => (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0));
+  // Screen views (plan 20260929-remote-desktop): the same layer discipline as browser views.
+  const screenEntries: ScreenViewEntry[] = [];
+  for (const workspace of terminalWorkspaces) {
+    const layout = workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id);
+    const onScreen = workspace.id === activeWorkspaceId && !changesOpen[workspace.id];
+    for (const { group, rect } of layoutGeometry(layout).groups) {
+      for (const tabId of group.tabs) {
+        if (!isScreenTabId(tabId)) continue;
+        const visible = onScreen && group.activeTabId === tabId;
+        screenEntries.push({ tabId, workspaceId: workspace.id, daemonId: workspace.daemonId, visible, focused: visible && group.id === layout.focusedGroupId, frame: groupBodyStyle(rect) });
+      }
+    }
+  }
+  screenEntries.sort((left, right) => (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0));
+  // Immersive mode ends with its tab leaving the screen (closed, another workspace selected).
+  const immersiveOnScreen = immersiveTabId !== null && screenEntries.some((entry) => entry.tabId === immersiveTabId && entry.visible);
+  useEffect(() => {
+    if (immersiveTabId && !immersiveOnScreen) setImmersive(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [immersiveTabId, immersiveOnScreen]);
 
   // A create that reconcile answered: the task took the pending tab's place; start it as the old
   // container did — unless the user picked another tab in that group while waiting (settling never steals the choice).
@@ -1178,6 +1307,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
           closeBrowserTab(workspaceId, taskId);
           return;
         }
+        if (taskId && isScreenTabId(taskId)) {
+          closeScreenTab(workspaceId, taskId);
+          return;
+        }
         const task = taskId ? client.store.getState().tasks.find((item) => item.id === taskId) : undefined;
         if (task) requestCloseTask(task);
       },
@@ -1195,6 +1328,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
       focusGroupInDirection: (side) => focusGroupBy(workspaceId, (layout) => focusGroupInDirection(layout, side)),
       splitTerminal: (side) => createTerminalIn(workspaceId, side),
       openBrowserTab: () => openBrowserTab(workspaceId, ""),
+      openScreenTab: () => {
+        const daemonId = client.store.getState().workspaces.find((item) => item.id === workspaceId)?.daemonId;
+        if (daemonId && canOpenScreenOn(daemonId)) openScreenTab(workspaceId, daemonId);
+      },
     };
   }
   activeTerminalRef.current = activeWorkspaceId ? terminalHandleFor(activeWorkspaceId) : null;
@@ -1215,6 +1352,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
     },
     closeBrowserTab,
     reloadBrowserTab: (tabId) => browser.reload(tabId),
+    createScreenTab: (workspaceId, groupId) => {
+      const daemonId = client.store.getState().workspaces.find((item) => item.id === workspaceId)?.daemonId;
+      if (!daemonId || !canOpenScreenOn(daemonId)) return;
+      updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
+      openScreenTab(workspaceId, daemonId);
+    },
+    closeScreenTab,
     setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId } : null),
     focusActiveTab: (workspaceId) => {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
@@ -1246,6 +1390,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
     // 设置页盖住工作台时终端既看不见也点不到，⌘T/⌘W/⌘1 之类再落到终端上就是盲操作；
     // 原生菜单项走同一条挂起开关。跳转面板同理，而且它还要拿回被这里吞掉的 ⌘[ ⌘]。
     isSuspended: settingsOpen || paletteOpen,
+    // A focused screen picture takes every key (plan 20260929-remote-desktop); only ⌃⌥⌘F stays local.
+    screenFocusedRef,
+    onToggleImmersive: () => {
+      const workspaceId = activeWorkspaceIdRef.current;
+      const focused = workspaceId ? focusedTabId(layoutOf(workspaceId)) : null;
+      if (immersiveTabIdRef.current) setImmersive(null);
+      else if (focused && isScreenTabId(focused)) toggleImmersive(focused);
+    },
   });
 
   const surface = resolveWorkbenchSurface(authState);
@@ -1289,6 +1441,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
+      {immersiveOnScreen ? null : (
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
@@ -1304,6 +1457,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onAddDevice={openEnrollment}
         onRemoveDevice={requestRemoveDevice}
         onRenameDevice={setRenameDevice}
+        localDaemonId={daemonState?.daemonId ?? null}
+        onOpenScreen={(daemon) => void openDeviceScreen(daemon.daemonId)}
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
         pendingWorkspaces={pendingWorkspaces}
@@ -1311,6 +1466,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         widthControl={sidebarWidth}
         settingsTooltip={settingsTooltip}
       />
+      )}
 
       {terminalWorkspaces.length > 0 ? (
         // Terminal main area (plan 104 / 20260923-terminal-split-groups): one positioned box. The workspace
@@ -1354,6 +1510,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     dockWidth={dockWidth}
                     actions={workspaceActions}
                     browser={browser}
+                    screens={screens}
+                    canOpenScreen={canOpenScreenOn(workspace.daemonId)}
                     newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
                   />
                 </div>
@@ -1379,6 +1537,21 @@ export function Workbench({ client }: { client: CofluxClient }) {
             entries={browserEntries}
             onPointerFocus={focusPaneGroup}
           />
+          <ScreenViews
+            runtime={screens}
+            client={client}
+            entries={screenEntries}
+            immersiveTabId={immersiveOnScreen ? immersiveTabId : null}
+            onToggleImmersive={toggleImmersive}
+            onClose={(tabId) => {
+              const workspaceId = screens.tabs.getState().tabs[tabId]?.workspaceId;
+              if (workspaceId) closeScreenTab(workspaceId, tabId);
+            }}
+            onPointerFocus={focusPaneGroup}
+            onFocusChange={(_tabId, focused) => {
+              screenFocusedRef.current = focused;
+            }}
+          />
         </main>
       ) : null}
       {selectedDevice && !activeWorkspace ? (
@@ -1395,16 +1568,28 @@ export function Workbench({ client }: { client: CofluxClient }) {
                 ? "终端会打开在这台设备的 HOME 目录，之后可以在顶栏继续开更多 Tab。"
                 : "设备当前离线，上线后才能新建终端。"}
             </p>
-            <Button
-              className="mt-5"
-              label="新建终端"
-              variant="primary"
-              size="sm"
-              icon={<Plus />}
-              isDisabled={!selectedDevice.online}
-              isLoading={deviceTerminalBusy}
-              onClick={() => void createDeviceTerminal(selectedDevice.daemonId)}
-            />
+            <div className="mt-5 flex items-center gap-2">
+              <Button
+                label="新建终端"
+                variant="primary"
+                size="sm"
+                icon={<Plus />}
+                isDisabled={!selectedDevice.online}
+                isLoading={deviceTerminalBusy}
+                onClick={() => void createDeviceTerminal(selectedDevice.daemonId)}
+              />
+              {canOpenScreenOn(selectedDevice.daemonId) ? (
+                // 打开屏幕 (plan 20260929-remote-desktop): needs the directory workspace too, created without a shell.
+                <Button
+                  label="打开屏幕"
+                  variant="secondary"
+                  size="sm"
+                  icon={<Monitor />}
+                  isDisabled={!selectedDevice.online || deviceTerminalBusy}
+                  onClick={() => void openDeviceScreen(selectedDevice.daemonId)}
+                />
+              ) : null}
+            </div>
             {deviceTerminalError ? <p className="mt-3 text-sm leading-5 text-destructive">{deviceTerminalError}</p> : null}
           </div>
         </EmptyMain>
@@ -1514,6 +1699,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onOpenTerminal={openPaletteTerminal}
         onOpenDevice={selectDevice}
         onNewBrowserTab={activeWorkspaceId ? () => openBrowserTab(activeWorkspaceId, "") : undefined}
+        onNewScreenTab={activeWorkspace && canOpenScreenOn(activeWorkspace.daemonId) ? () => openScreenTab(activeWorkspace.id, activeWorkspace.daemonId) : undefined}
       />
       <ShortcutsHelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
       <AddDeviceDialog
@@ -1571,7 +1757,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         ref={attachDock}
         role="group"
         aria-label="终端栏操作"
-        className="absolute right-0 z-30 flex h-9 items-center gap-2 border-b border-border bg-background px-3"
+        className={cn("absolute right-0 z-30 flex h-9 items-center gap-2 border-b border-border bg-background px-3", immersiveOnScreen && "hidden")}
         style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
       >
         <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />

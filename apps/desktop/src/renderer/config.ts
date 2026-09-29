@@ -31,6 +31,11 @@ export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
  */
 export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
 /**
+ * Remote screen tabs' records (plan 20260929-remote-desktop): per tab, its workspace, device and
+ * remote session id. Scoped like the layouts that reference them.
+ */
+export const SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
+/**
  * The built-in browser's history: global on this Mac — every workspace and every server share
  * it — and never synced.
  */

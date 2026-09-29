@@ -71,6 +71,20 @@ export const IPC = {
   browserAnnotatorSync: "desktop:browser-annotator-sync",
   /** 主进程 → 渲染层：browser events (focus, keys, popups, favicons, history, downloads, mode). */
   browserEvent: "desktop:browser-event",
+  /**
+   * Remote screen tabs (plan 20260929-remote-desktop): renderer → main. Main owns the two device
+   * lanes of a session and bridges them to the renderer over a MessagePort (delivered on screenPort).
+   */
+  screenOpen: "desktop:screen-open",
+  screenClose: "desktop:screen-close",
+  /** The picture took or lost keyboard focus: main switches its menu accelerators off / on. */
+  screenFocus: "desktop:screen-focus",
+  /** Immersive mode: the window goes full screen and back. */
+  screenImmersive: "desktop:screen-immersive",
+  /** 主进程 → preload: the session's MessagePort, forwarded to the page as a window message. */
+  screenPort: "desktop:screen-port",
+  /** 主进程 → 渲染层: screen events (the window left full screen). */
+  screenEvent: "desktop:screen-event",
   /** 主进程 → 渲染层 */
   focusNotification: "desktop:focus-notification",
   focusWorkspace: "desktop:focus-workspace",

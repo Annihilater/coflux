@@ -97,9 +97,20 @@ export function isBrowserTabId(id: string): boolean {
   return id.startsWith(BROWSER_TAB_PREFIX);
 }
 
-/** A layout id that is a terminal task — neither the optimistic pending tab nor a browser tab. */
+/**
+ * Prefix of a remote screen tab's id (plan 20260929-remote-desktop): a layout entry like a browser
+ * tab — persisted, never a task, exempt from reconcile — whose device and remote session live in a
+ * separate record (screen-tabs.ts).
+ */
+export const SCREEN_TAB_PREFIX = "screen-tab-";
+
+export function isScreenTabId(id: string): boolean {
+  return id.startsWith(SCREEN_TAB_PREFIX);
+}
+
+/** A layout id that is a terminal task — neither the optimistic pending tab, a browser tab nor a screen tab. */
 export function isTaskTabId(id: string): boolean {
-  return !id.startsWith(PENDING_TAB_PREFIX) && !isBrowserTabId(id);
+  return !id.startsWith(PENDING_TAB_PREFIX) && !isBrowserTabId(id) && !isScreenTabId(id);
 }
 
 const EPSILON = 1e-6;
@@ -152,6 +163,11 @@ export function layoutTabIds(layout: TerminalLayout): string[] {
 /** The layout's browser tabs, in layout (tree) order. */
 export function browserTabIdsOf(layout: TerminalLayout): string[] {
   return layoutTabIds(layout).filter(isBrowserTabId);
+}
+
+/** The layout's screen tabs, in layout (tree) order. */
+export function screenTabIdsOf(layout: TerminalLayout): string[] {
+  return layoutTabIds(layout).filter(isScreenTabId);
 }
 
 function nextGroupId(root: LayoutNode): string {
@@ -706,7 +722,7 @@ export function reconcileLayout(layout: TerminalLayout, taskIds: readonly string
   const live = new Set(taskIds);
   const pendingId = next.pending?.id ?? null;
   for (const id of layoutTabIds(next)) {
-    if (id !== pendingId && !isBrowserTabId(id) && !live.has(id)) next = removeTab(next, id);
+    if (id !== pendingId && !isBrowserTabId(id) && !isScreenTabId(id) && !live.has(id)) next = removeTab(next, id);
   }
 
   const present = new Set(layoutTabIds(next));
@@ -735,6 +751,15 @@ export function reconcileLayout(layout: TerminalLayout, taskIds: readonly string
 export function pruneBrowserTabs(layout: TerminalLayout, keep: (tabId: string) => boolean): TerminalLayout {
   let next = layout;
   for (const id of browserTabIdsOf(layout)) {
+    if (!keep(id)) next = removeTab(next, id);
+  }
+  return next;
+}
+
+/** The screen-tab twin of `pruneBrowserTabs`: a screen id without a stored record is dropped on restore. */
+export function pruneScreenTabs(layout: TerminalLayout, keep: (tabId: string) => boolean): TerminalLayout {
+  let next = layout;
+  for (const id of screenTabIdsOf(layout)) {
     if (!keep(id)) next = removeTab(next, id);
   }
   return next;

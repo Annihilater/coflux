@@ -265,6 +265,8 @@ const DEVICE_AUTHORIZE_TIMEOUT_MS = 20_000;
  * server. Failures come from the server (`deviceJoinKeyCreated{ error }`) or are local (not signed in,
  * connection lost, timeout — also what an older server that ignores the request produces). */
 export type DeviceJoinKeyResult = { ok: true; key: string; expiresAt: number } | { ok: false; error: string };
+/** Answer to `ensureDirectoryWorkspace` (plan 20260929-remote-desktop). */
+export type DirectoryWorkspaceResult = { ok: true; workspaceId: string } | { ok: false; error: string };
 const DEVICE_JOIN_KEY_TIMEOUT_MS = 15_000;
 
 /** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
@@ -511,6 +513,18 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
   function failJoinKeys(error: string): void {
     for (const requestId of [...pendingJoinKeys.keys()]) settleJoinKey(requestId, { ok: false, error });
+    for (const requestId of [...pendingDirectoryWorkspaces.keys()]) settleDirectoryWorkspace(requestId, { ok: false, error });
+  }
+
+  // Directory-workspace ensures in flight (plan 20260929-remote-desktop), keyed by request id like the join keys.
+  let directoryWorkspaceRequest = 0;
+  const pendingDirectoryWorkspaces = new Map<string, { resolve: (result: DirectoryWorkspaceResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  function settleDirectoryWorkspace(requestId: string, result: DirectoryWorkspaceResult): void {
+    const pending = pendingDirectoryWorkspaces.get(requestId);
+    if (!pending) return;
+    pendingDirectoryWorkspaces.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
   }
 
   /** 收口在飞的设备授权：成功 / 服务端拒绝 / 本地失败（断连、登出、超时）都走这里，只结算一次。 */
@@ -1203,6 +1217,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
           : { ok: true, key: value.key, expiresAt: value.expiresAt });
         break;
       }
+      case "directoryWorkspaceEnsured": {
+        const value = payload.value;
+        settleDirectoryWorkspace(value.requestId, value.ok && value.workspaceId
+          ? { ok: true, workspaceId: value.workspaceId }
+          : { ok: false, error: value.error || "服务器没有返回工作区" });
+        break;
+      }
       default:
         break;
     }
@@ -1231,6 +1252,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const timer = setTimeout(() => settleJoinKey(requestId, { ok: false, error: "生成密钥超时，请重试" }), DEVICE_JOIN_KEY_TIMEOUT_MS);
       pendingJoinKeys.set(requestId, { resolve, timer });
       send({ case: "deviceJoinKeyCreate", value: { requestId, replaces } });
+    });
+  }
+
+  /**
+   * Ensure the device's canonical directory workspace exists without starting a shell (plan
+   * 20260929-remote-desktop): the workspace a screen tab lives in. `path` is the device's HOME as
+   * `listDeviceDirectory(daemonId, "~")` resolved it. Same reuse rule as terminalCreate.
+   */
+  function ensureDirectoryWorkspace(daemonId: string, path: string): Promise<DirectoryWorkspaceResult> {
+    if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "尚未登录或与服务器的连接未就绪" });
+    const requestId = `${notificationRequestPrefix}-dirws-${++directoryWorkspaceRequest}`;
+    return new Promise<DirectoryWorkspaceResult>((resolve) => {
+      const timer = setTimeout(() => settleDirectoryWorkspace(requestId, { ok: false, error: "创建工作区超时，请重试" }), DEVICE_JOIN_KEY_TIMEOUT_MS);
+      pendingDirectoryWorkspaces.set(requestId, { resolve, timer });
+      send({ case: "directoryWorkspaceEnsure", value: { requestId, daemonId, path } });
     });
   }
 
@@ -1650,6 +1686,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     sendFsWrite,
     authorizeDevice,
     createDeviceJoinKey,
+    ensureDirectoryWorkspace,
     reportLocalError,
     disconnect,
   };

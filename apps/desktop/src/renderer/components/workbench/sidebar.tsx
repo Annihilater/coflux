@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
-import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
+import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Workspace } from "@coflux/protocol";
 
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
@@ -59,6 +59,10 @@ type SidebarProps = {
   onAddDevice: () => void;
   onRemoveDevice: (daemon: DaemonInfo) => void;
   onRenameDevice: (daemon: DaemonInfo) => void;
+  /** This Mac's daemon id (plan 20260929-remote-desktop): its own row never offers 打开屏幕. */
+  localDaemonId: string | null;
+  /** 打开屏幕 on a device row: only for devices advertising the screen helper (`screen_v1`). */
+  onOpenScreen: (daemon: DaemonInfo) => void;
   /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
   createMenuProjectId: string | null;
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
@@ -508,6 +512,9 @@ export function Sidebar(props: SidebarProps) {
                   label={`设备「${daemon.name}」操作`}
                   size="sm"
                   items={[
+                    ...(daemon.capabilities.includes(SCREEN_CAPABILITY) && daemon.daemonId !== props.localDaemonId
+                      ? [{ label: "打开屏幕", isDisabled: !daemon.online, onClick: () => props.onOpenScreen(daemon) }, { type: "divider" as const }]
+                      : []),
                     { label: "重命名", onClick: () => props.onRenameDevice(daemon) },
                     { label: "复制标识", onClick: () => copyEntityHandle("device", daemon.daemonId) },
                     { type: "divider" },

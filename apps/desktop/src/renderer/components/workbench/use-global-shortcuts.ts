@@ -23,6 +23,14 @@ type GlobalShortcutsOptions = {
   /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，
    * 否则 ⌘T/⌘W/⌘1 会落到一个看不见也点不到的终端上。 */
   isSuspended?: boolean;
+  /**
+   * A remote screen picture holds keyboard focus (plan 20260929-remote-desktop): every combination
+   * goes to the remote — ⌘W, ⌘T, ⌘Q, ⌘1–9, ⌘C/V included — so this listener yields everything but
+   * the one reserved combination, ⌃⌥⌘F. A ref, read per key: focus changes without a re-render.
+   */
+  screenFocusedRef?: RefObject<boolean>;
+  /** ⌃⌥⌘F: toggle immersive mode of the focused screen tab (both ways, tab mode included). */
+  onToggleImmersive?: () => void;
 };
 
 /**
@@ -52,9 +60,21 @@ export function useGlobalShortcuts({
   onToggleSettings,
   onTogglePalette,
   isSuspended = false,
+  screenFocusedRef,
+  onToggleImmersive,
 }: GlobalShortcutsOptions) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // ⌃⌥⌘F is the screen tab's one local combination; it works in tab mode and immersive mode alike.
+      if (event.code === "KeyF" && event.ctrlKey && event.altKey && event.metaKey && !event.shiftKey) {
+        if (!onToggleImmersive || isSuspended) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onToggleImmersive();
+        return;
+      }
+      // A focused screen picture owns every other key (the view forwards them to the remote).
+      if (screenFocusedRef?.current) return;
       // Exact modifier sets: bare ⌘, ⌘⇧ and ⌘⌥ each take their own keys; anything with Ctrl is left alone.
       if (!event.metaKey || event.ctrlKey) return;
       const bare = !event.shiftKey && !event.altKey;
@@ -182,7 +202,7 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended, screenFocusedRef, onToggleImmersive]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
@@ -238,6 +258,9 @@ export function useGlobalShortcuts({
             return;
           case "new-browser-tab":
             terminal?.openBrowserTab();
+            return;
+          case "new-screen-tab":
+            terminal?.openScreenTab();
             return;
           case "toggle-help":
             onToggleHelp();

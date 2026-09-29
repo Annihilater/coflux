@@ -3317,6 +3317,52 @@ export class Hub {
         });
         break;
       }
+      case "directoryWorkspaceEnsure": {
+        // The device's canonical directory workspace without a task (plan 20260929-remote-desktop):
+        // a screen tab needs a workspace to live in but no shell. Same device lock, same idempotent
+        // reuse rule and the same path source as terminalCreate; answered to this connection only.
+        const value = msg.payload.value;
+        const requestId = value.requestId;
+        const answer = (result: { ok: true; workspaceId: string } | { ok: false; error: string }) =>
+          this.sendClient(client, { case: "directoryWorkspaceEnsured", value: result.ok ? { requestId, ok: true, workspaceId: result.workspaceId, error: "" } : { requestId, ok: false, workspaceId: "", error: result.error } });
+        const d = this.daemons.get(value.daemonId);
+        if (!d || d.accountId !== client.accountId) return void answer({ ok: false, error: "daemon 不在线或不属于本账号" });
+        if (!value.path.trim()) return void answer({ ok: false, error: "工作区目录路径为空" });
+        await this.withDeviceEffectGuard(value.daemonId, async (effectGuard) => {
+          const result = await this.store.transaction(async (tx) => {
+            const device = await tx.claimActiveDevice(value.daemonId, client.accountId!);
+            if (!device) return { error: "daemon 不存在、已撤销或不属于本账号" } as const;
+            let workspace = (await tx.listWorkspacesByDaemon(value.daemonId))
+              .filter((candidate) => candidate.accountId === client.accountId && isDirWorkspace(candidate))
+              .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0];
+            let createdWorkspace = false;
+            if (!workspace) {
+              workspace = create(WorkspaceSchema, {
+                id: randomUUID(),
+                accountId: client.accountId!,
+                daemonId: value.daemonId,
+                projectId: "",
+                name: "~",
+                path: value.path,
+                branch: "",
+                isMain: false,
+                createdAt: Date.now(),
+              });
+              await tx.createWorkspace(workspace);
+              createdWorkspace = true;
+            }
+            return { workspace, createdWorkspace } as const;
+          });
+          if ("error" in result) return void answer({ ok: false, error: result.error });
+          if (effectGuard.cancelled) return void answer({ ok: false, error: "设备已删除，工作区创建已取消" });
+          if (result.createdWorkspace) {
+            this.broadcast(result.workspace.accountId, { case: "workspaceCreated", value: { workspace: result.workspace } });
+          }
+          answer({ ok: true, workspaceId: result.workspace.id });
+          if (result.createdWorkspace) await this.pushWorkspaceList(result.workspace.daemonId);
+        });
+        break;
+      }
       case "deviceSetName": {
         const value = msg.payload.value;
         await this.withDeviceEffectGuard(value.daemonId, async (deviceEffectGuard) => {

@@ -41,9 +41,15 @@ export type {
   DesktopLoginOptions,
   DesktopLoginProvider,
   DesktopNotification,
+  DesktopScreenEvent,
+  DesktopScreenLane,
+  DesktopScreenLaneKind,
+  DesktopScreenPortMessage,
+  DesktopScreenPortRequest,
   DesktopUpdateState,
   DesktopUpdateStatus,
 } from "../shared/desktop-bridge";
+export { SCREEN_PORT_MESSAGE } from "../shared/desktop-bridge";
 
 declare global {
   interface Window {

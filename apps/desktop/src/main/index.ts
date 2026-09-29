@@ -31,6 +31,7 @@ import { createUpdater } from "./updater";
 import { createMainWindow, openExternalIfHttp } from "./window";
 import { createBrowserHost } from "./browser-host";
 import { LoopbackTunnels } from "./loopback-tunnel";
+import { createScreenHost } from "./screen-host";
 import { DeviceScope } from "@coflux/protocol";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
@@ -478,6 +479,32 @@ if (!app.requestSingleInstanceLock()) {
     browserHost.registerIpc(trusted);
     app.once("will-quit", () => browserHost.dispose());
 
+    // Remote screen tabs (plan 20260929-remote-desktop): main owns each session's two RPC lanes and
+    // hands the page a MessagePort; the clipboard and the menu-accelerator switch live here too.
+    const screenHost = createScreenHost({
+      transport: nativeTransport
+        ? {
+            online: () => nativeTransport.isOnline(),
+            open: async (request, handlers) => nativeTransport.openOwned(request, handlers),
+            send: (channelId, frame) => nativeTransport.sendOwned(channelId, frame),
+            close: (channelId) => nativeTransport.closeLane(channelId),
+          }
+        : null,
+      window: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return null;
+        const window = mainWindow;
+        return {
+          postPort: (sessionId, port) => window.webContents.postMessage(IPC.screenPort, sessionId, [port]),
+          setIgnoreMenuShortcuts: (ignore) => window.webContents.setIgnoreMenuShortcuts(ignore),
+          setFullScreen: (on) => window.setFullScreen(on),
+          isFullScreen: () => window.isFullScreen(),
+        };
+      },
+      log: (message, detail) => log.warn(message, detail),
+    });
+    screenHost.registerIpc(trusted);
+    app.once("will-quit", () => screenHost.dispose());
+
     Menu.setApplicationMenu(
       buildAppMenu({
         sendCommand: (command) => {
@@ -503,6 +530,7 @@ if (!app.requestSingleInstanceLock()) {
         resetExecutorChannel: () => executor.setChannel("", 0),
         setBadge: setDockBadge,
         resetBrowserHost: browserHost.reset,
+        resetScreenHost: screenHost.reset,
       },
       trusted,
     );
@@ -519,5 +547,9 @@ if (!app.requestSingleInstanceLock()) {
       webviewGate: browserHost.gateWebview,
       onWebviewAttached: browserHost.adoptGuest,
     });
+    // Immersive mode follows the window: leaving full screen by any means (the OS's own gesture
+    // included) ends it in the page.
+    mainWindow.on("leave-full-screen", () => sendToRenderer(IPC.screenEvent, { kind: "fullscreen", on: false }));
+    mainWindow.on("enter-full-screen", () => sendToRenderer(IPC.screenEvent, { kind: "fullscreen", on: true }));
   });
 }
