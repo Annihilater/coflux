@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, get a secret (API key, password) from the user without the value entering your context, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, get a secret (API key, password) from the user without the value entering your context, pick up the elements the user annotated in Coflux's built-in browser and mark them done, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -14,10 +14,10 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor/secret` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, get a secret from the user, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
+| Local commands `coflux terminal/progress/notify/ports/executor/secret/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, get a secret from the user, implement the user's browser annotations, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
-Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor` complete
+Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor`/`annotations` complete
 entirely inside the local daemon and never touch the center; `new`/`list`/`ports`/`notify` are relayed to the
 center by the daemon on your behalf (terminals and notification history are persisted centrally; preview URLs are
 minted by the center). You only ever talk to the local daemon.
@@ -509,6 +509,39 @@ terminal they can take over, `coflux notify` them, and `coflux terminal wait`. T
 executor cannot use `coflux secret` (it is not a terminal process). And it prevents accidents, not
 a determined agent: once a value is in an environment variable or a file you can read, printing it
 on purpose would leak it — never do that.
+
+### Implement the user's browser annotations
+
+```sh
+coflux annotations list
+coflux annotations resolve 3 --note "Primary button now uses the brand token; spacing from the 8px scale"
+coflux annotations watch
+```
+
+The user can point at elements of a page in Coflux's built-in browser tab ("this element — change it
+like so") and hand them to you; the desktop then types an instruction into your terminal, or they
+simply ask you to handle the annotations. They belong to the workspace your cwd is in and live on
+this machine, so they are there whether or not a desktop is open.
+
+- `list` prints the pending ones as markdown: the user's comment (and, for a reopened one, your
+  earlier note and what the user answered), the page, the component chain and source location when
+  the page exposed them, the element's selector, DOM path and key computed styles, and the paths of
+  its images. It always names the workspace it resolved: an empty list in the wrong workspace means
+  you moved (`coflux workspace`). Add `--json` for structured output.
+- Find the code from the most specific lead: a source location first, then the component names,
+  then text and selectors (`rg` for them). Treat the computed styles as the current state, not as
+  the target: map colors, sizes and spacing onto the project's design system (its tokens, theme and
+  components) instead of hard-coding raw values.
+- The images are local files: read them. A *screenshot of the current state* shows the element as
+  the user saw it; a *reference image* is what the user wants or pointed at.
+- After implementing each annotation, run `resolve <id or number> --note "<what you changed>"`.
+  The note is what the user reads to review the change; the pin on their page turns into a check.
+  They confirm it (it disappears) or reopen it with a comment, and it comes back in `list`. Resolve
+  only what you actually changed; if you cannot or should not do one, resolve it with a note that
+  says why rather than leaving it pending silently.
+- `watch` blocks until the workspace has pending annotations and then prints them like `list`
+  (default budget 30 minutes, `--timeout <seconds>`). Use it only when the user asked you to keep
+  handling annotations hands-free: loop list → implement → resolve → `watch`.
 
 ### Errors from local commands
 
