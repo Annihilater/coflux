@@ -78,7 +78,7 @@ test("a workspace's scope is its project, or its device when it has no project",
 test("partitions are named per scope, only for safe ids, and round-trip to their scope", () => {
   assert.equal(browserPartitionFor({ kind: "project", id: "../etc" }), null);
   assert.equal(browserPartitionFor({ kind: "device", id: "" }), null);
-  assert.equal(browserPartitionFor({ kind: "workspace" as "project", id: "ws-1" }), null);
+  assert.equal(browserPartitionFor({ kind: "workspace", id: "ws-1" } as never), null);
   for (const scope of [{ kind: "project", id: PROJECT_A }, { kind: "device", id: DEVICE_1 }] as const) {
     assert.deepEqual(browserScopeOfPartition(browserPartitionFor(scope)!), scope);
   }
