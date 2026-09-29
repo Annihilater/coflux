@@ -730,6 +730,102 @@ message DeviceExecutorReportAck {
   string run_id = 1;
 }
 
+// ===== Executor transcript (plan 20260929-executor-pip) =====
+//
+// The host forwards each transcript fragment of a run to the worker; the worker buffers them per run
+// (in memory, under a byte cap) and serves them to viewing desktops, which show a read-only
+// picture-in-picture card on the pane of the terminal that started the run. The transcript never
+// reaches the center: it travels host → worker on the host's own loopback channel (or the daemon
+// host's stdio) and worker → viewer over this end-to-end channel.
+//
+// A fragment is a whole unit — one assistant message, one tool call with its capped output, one
+// error — never a per-token delta. Seqs are assigned by the worker, start at 1 per run and are dense
+// among the fragments it accepted; a viewer resumes by naming the last seq it has.
+//
+// Gates:
+//   - DeviceExecutorTranscriptFragment is a host frame: accepted only from a loopback channel that
+//     currently holds the host slot under the run's host_id (the same gate as DeviceExecutorReport),
+//     so a desktop that reconnected under the same host_id keeps streaming.
+//   - DeviceExecutorTranscriptSubscribe / Unsubscribe require DEVICE_SCOPE_SESSION_READ;
+//     DeviceExecutorStop requires DEVICE_SCOPE_SESSION_CONTROL. Neither needs an attach or a holder.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that to their
+// executor viewer frames in flight on the channel — never to the heartbeat — and show cards without
+// a log.
+
+enum ExecutorFragmentKind {
+  EXECUTOR_FRAGMENT_KIND_UNSPECIFIED = 0;
+  // One assistant message: `text` is that message's prose.
+  EXECUTOR_FRAGMENT_KIND_ASSISTANT = 1;
+  // One tool call: `tool`, its salient `argument` (the shell command for bash, the path for file
+  // tools), its capped `output` and whether it `failed`.
+  EXECUTOR_FRAGMENT_KIND_TOOL = 2;
+  // An error the runner recorded (a blocked tool call, a model failure): `text`.
+  EXECUTOR_FRAGMENT_KIND_ERROR = 3;
+}
+
+message ExecutorTranscriptFragment {
+  // Assigned by the worker; 0 when the host sends it.
+  uint64 seq = 1;
+  ExecutorFragmentKind kind = 2;
+  string text = 3;
+  string tool = 4;
+  string argument = 5;
+  // Bounded by the runner to a head and a tail with an explicit omission marker between them.
+  string output = 6;
+  bool failed = 7;
+  // ms epoch, the host's clock.
+  double at = 8;
+}
+
+// host→worker: one fragment of a run this host is executing.
+message DeviceExecutorTranscriptFragment {
+  string run_id = 1;
+  ExecutorTranscriptFragment fragment = 2;
+}
+
+// client→worker (SESSION_READ): follow a run's transcript on this channel. The worker answers with
+// the backlog after `from_seq` (0 = everything it has) in one or more DeviceExecutorTranscript
+// frames, then pushes each new fragment as it arrives, until the run ends or the channel closes.
+// Re-subscribing on the same channel replaces the cursor.
+message DeviceExecutorTranscriptSubscribe {
+  string run_id = 1;
+  uint64 from_seq = 2;
+}
+
+// client→worker (SESSION_READ): stop following the run on this channel.
+message DeviceExecutorTranscriptUnsubscribe {
+  string run_id = 1;
+}
+
+// worker→client (SESSION_READ): a batch of a run's transcript, backlog or live.
+message DeviceExecutorTranscript {
+  string run_id = 1;
+  // In seq order.
+  repeated ExecutorTranscriptFragment fragments = 2;
+  // Fragments older than the first one here were dropped by the worker's buffer cap and are gone;
+  // the card renders an "earlier output omitted" marker. Set on the first backlog batch only.
+  bool omitted = 3;
+  // The run reached a terminal state: no more fragments follow and the subscription is closed.
+  // `terminal` is the ledger's word (succeeded | rejected | model_error | tool_failed | cancelled
+  // | unknown); `summary` and `error` are the outcome the host reported.
+  bool ended = 4;
+  string terminal = 5;
+  string summary = 6;
+  string error = 7;
+  // The run's prompt, on the first batch that answers a subscription (empty on every other
+  // batch). It travels only here, end to end; the center never sees it.
+  string prompt = 8;
+}
+
+// client→worker (SESSION_CONTROL): cancel a run, through the ledger's ordinary cancel path (the
+// one the `/agent` ExecutorCancel action uses). Idempotent; no acknowledgement — the outcome shows
+// up in the center's ExecutorRuns snapshot and on the transcript subscription as `ended`.
+message DeviceExecutorStop {
+  string run_id = 1;
+}
+
 // ===== Loopback tunnel (plan 20260924-remote-localhost-tunnel) =====
 //
 // Lets a client reach TCP ports on the device's own loopback interface over an
@@ -1248,5 +1344,10 @@ message DeviceEnvelope {
     DeviceAnnotationImageData annotation_image_data = 115;
     DeviceAnnotationHandOff annotation_hand_off = 116;
     DeviceAnnotationHandOffResult annotation_hand_off_result = 117;
+    DeviceExecutorTranscriptFragment executor_transcript_fragment = 120;
+    DeviceExecutorTranscriptSubscribe executor_transcript_subscribe = 121;
+    DeviceExecutorTranscriptUnsubscribe executor_transcript_unsubscribe = 122;
+    DeviceExecutorTranscript executor_transcript = 123;
+    DeviceExecutorStop executor_stop = 124;
   }
 }

@@ -27,7 +27,12 @@ import {
 } from "./jobs.js";
 import { buildSandboxProfile } from "./sandbox.js";
 import { collectWorkspaceFacts, type GitRunner } from "./workspace.js";
-import type { ExecutorRunnerCustomProvider, ExecutorRunnerOutbound, ExecutorRunnerStart } from "./runner-protocol.js";
+import type {
+  ExecutorRunnerCustomProvider,
+  ExecutorRunnerOutbound,
+  ExecutorRunnerStart,
+  ExecutorTranscriptFragment,
+} from "./runner-protocol.js";
 
 /** Wall-clock cap for a task; past it the run is aborted. The executor is for handing over one
  * well-bounded piece of work, not for running indefinitely. */
@@ -69,6 +74,9 @@ export type ExecutorManagerDeps = {
     changedFiles?: string[];
     error?: string;
   }) => void;
+  /** Forward one transcript fragment towards the daemon (plan 20260929-executor-pip), which
+   * buffers it for the picture-in-picture card. Optional: a host without a link drops them. */
+  sendTranscript?: (runId: string, fragment: ExecutorTranscriptFragment) => void;
   runGit?: GitRunner;
   log?: (message: string) => void;
 };
@@ -243,9 +251,12 @@ export class ExecutorManager {
       const run = this.live.get(runId);
       if (run) run.settled = true;
       this.apply(this.table.finish(runId, outcome));
+    } else if (message.type === "transcript") {
+      // Only for a run this manager still has live: a fragment arriving after the runner was
+      // dropped belongs to nobody.
+      if (this.live.has(runId)) this.deps.sendTranscript?.(runId, message.fragment);
     }
-    // transcript / ready are not consumed in this slice: the transcript stays inside the desktop app
-    // and is only needed by the second slice's floating window.
+    // `ready` is not consumed: the start message goes out as soon as the runner is forked.
   }
 
   /**

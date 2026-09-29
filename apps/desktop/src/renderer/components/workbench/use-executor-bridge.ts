@@ -79,6 +79,23 @@ export function useExecutorBridge(client: CofluxClient, localDaemonId: string | 
           ready: message.ready,
           notReadyReason: message.notReadyReason,
         });
+      } else if (message.kind === "transcript") {
+        // A third outbound kind (plan 20260929-executor-pip), forwarded like the reports: the
+        // daemon assigns the seq, buffers per run and serves every viewing desktop.
+        const fragment = message.fragment;
+        client.sendExecutorTranscriptFragment(localDaemonId, {
+          runId: message.runId,
+          fragment: {
+            seq: 0n,
+            kind: executorFragmentKindToWire(fragment.kind),
+            text: fragment.kind === "tool" ? "" : fragment.text,
+            tool: fragment.kind === "tool" ? fragment.tool : "",
+            argument: fragment.kind === "tool" ? fragment.argument : "",
+            output: fragment.kind === "tool" ? fragment.output : "",
+            failed: fragment.kind === "tool" ? fragment.failed : false,
+            at: fragment.at,
+          },
+        });
       } else {
         client.sendExecutorReport(localDaemonId, {
           $typeName: "coflux.v1.DeviceExecutorReport",
@@ -134,6 +151,20 @@ function liveChannelGeneration(
   if (!transport) return 0;
   if (transport.mode === "idle" || transport.mode === "offline" || transport.mode === "probing") return 0;
   return transport.generation;
+}
+
+/** Same story for a fragment's kind (`ExecutorFragmentKind` on the wire). */
+function executorFragmentKindToWire(kind: string): number {
+  switch (kind) {
+    case "assistant":
+      return 1;
+    case "tool":
+      return 2;
+    case "error":
+      return 3;
+    default:
+      return 0;
+  }
 }
 
 /** The main process expresses state as strings (they read and assert better across IPC); on the

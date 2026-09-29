@@ -220,6 +220,33 @@ message SecretRequestRef {
   double expires_at = 7;
 }
 
+// A live executor run as the center may know it (plan 20260929-executor-pip): the metadata that
+// decides whether a desktop shows a card for it and on which terminal. It is bound to the
+// **caller's terminal** (the session that ran `coflux executor run`), never to the run's workspace.
+// Deliberately nothing else: the prompt, the transcript, notes and summaries travel only over the
+// end-to-end Device channel. Derived runtime fact: the center mirrors it in memory, never persists
+// it, and clears it when the daemon disconnects. Only unfinished runs are listed; a run that reaches
+// a terminal state leaves the set.
+message ExecutorRunRef {
+  // Worker-generated, unique within the worker runtime.
+  string run_id = 1;
+  string session_id = 2;
+  string task_id = 3;
+  // Resolved by the worker: the agent's `--title`, else the prompt's first line. Agent-written
+  // text; clients must present it as the agent's words.
+  string title = 4;
+  bool write = 5;
+  // queued | accepted | running (the ledger's phase; never done).
+  string phase = 6;
+  // ms epoch
+  double submitted_at = 7;
+  // ms epoch; 0 until the host reported the run running.
+  double started_at = 8;
+  // The host the run was assigned to is not connected to the worker right now: the run may still
+  // finish, or turn unknown when the reconcile window closes.
+  bool host_lost = 9;
+}
+
 // One workspace's browser annotations as the center may know them (plan
 // 20260929-browser-annotations): a revision that changes on every change of the workspace's
 // annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only

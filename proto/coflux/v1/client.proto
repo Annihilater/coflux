@@ -270,6 +270,16 @@ message AnnotationsSummaryUpdated {
   repeated WorkspaceAnnotationSummary workspaces = 2;
 }
 
+// A device's live executor runs (plan 20260929-executor-pip): the full current set, broadcast after
+// each daemon ExecutorRuns report or when the daemon disconnects (empty), and re-sent per device on
+// subscribe. Drives the picture-in-picture card on the caller terminal's pane on every desktop and
+// the tab/sidebar activity indicator; a run that leaves the set has ended. Metadata only; the
+// transcript is fetched over the Device channel. In-memory derived fact, never persisted.
+message ExecutorRunsUpdated {
+  string daemon_id = 1;
+  repeated ExecutorRunRef runs = 2;
+}
+
 message StateSnapshot {
   repeated DaemonInfo daemons = 1;
   repeated Project projects = 2;
@@ -394,6 +404,7 @@ message ServerToClient {
     DeviceJoinKeyCreated device_join_key_created = 44;
     SecretRequestsUpdated secret_requests_updated = 45;
     AnnotationsSummaryUpdated annotations_summary_updated = 46;
+    ExecutorRunsUpdated executor_runs_updated = 47;
   }
 }
 

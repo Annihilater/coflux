@@ -32,6 +32,8 @@ export {
   type SecretRequestState,
   type SecretAnswer,
   type SecretAnswerResult,
+  type ExecutorRunState,
+  type ExecutorTranscriptEvent,
   type WorkspaceActivity,
   type AnnotationSummaryState,
   type AnnotationFailure,
@@ -46,4 +48,5 @@ export {
   type DeviceInputState,
   type DeviceTransportMode,
   type DeviceTransportState,
+  type ExecutorTranscriptFragmentInit,
 } from "./device-router";

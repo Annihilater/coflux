@@ -8,8 +8,9 @@ import "@xterm/xterm/css/xterm.css";
 import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import { useToast } from "@astryxdesign/core/Toast";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
-import type { FsWriteResult } from "@coflux/client";
+import type { ExecutorRunState, FsWriteResult } from "@coflux/client";
 
+import { ExecutorRunCards, type ExecutorCardClient } from "@/components/workbench/executor-run-card";
 import { commandOutputText, createCommandMarkReader } from "@/components/workbench/terminal-command-marks";
 import {
   canSendTerminalInput,
@@ -80,6 +81,10 @@ type TerminalPaneProps = {
   /** Agent secret request cards for this terminal (plan 20260926-agent-secret-input), drawn over the
    * pane; null when none is pending. */
   secretCards?: ReactNode;
+  /** Executor picture-in-picture cards (plan 20260929-executor-pip): the account's live runs (the
+   * ones bound to this terminal are shown) and the client operations the card needs. */
+  executorRuns?: Readonly<Record<string, ExecutorRunState>>;
+  executorClient?: ExecutorCardClient;
 };
 
 // 终端贴图（plan 014）的压缩目标独立于文件上传上限，保持 3.5MB 以节省截图传输带宽。
@@ -192,6 +197,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   const commandsRef = useRef<TerminalCommandNavigation | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [paperOpen, setPaperOpen] = useState(false);
+  // An executor card is expanded over this pane (plan 20260929-executor-pip): the pane yields its
+  // shortcuts exactly as it does for the paper — the terminal is covered and Esc must collapse
+  // the card, never reach the shell.
+  const [executorExpanded, setExecutorExpanded] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
   // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
@@ -877,7 +886,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   // 纸面展开时整个终端被盖住：⌘F 查找与命令导航此刻都作用在一个看不见的终端上，
   // 而查找框还会和纸面的按钮抢同一个角，所以整条一并让开。
   useEffect(() => {
-    if (!props.focused || paperOpen) return;
+    if (!props.focused || paperOpen || executorExpanded) return;
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (event.code === "KeyF") {
@@ -895,7 +904,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [props.focused, paperOpen]);
+  }, [props.focused, paperOpen, executorExpanded]);
 
   // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
   useEffect(() => {
@@ -1064,6 +1073,18 @@ export function TerminalPane(props: TerminalPaneProps) {
         />
       ) : null}
       {props.secretCards}
+      {/* Executor cards (plan 20260929-executor-pip): always mounted, so a card whose run ended while
+          expanded can keep its panel until the user closes it. Renders nothing without runs. */}
+      {props.executorRuns && props.executorClient ? (
+        <ExecutorRunCards
+          runs={props.executorRuns}
+          taskId={props.taskId}
+          client={props.executorClient}
+          focused={props.focused}
+          onExpandedChange={setExecutorExpanded}
+          onRestoreFocus={() => terminalRef.current?.focus()}
+        />
+      ) : null}
     </div>
   );
 }

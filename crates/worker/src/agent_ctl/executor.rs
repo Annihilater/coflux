@@ -26,7 +26,10 @@
 //! This module is a pure state machine (it takes `now` rather than reading a clock, and does no I/O):
 //! the caller receives [`Effect`]s and sends the frames itself.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+use coflux_protocol::wire;
+use prost::Message as _;
 
 /// The capability name a host must declare when registering. Gated by name, with no version
 /// comparison, following `apps/server/src/daemon-capabilities.ts`: old clients drop unknown payloads
@@ -50,6 +53,19 @@ pub const ASSIGN_ACK_MS: f64 = 30_000.0;
 pub const MAX_RUNS: usize = 64;
 /// Byte cap for one prompt: the executor's input is a task description, not a file channel.
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+/// Character cap for a run's resolved title (plan 20260929-executor-pip): it is a card title,
+/// whether the agent wrote it or it fell back to the prompt's first line.
+pub const MAX_TITLE_CHARS: usize = 120;
+/// Byte cap for one run's transcript buffer. Past it the oldest fragments are dropped and the
+/// backlog a late viewer receives starts with an explicit "earlier output omitted" marker. A
+/// verbose build log must not grow a long-lived worker without limit.
+pub const TRANSCRIPT_BUFFER_BYTES: usize = 1024 * 1024;
+/// Largest backlog batch sent to a viewer in one device frame: far below the 30 MiB device frame
+/// cap, which would tear the whole session lane down.
+pub const TRANSCRIPT_BATCH_BYTES: usize = 256 * 1024;
+/// Largest single fragment accepted from a host. The runner caps tool output to a few KB; an
+/// assistant message is not capped there, but nothing legitimate is anywhere near this.
+pub const MAX_FRAGMENT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunPhase {
@@ -113,6 +129,13 @@ impl RunPhase {
 pub struct RunRecord {
     pub run_id: String,
     pub submission_id: String,
+    /// The caller's terminal (plan 20260929-executor-pip): the session that ran `coflux executor
+    /// run` and the task it belongs to. The card is bound to this terminal, never to the run's
+    /// workspace, which under plan 102 may differ from the terminal's owning workspace.
+    pub session_id: String,
+    pub task_id: String,
+    /// Resolved at submit: the agent's `--title`, else the prompt's first line.
+    pub title: String,
     pub workspace_id: String,
     pub workspace_root: String,
     pub write: bool,
@@ -128,6 +151,8 @@ pub struct RunRecord {
     pub host_epoch: u64,
     pub cancel_requested: bool,
     pub created_at: f64,
+    /// When the host first reported the run running; None until then.
+    pub started_at: Option<f64>,
     pub updated_at: f64,
     /// Without a message from the host by this instant, the run becomes `Unknown`. None means no
     /// timer is running (the host is present and the run is going).
@@ -138,6 +163,94 @@ impl RunRecord {
     pub fn done(&self) -> bool {
         self.phase == RunPhase::Done
     }
+}
+
+/// The title every consumer sees: the agent's own, trimmed and clamped, else the prompt's first
+/// non-empty line, clamped the same way.
+pub fn resolve_title(title: &str, prompt: &str) -> String {
+    let candidate = title.trim();
+    let candidate = if candidate.is_empty() {
+        prompt
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+    } else {
+        candidate
+    };
+    let mut resolved: String = candidate.chars().take(MAX_TITLE_CHARS).collect();
+    if candidate.chars().count() > MAX_TITLE_CHARS {
+        resolved.push('…');
+    }
+    resolved
+}
+
+/// One run's buffered transcript (plan 20260929-executor-pip): whole fragments, in seq order,
+/// under [`TRANSCRIPT_BUFFER_BYTES`].
+#[derive(Default)]
+struct Transcript {
+    fragments: VecDeque<wire::ExecutorTranscriptFragment>,
+    bytes: usize,
+    /// The last seq assigned; seqs are dense from 1.
+    last_seq: u64,
+    /// The highest seq evicted by the cap; 0 when nothing was ever dropped.
+    dropped_through: u64,
+}
+
+impl Transcript {
+    fn push(&mut self, mut fragment: wire::ExecutorTranscriptFragment) -> wire::ExecutorTranscriptFragment {
+        self.last_seq += 1;
+        fragment.seq = self.last_seq;
+        self.bytes += fragment.encoded_len();
+        self.fragments.push_back(fragment.clone());
+        // Keep at least the newest fragment even if it alone exceeds the cap.
+        while self.bytes > TRANSCRIPT_BUFFER_BYTES && self.fragments.len() > 1 {
+            let Some(oldest) = self.fragments.pop_front() else {
+                break;
+            };
+            self.bytes -= oldest.encoded_len();
+            self.dropped_through = oldest.seq;
+        }
+        fragment
+    }
+
+    /// Fragments after `from_seq`, and whether something the viewer never saw was dropped.
+    fn after(&self, from_seq: u64) -> (Vec<wire::ExecutorTranscriptFragment>, bool) {
+        let fragments = self
+            .fragments
+            .iter()
+            .filter(|fragment| fragment.seq > from_seq)
+            .cloned()
+            .collect();
+        (fragments, self.dropped_through > from_seq)
+    }
+}
+
+/// The terminal outcome a viewer is told when a run ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunEnd {
+    pub terminal: Terminal,
+    pub summary: String,
+    pub error: String,
+}
+
+/// One `DeviceExecutorTranscript` frame towards a viewer: backlog, a live fragment, or the end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptBatch {
+    pub run_id: String,
+    pub fragments: Vec<wire::ExecutorTranscriptFragment>,
+    pub omitted: bool,
+    pub end: Option<RunEnd>,
+    /// The run's prompt, on the first batch answering a subscription only.
+    pub prompt: String,
+}
+
+fn run_end(record: &RunRecord) -> Option<RunEnd> {
+    record.terminal.map(|terminal| RunEnd {
+        terminal,
+        summary: record.summary.clone(),
+        error: record.error.clone(),
+    })
 }
 
 /// Which kind of host is claiming this machine's single executor slot.
@@ -167,11 +280,16 @@ pub struct HostRecord {
 }
 
 /// The frames the ledger asks its caller to send. The ledger itself touches no I/O.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Assign { channel_id: String, run_id: String },
     Cancel { channel_id: String, run_id: String },
     ReportAck { channel_id: String, run_id: String },
+    /// A transcript batch to a viewing device channel (plan 20260929-executor-pip).
+    Transcript {
+        channel_id: String,
+        batch: TranscriptBatch,
+    },
 }
 
 // `reconcile_deadline` is epoch milliseconds as f64, following the repository's existing convention
@@ -189,6 +307,11 @@ pub struct ExecutorLedger {
     runs: BTreeMap<String, RunRecord>,
     by_submission: HashMap<String, String>,
     next_seq: u64,
+    /// Per-run transcript buffers; an entry exists only while the run is unfinished and at least
+    /// one fragment arrived. Dropped by [`settle`](Self::settle) once the run is done.
+    transcripts: HashMap<String, Transcript>,
+    /// run_id → the device channels following its transcript.
+    viewers: HashMap<String, BTreeSet<String>>,
 }
 
 impl ExecutorLedger {
@@ -198,6 +321,211 @@ impl ExecutorLedger {
 
     pub fn run(&self, run_id: &str) -> Option<&RunRecord> {
         self.runs.get(run_id)
+    }
+
+    /// The metadata snapshot the center mirrors (plan 20260929-executor-pip): every unfinished run,
+    /// in submit order. No prompt, no transcript.
+    pub fn snapshot(&self) -> Vec<wire::ExecutorRunRef> {
+        let host_id = self.host.as_ref().map(|host| host.host_id.as_str());
+        let mut runs: Vec<wire::ExecutorRunRef> = self
+            .runs
+            .values()
+            .filter(|record| !record.done())
+            .map(|record| wire::ExecutorRunRef {
+                run_id: record.run_id.clone(),
+                session_id: record.session_id.clone(),
+                task_id: record.task_id.clone(),
+                title: record.title.clone(),
+                write: record.write,
+                phase: record.phase.as_str().to_string(),
+                submitted_at: record.created_at,
+                started_at: record.started_at.unwrap_or(0.0),
+                host_lost: host_id != Some(record.host_id.as_str()),
+            })
+            .collect();
+        runs.sort_by(|a, b| {
+            a.submitted_at
+                .total_cmp(&b.submitted_at)
+                .then_with(|| a.run_id.cmp(&b.run_id))
+        });
+        runs
+    }
+
+    /* ------------------------- transcript (plan 20260929-executor-pip) ------------------------- */
+
+    /// One fragment from the host currently holding the slot under `host_id`. Refused silently
+    /// when the run is unknown, finished, or was assigned to another host. Returns the live pushes
+    /// to every viewer of the run.
+    pub fn append_fragment(
+        &mut self,
+        host_id: &str,
+        run_id: &str,
+        mut fragment: wire::ExecutorTranscriptFragment,
+        now: f64,
+    ) -> Vec<Effect> {
+        let Some(record) = self.runs.get_mut(run_id) else {
+            return Vec::new();
+        };
+        if record.host_id != host_id || record.done() {
+            return Vec::new();
+        }
+        if fragment.encoded_len() > MAX_FRAGMENT_BYTES {
+            return Vec::new();
+        }
+        record.updated_at = now;
+        if fragment.at == 0.0 {
+            fragment.at = now;
+        }
+        let stored = self
+            .transcripts
+            .entry(run_id.to_string())
+            .or_default()
+            .push(fragment);
+        self.viewers
+            .get(run_id)
+            .map(|viewers| {
+                viewers
+                    .iter()
+                    .map(|channel_id| Effect::Transcript {
+                        channel_id: channel_id.clone(),
+                        batch: TranscriptBatch {
+                            run_id: run_id.to_string(),
+                            fragments: vec![stored.clone()],
+                            omitted: false,
+                            end: None,
+                            prompt: String::new(),
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A viewer follows `run_id` on `channel_id` from after `from_seq`: the backlog it has not
+    /// seen (in batches under [`TRANSCRIPT_BATCH_BYTES`], the first carrying the omitted marker
+    /// when the cap already dropped something it never saw), then live fragments until the run
+    /// ends. A finished or unknown run answers with a single end batch and no registration.
+    pub fn subscribe_transcript(&mut self, channel_id: &str, run_id: &str, from_seq: u64) -> Vec<Effect> {
+        let batch = |fragments, omitted, end, prompt: &str| Effect::Transcript {
+            channel_id: channel_id.to_string(),
+            batch: TranscriptBatch {
+                run_id: run_id.to_string(),
+                fragments,
+                omitted,
+                end,
+                prompt: prompt.to_string(),
+            },
+        };
+        let Some(record) = self.runs.get(run_id) else {
+            return vec![batch(
+                Vec::new(),
+                false,
+                Some(RunEnd {
+                    terminal: Terminal::Unknown,
+                    summary: String::new(),
+                    error: "this worker runtime has no record of the run".into(),
+                }),
+                "",
+            )];
+        };
+        if record.done() {
+            return vec![batch(Vec::new(), false, run_end(record), &record.prompt)];
+        }
+        let prompt = record.prompt.clone();
+        self.viewers
+            .entry(run_id.to_string())
+            .or_default()
+            .insert(channel_id.to_string());
+        let (backlog, omitted) = self
+            .transcripts
+            .get(run_id)
+            .map(|transcript| transcript.after(from_seq))
+            .unwrap_or_default();
+        let mut effects = Vec::new();
+        let mut current: Vec<wire::ExecutorTranscriptFragment> = Vec::new();
+        let mut current_bytes = 0usize;
+        for fragment in backlog {
+            let size = fragment.encoded_len();
+            if !current.is_empty() && current_bytes + size > TRANSCRIPT_BATCH_BYTES {
+                let first = effects.is_empty();
+                effects.push(batch(
+                    std::mem::take(&mut current),
+                    omitted && first,
+                    None,
+                    if first { prompt.as_str() } else { "" },
+                ));
+                current_bytes = 0;
+            }
+            current_bytes += size;
+            current.push(fragment);
+        }
+        // Always answer, even with nothing: the viewer learns the subscription was taken and that
+        // nothing older exists (or was dropped), and gets the prompt.
+        if !current.is_empty() || effects.is_empty() {
+            let first = effects.is_empty();
+            effects.push(batch(current, omitted && first, None, if first { prompt.as_str() } else { "" }));
+        }
+        effects
+    }
+
+    pub fn unsubscribe_transcript(&mut self, channel_id: &str, run_id: &str) {
+        if let Some(viewers) = self.viewers.get_mut(run_id) {
+            viewers.remove(channel_id);
+            if viewers.is_empty() {
+                self.viewers.remove(run_id);
+            }
+        }
+    }
+
+    /// Forget every subscription whose channel is not in `live` any more.
+    pub fn retain_viewers(&mut self, live: impl Fn(&str) -> bool) {
+        self.viewers.retain(|_, viewers| {
+            viewers.retain(|channel_id| live(channel_id));
+            !viewers.is_empty()
+        });
+    }
+
+    /// Close out finished runs: every viewer of a run that reached a terminal state gets one end
+    /// batch, and the run's buffer and subscriptions are dropped. Idempotent; call after every
+    /// mutation (a report, a cancel, a sweep, a host change) so the end always reaches viewers.
+    pub fn settle(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let ended: Vec<String> = self
+            .viewers
+            .keys()
+            .chain(self.transcripts.keys())
+            .filter(|run_id| self.runs.get(*run_id).is_none_or(RunRecord::done))
+            .cloned()
+            .collect();
+        for run_id in ended {
+            self.transcripts.remove(&run_id);
+            let Some(viewers) = self.viewers.remove(&run_id) else {
+                continue;
+            };
+            let end = self.runs.get(&run_id).and_then(run_end).unwrap_or(RunEnd {
+                terminal: Terminal::Unknown,
+                summary: String::new(),
+                error: "the run left the worker's ledger".into(),
+            });
+            for channel_id in viewers {
+                effects.push(Effect::Transcript {
+                    channel_id,
+                    batch: TranscriptBatch {
+                        run_id: run_id.clone(),
+                        fragments: Vec::new(),
+                        omitted: false,
+                        end: Some(end.clone()),
+                        prompt: String::new(),
+                    },
+                });
+            }
+        }
+        effects
+    }
+
+    #[cfg(test)]
+    fn transcript_bytes(&self, run_id: &str) -> Option<usize> {
+        self.transcripts.get(run_id).map(|transcript| transcript.bytes)
     }
 
     /// Register or update the machine's executor host.
@@ -334,6 +662,7 @@ impl ExecutorLedger {
     pub fn submit(
         &mut self,
         submission_id: &str,
+        caller: &RunCaller,
         workspace_id: &str,
         workspace_root: &str,
         prompt: &str,
@@ -343,6 +672,9 @@ impl ExecutorLedger {
         self.sweep(now);
         if submission_id.trim().is_empty() {
             return Err("executor.submit 缺 submissionId".into());
+        }
+        if caller.session_id.trim().is_empty() || caller.task_id.trim().is_empty() {
+            return Err("executor.submit 缺少调用方终端坐标".into());
         }
         if prompt.trim().is_empty() {
             return Err("executor.submit 缺 prompt".into());
@@ -381,6 +713,9 @@ impl ExecutorLedger {
         let record = RunRecord {
             run_id: run_id.clone(),
             submission_id: submission_id.to_string(),
+            session_id: caller.session_id.clone(),
+            task_id: caller.task_id.clone(),
+            title: resolve_title(&caller.title, prompt),
             workspace_id: workspace_id.to_string(),
             workspace_root: workspace_root.to_string(),
             write,
@@ -395,6 +730,7 @@ impl ExecutorLedger {
             host_epoch: host.epoch,
             cancel_requested: false,
             created_at: now,
+            started_at: None,
             updated_at: now,
             deadline: Some(now + ASSIGN_ACK_MS),
         };
@@ -468,6 +804,9 @@ impl ExecutorLedger {
                 record.phase = if state == ReportState::Accepted {
                     RunPhase::Accepted
                 } else {
+                    if record.started_at.is_none() {
+                        record.started_at = Some(now);
+                    }
                     RunPhase::Running
                 };
                 // The host is alive and reporting, so clear the timer; it is re-armed on a disconnect
@@ -513,9 +852,20 @@ impl ExecutorLedger {
             };
             self.runs.remove(&run_id);
             self.by_submission.remove(&submission_id);
+            self.transcripts.remove(&run_id);
+            self.viewers.remove(&run_id);
         }
         Ok(())
     }
+}
+
+/// Who submitted a run (plan 20260929-executor-pip): the caller's terminal and the title it chose.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunCaller {
+    pub session_id: String,
+    pub task_id: String,
+    /// `--title`; empty = fall back to the prompt's first line.
+    pub title: String,
 }
 
 /// The state a host reports; the wire enum maps to it in [`report_state_from_wire`].
@@ -579,6 +929,36 @@ mod tests {
         vec![CAPABILITY_EXECUTOR_HOST.to_string()]
     }
 
+    fn caller() -> RunCaller {
+        RunCaller {
+            session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            title: String::new(),
+        }
+    }
+
+    fn assistant(text: &str) -> wire::ExecutorTranscriptFragment {
+        wire::ExecutorTranscriptFragment {
+            kind: wire::ExecutorFragmentKind::Assistant as i32,
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    fn report(ledger: &mut ExecutorLedger, run_id: &str, state: ReportState, now: f64) {
+        ledger.apply_report("host-a", 1, run_id, state, "", "", Vec::new(), "", now);
+    }
+
+    fn transcript_batches(effects: &[Effect]) -> Vec<(&str, &TranscriptBatch)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Transcript { channel_id, batch } => Some((channel_id.as_str(), batch)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn ledger_with_host(now: f64) -> ExecutorLedger {
         let mut ledger = ExecutorLedger::default();
         ledger
@@ -589,7 +969,7 @@ mod tests {
 
     fn submit(ledger: &mut ExecutorLedger, submission: &str, write: bool, now: f64) -> String {
         ledger
-            .submit(submission, "ws-1", "/repo", "清掉 clippy 警告", write, now)
+            .submit(submission, &caller(), "ws-1", "/repo", "清掉 clippy 警告", write, now)
             .expect("提交成功")
             .0
     }
@@ -608,7 +988,7 @@ mod tests {
     fn submitting_without_a_host_is_refused_readably_not_queued() {
         let mut ledger = ExecutorLedger::default();
         let refused = ledger
-            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", &caller(), "ws-1", "/repo", "干活", true, 0.0)
             .expect_err("没有 host 必须立刻拒");
         // The sentence reaches the calling agent verbatim, so it has to name both places a host can
         // come from — an npm-installed daemon and Coflux.app — not just the desktop app.
@@ -706,7 +1086,7 @@ mod tests {
             .register_host("ch-1", HostAuthority::Client, "host-a", 1, &caps(), false, "去桌面配 provider", 0.0)
             .expect("登记成功");
         let refused = ledger
-            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", &caller(), "ws-1", "/repo", "干活", true, 0.0)
             .expect_err("未配置必须立刻拒");
         assert_eq!(refused, "去桌面配 provider");
     }
@@ -715,7 +1095,7 @@ mod tests {
     fn same_submission_id_never_dispatches_twice() {
         let mut ledger = ledger_with_host(0.0);
         let (first, effect) = ledger
-            .submit("sub-1", "ws-1", "/repo", "干活", true, 0.0)
+            .submit("sub-1", &caller(), "ws-1", "/repo", "干活", true, 0.0)
             .unwrap();
         assert_eq!(
             effect,
@@ -725,7 +1105,7 @@ mod tests {
             })
         );
         let (second, effect) = ledger
-            .submit("sub-1", "ws-1", "/repo", "干活", true, 1.0)
+            .submit("sub-1", &caller(), "ws-1", "/repo", "干活", true, 1.0)
             .unwrap();
         assert_eq!(second, first, "重投必须回同一条 run");
         assert_eq!(effect, None, "重投绝不二次派发");
@@ -951,11 +1331,11 @@ mod tests {
         assert!(ledger.cancel("run-nope", 0.0).is_err());
         let long = "x".repeat(MAX_PROMPT_BYTES + 1);
         let refused = ledger
-            .submit("sub-1", "ws-1", "/repo", &long, true, 0.0)
+            .submit("sub-1", &caller(), "ws-1", "/repo", &long, true, 0.0)
             .expect_err("超长 prompt 必须拒");
         assert!(refused.contains("上限"), "{refused}");
         let refused = ledger
-            .submit("sub-2", "ws-1", "/repo", "   ", true, 0.0)
+            .submit("sub-2", &caller(), "ws-1", "/repo", "   ", true, 0.0)
             .expect_err("空 prompt 必须拒");
         assert!(refused.contains("prompt"), "{refused}");
     }
@@ -1001,6 +1381,297 @@ mod tests {
         ] {
             assert!(!terminal.ok(), "{} 不该算成功", terminal.as_str());
         }
+    }
+
+    /* ---------------------- plan 20260929-executor-pip: card and transcript ---------------------- */
+
+    #[test]
+    fn a_run_carries_its_callers_terminal_and_a_resolved_title() {
+        let mut ledger = ledger_with_host(0.0);
+        let (with_title, _) = ledger
+            .submit(
+                "sub-1",
+                &RunCaller {
+                    session_id: "session-1".into(),
+                    task_id: "task-1".into(),
+                    title: "  Fix clippy  ".into(),
+                },
+                "ws-1",
+                "/repo",
+                "first line\nsecond line",
+                false,
+                0.0,
+            )
+            .unwrap();
+        let record = ledger.run(&with_title).unwrap();
+        assert_eq!(record.session_id, "session-1");
+        assert_eq!(record.task_id, "task-1");
+        assert_eq!(record.title, "Fix clippy");
+
+        let (without, _) = ledger
+            .submit("sub-2", &caller(), "ws-1", "/repo", "\n\n  first line  \nsecond", false, 1.0)
+            .unwrap();
+        assert_eq!(ledger.run(&without).unwrap().title, "first line");
+
+        let long = "x".repeat(MAX_TITLE_CHARS + 50);
+        assert_eq!(resolve_title(&long, "p").chars().count(), MAX_TITLE_CHARS + 1);
+        assert!(resolve_title(&long, "p").ends_with('…'));
+
+        let refused = ledger
+            .submit("sub-3", &RunCaller::default(), "ws-1", "/repo", "p", false, 2.0)
+            .expect_err("a run without a caller terminal has no card to bind to");
+        assert!(refused.contains("终端"), "{refused}");
+    }
+
+    #[test]
+    fn the_snapshot_lists_a_run_on_submit_and_drops_it_on_a_reported_terminal_state() {
+        let mut ledger = ledger_with_host(0.0);
+        assert!(ledger.snapshot().is_empty());
+        let run_id = submit(&mut ledger, "sub-1", true, 5.0);
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        let entry = &snapshot[0];
+        assert_eq!(entry.run_id, run_id);
+        assert_eq!(entry.session_id, "session-1");
+        assert_eq!(entry.task_id, "task-1");
+        assert_eq!(entry.title, "清掉 clippy 警告");
+        assert!(entry.write);
+        assert_eq!(entry.phase, "queued");
+        assert_eq!(entry.submitted_at, 5.0);
+        assert_eq!(entry.started_at, 0.0);
+        assert!(!entry.host_lost);
+
+        report(&mut ledger, &run_id, ReportState::Running, 7.0);
+        let entry = &ledger.snapshot()[0];
+        assert_eq!(entry.phase, "running");
+        assert_eq!(entry.started_at, 7.0);
+
+        // The host's channel dropping shows on the entry without ending the run.
+        ledger.host_channel_lost(8.0);
+        assert!(ledger.snapshot()[0].host_lost);
+        ledger
+            .register_host("ch-2", HostAuthority::Client, "host-a", 2, &caps(), true, "", 9.0)
+            .unwrap();
+        assert!(!ledger.snapshot()[0].host_lost);
+
+        // The reconnected host reports under its new epoch.
+        ledger.apply_report(
+            "host-a",
+            2,
+            &run_id,
+            ReportState::Terminal(Terminal::Succeeded),
+            "",
+            "",
+            Vec::new(),
+            "",
+            10.0,
+        );
+        assert!(ledger.snapshot().is_empty(), "a finished run leaves the snapshot");
+    }
+
+    #[test]
+    fn the_snapshot_drops_a_run_the_sweep_turned_unknown() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        assert_eq!(ledger.snapshot().len(), 1);
+        // Nobody polls: only the sweep runs, and the queued run's acceptance window closes.
+        ledger.sweep(ASSIGN_ACK_MS);
+        assert_eq!(
+            ledger.run(&run_id).unwrap().terminal,
+            Some(Terminal::Unknown)
+        );
+        assert!(ledger.snapshot().is_empty());
+    }
+
+    #[test]
+    fn fragments_are_accepted_only_from_the_runs_host_including_after_it_reconnects() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        report(&mut ledger, &run_id, ReportState::Running, 1.0);
+        // Another host id is not this run's host: refused, nothing buffered.
+        ledger.append_fragment("host-b", &run_id, assistant("intruder"), 2.0);
+        assert_eq!(ledger.transcript_bytes(&run_id), None);
+        ledger.append_fragment("host-a", &run_id, assistant("one"), 3.0);
+        assert!(ledger.transcript_bytes(&run_id).is_some());
+
+        // The desktop reconnects under the same host_id on a new channel with a higher epoch and
+        // keeps streaming.
+        ledger.host_channel_lost(4.0);
+        ledger
+            .register_host("ch-2", HostAuthority::Client, "host-a", 2, &caps(), true, "", 5.0)
+            .unwrap();
+        ledger.append_fragment("host-a", &run_id, assistant("two"), 6.0);
+        let effects = ledger.subscribe_transcript("viewer-1", &run_id, 0);
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        let texts: Vec<&str> = batches[0].1.fragments.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "two"]);
+        assert_eq!(batches[0].1.fragments[0].seq, 1);
+        assert_eq!(batches[0].1.fragments[1].seq, 2);
+        assert!(!batches[0].1.omitted);
+        assert_eq!(batches[0].1.prompt, "清掉 clippy 警告", "the first batch carries the prompt");
+
+        // A fragment for an unknown or finished run is dropped too.
+        assert!(ledger.append_fragment("host-a", "run-nope", assistant("x"), 7.0).is_empty());
+        ledger.apply_report(
+            "host-a",
+            2,
+            &run_id,
+            ReportState::Terminal(Terminal::Succeeded),
+            "",
+            "",
+            Vec::new(),
+            "",
+            8.0,
+        );
+        assert!(ledger.run(&run_id).unwrap().done());
+        assert!(ledger.append_fragment("host-a", &run_id, assistant("late"), 9.0).is_empty());
+    }
+
+    #[test]
+    fn viewers_get_the_backlog_then_live_pushes_and_resume_by_seq() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        report(&mut ledger, &run_id, ReportState::Running, 1.0);
+        ledger.append_fragment("host-a", &run_id, assistant("a"), 2.0);
+        ledger.append_fragment("host-a", &run_id, assistant("b"), 3.0);
+
+        // Backlog: everything after seq 0.
+        let effects = ledger.subscribe_transcript("viewer-1", &run_id, 0);
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0, "viewer-1");
+        assert_eq!(batches[0].1.fragments.len(), 2);
+        assert!(batches[0].1.end.is_none());
+
+        // Live: each new fragment reaches the subscriber, with its seq.
+        let live = ledger.append_fragment("host-a", &run_id, assistant("c"), 4.0);
+        let batches = transcript_batches(&live);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1.fragments[0].seq, 3);
+        assert_eq!(batches[0].1.fragments[0].text, "c");
+
+        // Resume after a reconnect: only what came after the last seq the viewer has.
+        ledger.retain_viewers(|_| false);
+        ledger.append_fragment("host-a", &run_id, assistant("d"), 5.0);
+        let effects = ledger.subscribe_transcript("viewer-2", &run_id, 3);
+        let batches = transcript_batches(&effects);
+        let texts: Vec<&str> = batches[0].1.fragments.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(texts, vec!["d"]);
+        assert!(!batches[0].1.omitted);
+
+        // A subscription with nothing new still gets one (empty) answer.
+        let effects = ledger.subscribe_transcript("viewer-3", &run_id, 4);
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].1.fragments.is_empty());
+
+        // Unsubscribing stops the live pushes for that channel only.
+        ledger.unsubscribe_transcript("viewer-2", &run_id);
+        let live = ledger.append_fragment("host-a", &run_id, assistant("e"), 6.0);
+        let channels: Vec<&str> = transcript_batches(&live).iter().map(|(c, _)| *c).collect();
+        assert_eq!(channels, vec!["viewer-3"]);
+    }
+
+    #[test]
+    fn the_buffer_cap_drops_the_oldest_fragments_and_the_backlog_says_so() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        report(&mut ledger, &run_id, ReportState::Running, 1.0);
+        let big = "z".repeat(100 * 1024);
+        let count = TRANSCRIPT_BUFFER_BYTES / (100 * 1024) + 3;
+        for index in 0..count {
+            ledger.append_fragment("host-a", &run_id, assistant(&big), 2.0 + index as f64);
+        }
+        let bytes = ledger.transcript_bytes(&run_id).unwrap();
+        assert!(bytes <= TRANSCRIPT_BUFFER_BYTES, "{bytes} bytes kept");
+
+        let effects = ledger.subscribe_transcript("viewer-1", &run_id, 0);
+        let batches = transcript_batches(&effects);
+        assert!(batches.len() > 1, "a 1 MiB backlog goes out in several batches");
+        assert!(batches[0].1.omitted, "the first batch carries the omitted marker");
+        assert!(batches[1..].iter().all(|(_, batch)| !batch.omitted));
+        assert!(!batches[0].1.prompt.is_empty());
+        assert!(batches[1..].iter().all(|(_, batch)| batch.prompt.is_empty()), "the prompt rides the first batch only");
+        let first_seq = batches[0].1.fragments[0].seq;
+        assert!(first_seq > 1, "the oldest fragments are gone");
+        let last_seq = batches.last().unwrap().1.fragments.last().unwrap().seq;
+        assert_eq!(last_seq, count as u64);
+        for (_, batch) in &batches {
+            let size: usize = batch.fragments.iter().map(|f| f.encoded_len()).sum();
+            assert!(size <= TRANSCRIPT_BATCH_BYTES + 100 * 1024 + 64, "{size}");
+        }
+
+        // A viewer that already has everything up to the first retained seq sees no omission.
+        let effects = ledger.subscribe_transcript("viewer-2", &run_id, first_seq - 1);
+        assert!(!transcript_batches(&effects)[0].1.omitted);
+
+        // One oversized fragment is refused outright rather than allowed to wedge the link.
+        let huge = "h".repeat(MAX_FRAGMENT_BYTES + 1);
+        assert!(ledger.append_fragment("host-a", &run_id, assistant(&huge), 99.0).is_empty());
+    }
+
+    #[test]
+    fn settling_a_finished_run_ends_its_viewers_and_drops_the_buffer() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        report(&mut ledger, &run_id, ReportState::Running, 1.0);
+        ledger.append_fragment("host-a", &run_id, assistant("work"), 2.0);
+        ledger.subscribe_transcript("viewer-1", &run_id, 0);
+        ledger.subscribe_transcript("viewer-2", &run_id, 0);
+        assert!(ledger.settle().is_empty(), "nothing to settle while the run is live");
+
+        ledger.apply_report(
+            "host-a",
+            1,
+            &run_id,
+            ReportState::Terminal(Terminal::ToolFailed),
+            "",
+            "partial",
+            Vec::new(),
+            "tests red",
+            3.0,
+        );
+        let effects = ledger.settle();
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 2);
+        for (_, batch) in &batches {
+            assert!(batch.fragments.is_empty());
+            assert_eq!(
+                batch.end,
+                Some(RunEnd {
+                    terminal: Terminal::ToolFailed,
+                    summary: "partial".into(),
+                    error: "tests red".into(),
+                })
+            );
+        }
+        assert_eq!(ledger.transcript_bytes(&run_id), None, "the buffer is dropped");
+        assert!(ledger.settle().is_empty(), "idempotent");
+
+        // Subscribing after the end answers with the end at once and registers nothing.
+        let effects = ledger.subscribe_transcript("viewer-3", &run_id, 0);
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1.end.as_ref().map(|end| end.terminal), Some(Terminal::ToolFailed));
+        assert!(ledger.settle().is_empty());
+
+        // And so does an unknown run.
+        let effects = ledger.subscribe_transcript("viewer-3", "run-nope", 0);
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches[0].1.end.as_ref().map(|end| end.terminal), Some(Terminal::Unknown));
+    }
+
+    #[test]
+    fn a_sweep_produced_unknown_also_ends_the_viewers() {
+        let mut ledger = ledger_with_host(0.0);
+        let run_id = submit(&mut ledger, "sub-1", true, 0.0);
+        ledger.subscribe_transcript("viewer-1", &run_id, 0);
+        ledger.sweep(ASSIGN_ACK_MS);
+        let effects = ledger.settle();
+        let batches = transcript_batches(&effects);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1.end.as_ref().map(|end| end.terminal), Some(Terminal::Unknown));
     }
 
     #[test]

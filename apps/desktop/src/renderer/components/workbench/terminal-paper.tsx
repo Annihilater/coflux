@@ -449,7 +449,10 @@ const MARKDOWN_COMPONENTS: Components = {
   td: ({ children }) => <td className="border border-border p-[0.5em] align-top">{children}</td>,
 };
 
-function PaperMarkdown({ text }: { text: string }) {
+/** The paper's typography, shared with the executor card's expanded panel (plan
+ * 20260929-executor-pip): the same plugins, the same component map, so agent prose reads the
+ * same wherever it is shown. */
+export function PaperMarkdown({ text }: { text: string }) {
   return (
     <Markdown components={MARKDOWN_COMPONENTS} remarkPlugins={REMARK_PLUGINS}>
       {text}

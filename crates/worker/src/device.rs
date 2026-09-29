@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::agent_ctl::executor::{
     self, Effect as ExecutorEffect, ExecutorLedger, HostAuthority, RegisterOutcome,
-    RunRecord as ExecutorRun,
+    RunCaller as ExecutorRunCaller, RunRecord as ExecutorRun, TranscriptBatch,
 };
 use crate::annotations::AnnotationStore;
 use crate::device_loopback::{self, LoopbackTable};
@@ -809,6 +809,10 @@ pub struct DeviceRuntime {
     /// Kept beside the ledger rather than in the channels table on purpose: that table is device
     /// channels, and this link is a pipe to a child process with no principal and no scopes.
     executor_local_host: Mutex<Option<mpsc::Sender<String>>>,
+    /// The last executor-runs snapshot sent to the center (plan 20260929-executor-pip): a change
+    /// of the ledger publishes only when the snapshot really differs; authentication re-sends it
+    /// unconditionally.
+    executor_snapshot: Mutex<Vec<wire::ExecutorRunRef>>,
     /// 中心已触发执行过的 operation_id（plan 091）：Execute 重发只重放上次 report 或忽略在飞，绝不二次分派。
     executed_operations: Mutex<HashSet<String>>,
     /// 中心按需读快照的在飞等待者：内部 request_id → (session_id, 回执)。
@@ -918,6 +922,7 @@ impl DeviceRuntime {
             prepared: Mutex::new(HashMap::new()),
             executor: Mutex::new(ExecutorLedger::default()),
             executor_local_host: Mutex::new(None),
+            executor_snapshot: Mutex::new(Vec::new()),
             executed_operations: Mutex::new(HashSet::new()),
             pending_snapshot_reads: Mutex::new(HashMap::new()),
             requests: Mutex::new(CallLedger::default()),
@@ -1956,8 +1961,21 @@ impl DeviceRuntime {
             payload,
             device_envelope::Payload::ExecutorHostRegister(_)
                 | device_envelope::Payload::ExecutorReport(_)
+                | device_envelope::Payload::ExecutorTranscriptFragment(_)
         ) {
             self.handle_executor_frame(channel_id, &principal, payload.clone());
+            return;
+        }
+        // Executor viewers (plan 20260929-executor-pip): any authenticated channel with the scope
+        // the gate above checked (SESSION_READ to follow a transcript, SESSION_CONTROL to stop a
+        // run). No request_id, no attach, no holder.
+        if matches!(
+            payload,
+            device_envelope::Payload::ExecutorTranscriptSubscribe(_)
+                | device_envelope::Payload::ExecutorTranscriptUnsubscribe(_)
+                | device_envelope::Payload::ExecutorStop(_)
+        ) {
+            self.handle_executor_viewer_frame(channel_id, payload.clone());
             return;
         }
         if let device_envelope::Payload::SessionAttach(attach) = payload {
@@ -2439,6 +2457,67 @@ impl DeviceRuntime {
         now
     }
 
+    /// The other half of the gate, run after every ledger operation (plan 20260929-executor-pip):
+    /// viewers whose channel is gone are forgotten, finished runs send their end to the viewers
+    /// they still have and drop their buffers, and the center gets a fresh snapshot when it
+    /// changed. Sweeps produce terminal states with nobody polling, so this is what makes a card
+    /// for a run turned `Unknown` disappear.
+    fn executor_settle(&self) {
+        let live: HashSet<String> = self.channels.lock().unwrap().keys().cloned().collect();
+        let (effects, snapshot) = {
+            let mut ledger = self.executor.lock().unwrap();
+            ledger.retain_viewers(|channel_id| live.contains(channel_id));
+            (ledger.settle(), ledger.snapshot())
+        };
+        for effect in effects {
+            self.dispatch_executor_effect(effect);
+        }
+        let changed = {
+            let mut last = self.executor_snapshot.lock().unwrap();
+            if *last == snapshot {
+                false
+            } else {
+                *last = snapshot.clone();
+                true
+            }
+        };
+        if changed {
+            self.send_executor_runs(snapshot);
+        }
+    }
+
+    fn send_executor_runs(&self, runs: Vec<wire::ExecutorRunRef>) {
+        let envelope = wire::DaemonToServer {
+            payload: Some(daemon_to_server::Payload::ExecutorRuns(wire::ExecutorRuns { runs })),
+        };
+        let _ = self.to_server.try_send(envelope.encode_to_vec());
+    }
+
+    /// Unconditional re-send of the executor-runs snapshot (after authentication: the center's
+    /// copy is memory-only).
+    pub fn executor_publish(&self) {
+        let snapshot = {
+            let ledger = self.executor.lock().unwrap();
+            ledger.snapshot()
+        };
+        *self.executor_snapshot.lock().unwrap() = snapshot.clone();
+        self.send_executor_runs(snapshot);
+    }
+
+    /// Periodic drive (plan 20260929-executor-pip): the ledger's sweep only runs when something
+    /// touches it, so a run whose host went silent would otherwise hang on every desktop's screen
+    /// until the next CLI poll. Called from the worker's 2-second tick.
+    pub fn executor_tick(&self) {
+        self.executor_gate();
+        self.executor_settle();
+    }
+
+    /// The last snapshot handed to the center; tests read it instead of the outbound queue.
+    #[cfg(test)]
+    fn executor_snapshot(&self) -> Vec<wire::ExecutorRunRef> {
+        self.executor_snapshot.lock().unwrap().clone()
+    }
+
     /// 本机 loopback 通道上来的 executor host 登记 / 回报。
     ///
     /// **只认 direct（loopback）通道**：executor 只服务桌面 app 所在的这台机器，远端 client
@@ -2520,8 +2599,69 @@ impl DeviceRuntime {
                     self.dispatch_executor_effect(effect);
                 }
             }
+            device_envelope::Payload::ExecutorTranscriptFragment(frame) => {
+                // Same identity rule as a report: the channel must be the one currently holding
+                // the host slot, and the ledger then checks that host owns the run. A desktop
+                // that reconnected re-registered under the same host_id on this new channel, so
+                // its fragments keep flowing.
+                let host_id = {
+                    let ledger = self.executor.lock().unwrap();
+                    ledger
+                        .host()
+                        .filter(|host| host.channel_id == channel_id)
+                        .map(|host| host.host_id.clone())
+                };
+                let Some(host_id) = host_id else {
+                    return;
+                };
+                let Some(fragment) = frame.fragment else {
+                    return;
+                };
+                let effects = self.executor.lock().unwrap().append_fragment(
+                    &host_id,
+                    &frame.run_id,
+                    fragment,
+                    now,
+                );
+                for effect in effects {
+                    self.dispatch_executor_effect(effect);
+                }
+            }
             _ => {}
         }
+        self.executor_settle();
+    }
+
+    /// A viewing desktop follows, stops following, or stops a run (plan 20260929-executor-pip).
+    /// The scope gate already ran; a stop lands on the ledger's ordinary cancel path.
+    fn handle_executor_viewer_frame(&self, channel_id: &str, payload: device_envelope::Payload) {
+        let now = self.executor_gate();
+        match payload {
+            device_envelope::Payload::ExecutorTranscriptSubscribe(subscribe) => {
+                let effects = self.executor.lock().unwrap().subscribe_transcript(
+                    channel_id,
+                    &subscribe.run_id,
+                    subscribe.from_seq,
+                );
+                for effect in effects {
+                    self.dispatch_executor_effect(effect);
+                }
+            }
+            device_envelope::Payload::ExecutorTranscriptUnsubscribe(unsubscribe) => {
+                self.executor
+                    .lock()
+                    .unwrap()
+                    .unsubscribe_transcript(channel_id, &unsubscribe.run_id);
+            }
+            device_envelope::Payload::ExecutorStop(stop) => {
+                let effect = self.executor.lock().unwrap().cancel(&stop.run_id, now);
+                if let Ok(Some(effect)) = effect {
+                    self.dispatch_executor_effect(effect);
+                }
+            }
+            _ => {}
+        }
+        self.executor_settle();
     }
 
     /// 把账本给出的一条 effect 变成真的帧。账本自己不碰 I/O，锁在这里已经放掉。
@@ -2589,6 +2729,13 @@ impl DeviceRuntime {
                     );
                 }
             }
+            // Viewers are device channels only; the local host never follows a transcript.
+            ExecutorEffect::Transcript { channel_id, batch } => {
+                self.send_payload(
+                    &channel_id,
+                    device_envelope::Payload::ExecutorTranscript(transcript_frame(batch)),
+                );
+            }
         }
     }
 
@@ -2618,6 +2765,8 @@ impl DeviceRuntime {
             ledger.host_channel_lost(now);
         }
         ledger.sweep(now);
+        drop(ledger);
+        self.executor_settle();
     }
 
     /// The host child claimed this machine's host slot. The election lives in the ledger.
@@ -2630,7 +2779,7 @@ impl DeviceRuntime {
         not_ready_reason: &str,
     ) -> Result<RegisterOutcome, String> {
         let now = self.executor_gate();
-        self.executor.lock().unwrap().register_host(
+        let outcome = self.executor.lock().unwrap().register_host(
             EXECUTOR_LOCAL_CHANNEL,
             HostAuthority::DaemonLocal,
             host_id,
@@ -2639,7 +2788,9 @@ impl DeviceRuntime {
             ready,
             not_ready_reason,
             now,
-        )
+        );
+        self.executor_settle();
+        outcome
     }
 
     /// One report from the host child. Its identity is not taken from what it says: only the host
@@ -2681,6 +2832,36 @@ impl DeviceRuntime {
         if let Some(effect) = effect {
             self.dispatch_executor_effect(effect);
         }
+        self.executor_settle();
+    }
+
+    /// One transcript fragment from the host child (plan 20260929-executor-pip), under the same
+    /// identity rule as its reports.
+    pub fn executor_local_host_transcript(
+        &self,
+        run_id: &str,
+        fragment: wire::ExecutorTranscriptFragment,
+    ) {
+        let now = self.executor_gate();
+        let host_id = {
+            let ledger = self.executor.lock().unwrap();
+            ledger
+                .host()
+                .filter(|host| host.channel_id == EXECUTOR_LOCAL_CHANNEL)
+                .map(|host| host.host_id.clone())
+        };
+        let Some(host_id) = host_id else {
+            return;
+        };
+        let effects = self
+            .executor
+            .lock()
+            .unwrap()
+            .append_fragment(&host_id, run_id, fragment, now);
+        for effect in effects {
+            self.dispatch_executor_effect(effect);
+        }
+        self.executor_settle();
     }
 
     /// Queue one frame towards the host child. A full or closed queue is dropped rather than
@@ -2701,43 +2882,62 @@ impl DeviceRuntime {
     pub fn executor_submit(
         &self,
         submission_id: &str,
+        caller: &ExecutorRunCaller,
         workspace_id: &str,
         workspace_root: &str,
         prompt: &str,
         write: bool,
     ) -> Result<String, String> {
         let now = self.executor_gate();
-        let (run_id, effect) = self.executor.lock().unwrap().submit(
+        let submitted = self.executor.lock().unwrap().submit(
             submission_id,
+            caller,
             workspace_id,
             workspace_root,
             prompt,
             write,
             now,
-        )?;
+        );
+        let (run_id, effect) = match submitted {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                self.executor_settle();
+                return Err(error);
+            }
+        };
         if let Some(effect) = effect {
             self.dispatch_executor_effect(effect);
         }
+        self.executor_settle();
         Ok(run_id)
     }
 
     /// 轮询原语：本地账本直接答。
     pub fn executor_status(&self, run_id: &str) -> Result<serde_json::Value, String> {
         self.executor_gate();
-        let ledger = self.executor.lock().unwrap();
-        ledger
-            .run(run_id)
-            .map(executor_run_view)
-            .ok_or_else(|| "没有这条 executor 任务（runId 不对或已被淘汰）".to_string())
+        let view = {
+            let ledger = self.executor.lock().unwrap();
+            ledger.run(run_id).map(executor_run_view)
+        };
+        self.executor_settle();
+        view.ok_or_else(|| "没有这条 executor 任务（runId 不对或已被淘汰）".to_string())
     }
 
     /// 取消一条 run（幂等）。
     pub fn executor_cancel(&self, run_id: &str) -> Result<(), String> {
         let now = self.executor_gate();
-        let effect = self.executor.lock().unwrap().cancel(run_id, now)?;
+        let cancelled = self.executor.lock().unwrap().cancel(run_id, now);
+        let effect = match cancelled {
+            Ok(effect) => effect,
+            Err(error) => {
+                self.executor_settle();
+                return Err(error);
+            }
+        };
         if let Some(effect) = effect {
             self.dispatch_executor_effect(effect);
         }
+        self.executor_settle();
         Ok(())
     }
 
@@ -4184,9 +4384,33 @@ fn executor_run_view(record: &ExecutorRun) -> serde_json::Value {
         "error": record.error,
         "write": record.write,
         "workspaceId": record.workspace_id,
+        "title": record.title,
         "createdAt": record.created_at,
         "updatedAt": record.updated_at,
     })
+}
+
+/// A ledger transcript batch -> the device frame a viewer receives.
+fn transcript_frame(batch: TranscriptBatch) -> wire::DeviceExecutorTranscript {
+    let (ended, terminal, summary, error) = match batch.end {
+        Some(end) => (
+            true,
+            end.terminal.as_str().to_string(),
+            end.summary,
+            end.error,
+        ),
+        None => (false, String::new(), String::new(), String::new()),
+    };
+    wire::DeviceExecutorTranscript {
+        run_id: batch.run_id,
+        fragments: batch.fragments,
+        omitted: batch.omitted,
+        ended,
+        terminal,
+        summary,
+        error,
+        prompt: batch.prompt,
+    }
 }
 
 fn routed_to_sessiond(payload: &device_envelope::Payload) -> bool {
@@ -4387,7 +4611,13 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         // 在线的 scope 上等于给本地功能强加一条中心依赖。真正的边界在下面那道 loopback 门：
         // 只有本机 direct 通道能登记成 host，远端 client 即使拿到 SESSION_CONTROL 也抢不走。
         device_envelope::Payload::ExecutorHostRegister(_)
-        | device_envelope::Payload::ExecutorReport(_) => Some(DeviceScope::SessionControl),
+        | device_envelope::Payload::ExecutorReport(_)
+        | device_envelope::Payload::ExecutorTranscriptFragment(_) => Some(DeviceScope::SessionControl),
+        // Executor viewers (plan 20260929-executor-pip): following a transcript is a read, stopping
+        // a run is control. Neither needs an attach; the frames carry no request_id.
+        device_envelope::Payload::ExecutorTranscriptSubscribe(_)
+        | device_envelope::Payload::ExecutorTranscriptUnsubscribe(_) => Some(DeviceScope::SessionRead),
+        device_envelope::Payload::ExecutorStop(_) => Some(DeviceScope::SessionControl),
         // Secret answers (plan 20260926-agent-secret-input): granted per channel, not per session.
         // No attach or holder_epoch is required, so any desktop of the account can answer.
         device_envelope::Payload::SecretAnswer(_) => Some(DeviceScope::SessionControl),
@@ -4431,6 +4661,7 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::ExecutorAssign(_)
         | device_envelope::Payload::ExecutorCancel(_)
         | device_envelope::Payload::ExecutorReportAck(_) => Some(DeviceScope::SessionControl),
+        device_envelope::Payload::ExecutorTranscript(_) => Some(DeviceScope::SessionRead),
         device_envelope::Payload::SecretAnswerAck(_) => Some(DeviceScope::SessionControl),
         device_envelope::Payload::AnnotationsListed(_)
         | device_envelope::Payload::AnnotationsMutated(_)
@@ -5452,6 +5683,148 @@ mod tests {
             .unwrap()
             .unwrap();
         decode_device_envelope(&bytes).unwrap()
+    }
+
+    /// Plan 20260929-executor-pip: the loopback host streams a run's transcript to the worker,
+    /// any SESSION_READ channel may follow it (backlog first, then live, then the end), a stop
+    /// needs SESSION_CONTROL, and the center's snapshot follows the ledger.
+    #[tokio::test]
+    async fn executor_transcript_is_served_to_viewers_and_stop_needs_session_control() {
+        let mut fixture = test_runtime();
+        let runtime = &fixture.runtime;
+        // The desktop host registers over the loopback channel.
+        runtime.handle_client_frame(
+            &fixture.local_id,
+            &request_envelope(
+                &fixture.local_id,
+                device_envelope::Payload::ExecutorHostRegister(wire::DeviceExecutorHostRegister {
+                    host_id: "host-desktop".into(),
+                    host_epoch: 1,
+                    capabilities: vec![executor::CAPABILITY_EXECUTOR_HOST.into()],
+                    ready: true,
+                    not_ready_reason: String::new(),
+                }),
+            ),
+        );
+        let registered = remote_envelope(&mut fixture.local_rx).await;
+        assert!(matches!(
+            registered.payload,
+            Some(device_envelope::Payload::ExecutorHostRegistered(ref r)) if r.ok
+        ));
+
+        let caller = ExecutorRunCaller {
+            session_id: "session-s".into(),
+            task_id: "task-s".into(),
+            title: "Investigate".into(),
+        };
+        let run_id = runtime
+            .executor_submit("sub-1", &caller, "ws-1", "/repo", "look around", false)
+            .unwrap();
+        // The assignment went to the host; the center's snapshot lists the run on its terminal.
+        let assign = remote_envelope(&mut fixture.local_rx).await;
+        assert!(matches!(assign.payload, Some(device_envelope::Payload::ExecutorAssign(_))));
+        let snapshot = runtime.executor_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].task_id, "task-s");
+        assert_eq!(snapshot[0].title, "Investigate");
+
+        // A fragment from the host channel is buffered; one from a non-host channel is not.
+        let fragment = |text: &str| {
+            device_envelope::Payload::ExecutorTranscriptFragment(
+                wire::DeviceExecutorTranscriptFragment {
+                    run_id: run_id.clone(),
+                    fragment: Some(wire::ExecutorTranscriptFragment {
+                        kind: wire::ExecutorFragmentKind::Assistant as i32,
+                        text: text.into(),
+                        ..Default::default()
+                    }),
+                },
+            )
+        };
+        runtime.handle_tailcat_frame(&fixture.remote_id, &request_envelope(&fixture.remote_id, fragment("intruder")));
+        let denied = remote_envelope(&mut fixture.remote_rx).await;
+        assert!(matches!(
+            denied.payload,
+            Some(device_envelope::Payload::Error(ref e)) if e.code == "executor_host_denied"
+        ));
+        runtime.handle_client_frame(&fixture.local_id, &request_envelope(&fixture.local_id, fragment("one")));
+
+        // A viewer on a remote channel gets the backlog.
+        runtime.handle_tailcat_frame(
+            &fixture.remote_id,
+            &request_envelope(
+                &fixture.remote_id,
+                device_envelope::Payload::ExecutorTranscriptSubscribe(
+                    wire::DeviceExecutorTranscriptSubscribe {
+                        run_id: run_id.clone(),
+                        from_seq: 0,
+                    },
+                ),
+            ),
+        );
+        let backlog = remote_envelope(&mut fixture.remote_rx).await;
+        let Some(device_envelope::Payload::ExecutorTranscript(backlog)) = backlog.payload else {
+            panic!("expected the backlog");
+        };
+        assert_eq!(backlog.fragments.len(), 1);
+        assert_eq!(backlog.fragments[0].text, "one");
+        assert_eq!(backlog.fragments[0].seq, 1);
+        assert!(!backlog.ended);
+        assert_eq!(backlog.prompt, "look around");
+
+        // Live fragments follow.
+        runtime.handle_client_frame(&fixture.local_id, &request_envelope(&fixture.local_id, fragment("two")));
+        let live = remote_envelope(&mut fixture.remote_rx).await;
+        let Some(device_envelope::Payload::ExecutorTranscript(live)) = live.payload else {
+            panic!("expected a live fragment");
+        };
+        assert_eq!(live.fragments[0].seq, 2);
+
+        // A SESSION_READ-only channel may follow but not stop.
+        let readonly_id = "relay-readonly".to_string();
+        let mut readonly_rx = runtime
+            .open_tailcat(&wire::DeviceTailcatGrant {
+                channel_id: readonly_id.clone(),
+                account_id: "account-1".into(),
+                client_instance_id: "client-2".into(),
+                transport_generation: 3,
+                scopes: vec![DeviceScope::SessionRead as i32],
+                protocol_version: DEVICE_PROTOCOL_VERSION,
+                ..Default::default()
+            })
+            .unwrap();
+        let stop = || {
+            device_envelope::Payload::ExecutorStop(wire::DeviceExecutorStop {
+                run_id: run_id.clone(),
+            })
+        };
+        runtime.handle_tailcat_frame(&readonly_id, &request_envelope(&readonly_id, stop()));
+        let refused = remote_envelope(&mut readonly_rx).await;
+        assert!(matches!(
+            refused.payload,
+            Some(device_envelope::Payload::Error(ref e)) if e.code == "scope_denied"
+        ));
+        assert!(!runtime.executor.lock().unwrap().run(&run_id).unwrap().cancel_requested);
+
+        // A SESSION_CONTROL channel's stop lands on the ledger's cancel path: the run was never
+        // accepted by the host, so it ends as cancelled at once, the viewer is told, and the
+        // snapshot drops it.
+        runtime.handle_tailcat_frame(&fixture.remote_id, &request_envelope(&fixture.remote_id, stop()));
+        let ended = remote_envelope(&mut fixture.remote_rx).await;
+        let Some(device_envelope::Payload::ExecutorTranscript(ended)) = ended.payload else {
+            panic!("expected the end of the transcript");
+        };
+        assert!(ended.ended);
+        assert_eq!(ended.terminal, "cancelled");
+        assert_eq!(
+            runtime.executor.lock().unwrap().run(&run_id).unwrap().terminal,
+            Some(executor::Terminal::Cancelled)
+        );
+        assert!(runtime.executor_snapshot().is_empty());
+
+        runtime.close_channel(&fixture.local_id);
+        runtime.close_tailcats();
+        let _ = std::fs::remove_dir_all(&fixture.home);
     }
 
     #[test]

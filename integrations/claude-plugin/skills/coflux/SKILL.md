@@ -422,13 +422,19 @@ server, use it to get the URL and tell the user directly; they click it and nobo
 ### Hand a bounded sub-task to the executor
 
 ```sh
-coflux executor run --prompt="Fix every clippy warning in crates/worker" --write
-coflux executor run --prompt="Find why the relay reconnect test flakes and report back"
+coflux executor run --title="Fix clippy in worker" --prompt="Fix every clippy warning in crates/worker" --write
+coflux executor run --title="Why does the relay test flake" --prompt="Find why the relay reconnect test flakes and report back"
 ```
 
 The executor is a small agent built into coflux. Give it one self-contained job and it works in
 **the workspace your cwd is in** while you keep your own context for the main thread. The command
 blocks until the job ends, then prints the executor's final report and the files it changed.
+
+**Always pass `--title`**: a few words naming the job. While the run is going, the user sees a
+small card on this terminal (on every desktop of the account) with that title, the run's live
+progress and a stop button; they can expand it to read everything the executor did. Without a
+title the card shows the prompt's first line, which is rarely a good name. The card is read-only
+and disappears when the run ends — the result comes back to you, not to the user.
 
 Reach for it when a job is mechanical, bounded and verbose — chasing a failing test suite, a
 repetitive refactor across many files, a search that would cost you many tool calls. Keep the work
@@ -459,8 +465,9 @@ Its boundaries, enforced by that kernel sandbox — count on them, and tell it w
   refused outright rather than queued; read-only runs may go in parallel up to a small cap.
 
 A run ends if the host it is on goes away — the user quits the desktop app, signs out, or stops the
-machine's terminals — and you get a definite failure, never a hang. `--timeout <seconds>` caps how
-long you wait; the default is 30 minutes and a timeout cancels the run before failing. The model
+machine's terminals — and you get a definite failure, never a hang. The user can also stop it from
+the card, which comes back to you as `cancelled`. `--timeout <seconds>` caps how long you wait; the
+default is 30 minutes and a timeout cancels the run before failing. The model
 comes from the user's account-wide executor settings; if they have not configured one, the command
 says so in one line — relay that to the user instead of retrying.
 

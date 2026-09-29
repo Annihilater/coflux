@@ -517,11 +517,13 @@ function renderExecutorTimeout(timeoutSec, runId, phase) {
   return `等待超时（${timeoutSec}s）：executor 任务 ${runId} 仍是 ${phase}，已请求取消。可加大 --timeout 后重发`;
 }
 
-/** Submit. A transport failure retries with the same submissionId; a refusal is reported verbatim. */
-async function executorSubmit(prompt, write) {
+/** Submit. A transport failure retries with the same submissionId; a refusal is reported verbatim.
+ * `title` names the run on the desktop's card (plan 20260929-executor-pip); empty = the daemon
+ * falls back to the prompt's first line. */
+async function executorSubmit(prompt, write, title) {
   const submission = submissionId();
   for (let attempt = 0; ; attempt += 1) {
-    const result = await agentPostResult({ action: "executor.submit", submissionId: submission, prompt, write });
+    const result = await agentPostResult({ action: "executor.submit", submissionId: submission, prompt, write, title });
     if (result.ok) {
       const runId = String(result.value?.runId ?? "");
       if (!runId) die("daemon 没有返回 runId（版本太旧？）");
@@ -533,15 +535,16 @@ async function executorSubmit(prompt, write) {
 }
 
 async function cmdExecutor(values) {
-  if (positionals[1] !== "run") die(`executor 的子命令只有 run：coflux executor run --prompt="<任务>" [--write]`);
+  if (positionals[1] !== "run") die(`executor 的子命令只有 run：coflux executor run --prompt="<任务>" [--title="<标题>"] [--write]`);
   const prompt = String(values.prompt ?? "").trim();
   if (!prompt) {
     die(`executor run 需要 --prompt="<任务>"（一句把边界说清的任务描述，例如 --prompt="把 crates/worker 的 clippy 警告清掉"）`);
   }
   const write = Boolean(values.write);
+  const title = String(values.title ?? "").trim();
   const timeoutSec = executorTimeoutSecs(values.timeout);
   const deadline = Date.now() + timeoutSec * 1000;
-  const runId = await executorSubmit(prompt, write);
+  const runId = await executorSubmit(prompt, write, title);
   for (;;) {
     // The first poll does not sleep: a rejection (write lock taken, model not configured) has to
     // surface immediately instead of costing the caller a whole poll interval.
@@ -587,13 +590,14 @@ const HELP = `coflux —— 账号与终端操作
   coflux notify "<一句话>"  发送站内通知；服务器保存后确认送达
   coflux progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
   coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
-  coflux executor run --prompt="<任务>" [--write] [--timeout <秒>]
+  coflux executor run --prompt="<任务>" [--title="<标题>"] [--write] [--timeout <秒>]
                           把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
                           执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
                           不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
                           Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
                           同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
                           （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
+                          --title 给这次运行起个短标题：用户在本终端上会看到一张进度小卡
                           只有装了 Coflux.app 的这台机器能用
   coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
                           都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、

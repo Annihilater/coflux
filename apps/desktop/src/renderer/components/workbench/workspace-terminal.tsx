@@ -12,6 +12,8 @@ import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu
 import { ChangesView } from "@/components/workbench/changes-view";
 import { DRAG_REGION_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
+import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
+import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
@@ -475,6 +477,10 @@ export function WorkspaceTerminal({
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // Executor runs (plan 20260929-executor-pip): a tab whose terminal delegated a sub-task shows an
+  // activity indicator while it is not on screen. The map only changes with a center snapshot.
+  const executorRuns = useStore(client.store, (state) => state.executorRuns);
+  const executorTaskIds = executorTaskIdsOf(executorRuns);
   // OSC 终端标题（plan 075）：checkpoint 每 ~2s 换引用（有输出即上报），必须用选择器把
   // 本工作区的 title 摘出来浅比较，否则整棵 WorkspaceTerminal 会跟着 2s 心跳空转重渲染。
   const checkpointTitles = useStore(
@@ -837,6 +843,15 @@ export function WorkspaceTerminal({
                   <span className="truncate">{tabTitle}</span>
                 </Tooltip>
               )}
+              {/* An executor run delegated from this terminal (plan 20260929-executor-pip), shown
+                  only while the terminal is not on screen — on screen the card itself is visible. */}
+              {executorTaskIds.has(task.id) && !(active && !changesOpen && isActive) ? (
+                <Tooltip content="executor 正在执行子任务" placement="below">
+                  <span className="flex shrink-0 items-center">
+                    <ActivityDots status="active" label="executor 正在执行子任务" />
+                  </span>
+                </Tooltip>
+              ) : null}
             </button>
             {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
             <Tooltip content={bright ? `关闭终端 ${modPrefix}W` : "关闭终端"} placement="below">

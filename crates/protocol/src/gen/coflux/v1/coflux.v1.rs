@@ -294,6 +294,42 @@ pub struct SecretRequestRef {
     #[prost(double, tag="7")]
     pub expires_at: f64,
 }
+/// A live executor run as the center may know it (plan 20260929-executor-pip): the metadata that
+/// decides whether a desktop shows a card for it and on which terminal. It is bound to the
+/// **caller's terminal** (the session that ran `coflux executor run`), never to the run's workspace.
+/// Deliberately nothing else: the prompt, the transcript, notes and summaries travel only over the
+/// end-to-end Device channel. Derived runtime fact: the center mirrors it in memory, never persists
+/// it, and clears it when the daemon disconnects. Only unfinished runs are listed; a run that reaches
+/// a terminal state leaves the set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorRunRef {
+    /// Worker-generated, unique within the worker runtime.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub task_id: ::prost::alloc::string::String,
+    /// Resolved by the worker: the agent's `--title`, else the prompt's first line. Agent-written
+    /// text; clients must present it as the agent's words.
+    #[prost(string, tag="4")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(bool, tag="5")]
+    pub write: bool,
+    /// queued | accepted | running (the ledger's phase; never done).
+    #[prost(string, tag="6")]
+    pub phase: ::prost::alloc::string::String,
+    /// ms epoch
+    #[prost(double, tag="7")]
+    pub submitted_at: f64,
+    /// ms epoch; 0 until the host reported the run running.
+    #[prost(double, tag="8")]
+    pub started_at: f64,
+    /// The host the run was assigned to is not connected to the worker right now: the run may still
+    /// finish, or turn unknown when the reconcile window closes.
+    #[prost(bool, tag="9")]
+    pub host_lost: bool,
+}
 /// One workspace's browser annotations as the center may know them (plan
 /// 20260929-browser-annotations): a revision that changes on every change of the workspace's
 /// annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
@@ -1379,6 +1415,89 @@ pub struct DeviceExecutorReportAck {
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorTranscriptFragment {
+    /// Assigned by the worker; 0 when the host sends it.
+    #[prost(uint64, tag="1")]
+    pub seq: u64,
+    #[prost(enumeration="ExecutorFragmentKind", tag="2")]
+    pub kind: i32,
+    #[prost(string, tag="3")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub tool: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub argument: ::prost::alloc::string::String,
+    /// Bounded by the runner to a head and a tail with an explicit omission marker between them.
+    #[prost(string, tag="6")]
+    pub output: ::prost::alloc::string::String,
+    #[prost(bool, tag="7")]
+    pub failed: bool,
+    /// ms epoch, the host's clock.
+    #[prost(double, tag="8")]
+    pub at: f64,
+}
+/// host→worker: one fragment of a run this host is executing.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecutorTranscriptFragment {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub fragment: ::core::option::Option<ExecutorTranscriptFragment>,
+}
+/// client→worker (SESSION_READ): follow a run's transcript on this channel. The worker answers with
+/// the backlog after `from_seq` (0 = everything it has) in one or more DeviceExecutorTranscript
+/// frames, then pushes each new fragment as it arrives, until the run ends or the channel closes.
+/// Re-subscribing on the same channel replaces the cursor.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorTranscriptSubscribe {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub from_seq: u64,
+}
+/// client→worker (SESSION_READ): stop following the run on this channel.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorTranscriptUnsubscribe {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_READ): a batch of a run's transcript, backlog or live.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceExecutorTranscript {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// In seq order.
+    #[prost(message, repeated, tag="2")]
+    pub fragments: ::prost::alloc::vec::Vec<ExecutorTranscriptFragment>,
+    /// Fragments older than the first one here were dropped by the worker's buffer cap and are gone;
+    /// the card renders an "earlier output omitted" marker. Set on the first backlog batch only.
+    #[prost(bool, tag="3")]
+    pub omitted: bool,
+    /// The run reached a terminal state: no more fragments follow and the subscription is closed.
+    /// `terminal` is the ledger's word (succeeded | rejected | model_error | tool_failed | cancelled
+    /// | unknown); `summary` and `error` are the outcome the host reported.
+    #[prost(bool, tag="4")]
+    pub ended: bool,
+    #[prost(string, tag="5")]
+    pub terminal: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub summary: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub error: ::prost::alloc::string::String,
+    /// The run's prompt, on the first batch that answers a subscription (empty on every other
+    /// batch). It travels only here, end to end; the center never sees it.
+    #[prost(string, tag="8")]
+    pub prompt: ::prost::alloc::string::String,
+}
+/// client→worker (SESSION_CONTROL): cancel a run, through the ledger's ordinary cancel path (the
+/// one the `/agent` ExecutorCancel action uses). Idempotent; no acknowledgement — the outcome shows
+/// up in the center's ExecutorRuns snapshot and on the transcript subscription as `ended`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceExecutorStop {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
 /// client→worker (RPC): open a TCP connection to the device's loopback port.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceLoopbackOpen {
@@ -1845,7 +1964,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1980,6 +2099,16 @@ pub mod device_envelope {
         AnnotationHandOff(super::DeviceAnnotationHandOff),
         #[prost(message, tag="117")]
         AnnotationHandOffResult(super::DeviceAnnotationHandOffResult),
+        #[prost(message, tag="120")]
+        ExecutorTranscriptFragment(super::DeviceExecutorTranscriptFragment),
+        #[prost(message, tag="121")]
+        ExecutorTranscriptSubscribe(super::DeviceExecutorTranscriptSubscribe),
+        #[prost(message, tag="122")]
+        ExecutorTranscriptUnsubscribe(super::DeviceExecutorTranscriptUnsubscribe),
+        #[prost(message, tag="123")]
+        ExecutorTranscript(super::DeviceExecutorTranscript),
+        #[prost(message, tag="124")]
+        ExecutorStop(super::DeviceExecutorStop),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -2167,6 +2296,66 @@ impl ExecutorRunState {
             "EXECUTOR_RUN_STATE_TOOL_FAILED" => Some(Self::ToolFailed),
             "EXECUTOR_RUN_STATE_CANCELLED" => Some(Self::Cancelled),
             "EXECUTOR_RUN_STATE_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+// ===== Executor transcript (plan 20260929-executor-pip) =====
+//
+// The host forwards each transcript fragment of a run to the worker; the worker buffers them per run
+// (in memory, under a byte cap) and serves them to viewing desktops, which show a read-only
+// picture-in-picture card on the pane of the terminal that started the run. The transcript never
+// reaches the center: it travels host → worker on the host's own loopback channel (or the daemon
+// host's stdio) and worker → viewer over this end-to-end channel.
+//
+// A fragment is a whole unit — one assistant message, one tool call with its capped output, one
+// error — never a per-token delta. Seqs are assigned by the worker, start at 1 per run and are dense
+// among the fragments it accepted; a viewer resumes by naming the last seq it has.
+//
+// Gates:
+//    - DeviceExecutorTranscriptFragment is a host frame: accepted only from a loopback channel that
+//      currently holds the host slot under the run's host_id (the same gate as DeviceExecutorReport),
+//      so a desktop that reconnected under the same host_id keeps streaming.
+//    - DeviceExecutorTranscriptSubscribe / Unsubscribe require DEVICE_SCOPE_SESSION_READ;
+//      DeviceExecutorStop requires DEVICE_SCOPE_SESSION_CONTROL. Neither needs an attach or a holder.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that to their
+// executor viewer frames in flight on the channel — never to the heartbeat — and show cards without
+// a log.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutorFragmentKind {
+    Unspecified = 0,
+    /// One assistant message: `text` is that message's prose.
+    Assistant = 1,
+    /// One tool call: `tool`, its salient `argument` (the shell command for bash, the path for file
+    /// tools), its capped `output` and whether it `failed`.
+    Tool = 2,
+    /// An error the runner recorded (a blocked tool call, a model failure): `text`.
+    Error = 3,
+}
+impl ExecutorFragmentKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTOR_FRAGMENT_KIND_UNSPECIFIED",
+            Self::Assistant => "EXECUTOR_FRAGMENT_KIND_ASSISTANT",
+            Self::Tool => "EXECUTOR_FRAGMENT_KIND_TOOL",
+            Self::Error => "EXECUTOR_FRAGMENT_KIND_ERROR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTOR_FRAGMENT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTOR_FRAGMENT_KIND_ASSISTANT" => Some(Self::Assistant),
+            "EXECUTOR_FRAGMENT_KIND_TOOL" => Some(Self::Tool),
+            "EXECUTOR_FRAGMENT_KIND_ERROR" => Some(Self::Error),
             _ => None,
         }
     }
@@ -2817,6 +3006,18 @@ pub struct AnnotationsSummaryUpdated {
     #[prost(message, repeated, tag="2")]
     pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
 }
+/// A device's live executor runs (plan 20260929-executor-pip): the full current set, broadcast after
+/// each daemon ExecutorRuns report or when the daemon disconnects (empty), and re-sent per device on
+/// subscribe. Drives the picture-in-picture card on the caller terminal's pane on every desktop and
+/// the tab/sidebar activity indicator; a run that leaves the set has ended. Metadata only; the
+/// transcript is fetched over the Device channel. In-memory derived fact, never persisted.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorRunsUpdated {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub runs: ::prost::alloc::vec::Vec<ExecutorRunRef>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StateSnapshot {
     #[prost(message, repeated, tag="1")]
@@ -2930,7 +3131,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -3003,6 +3204,8 @@ pub mod server_to_client {
         SecretRequestsUpdated(super::SecretRequestsUpdated),
         #[prost(message, tag="46")]
         AnnotationsSummaryUpdated(super::AnnotationsSummaryUpdated),
+        #[prost(message, tag="47")]
+        ExecutorRunsUpdated(super::ExecutorRunsUpdated),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -3235,6 +3438,16 @@ pub struct SecretRequests {
 pub struct AnnotationsSummary {
     #[prost(message, repeated, tag="1")]
     pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
+}
+/// Full idempotent snapshot of this daemon's live executor runs (plan 20260929-executor-pip), same
+/// shape as SecretRequests: sent on every change of the ledger (including a sweep that turned a run
+/// unknown) and unconditionally after authentication; empty = none running. The server validates
+/// each entry's session/task against its catalog, keeps the result in memory only and fans it out to
+/// the account's clients. Metadata only: no prompt, no transcript.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecutorRuns {
+    #[prost(message, repeated, tag="1")]
+    pub runs: ::prost::alloc::vec::Vec<ExecutorRunRef>,
 }
 /// ===== agent 协同控制（plan 074）=====
 ///
@@ -3498,7 +3711,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -3564,6 +3777,8 @@ pub mod daemon_to_server {
         SecretRequests(super::SecretRequests),
         #[prost(message, tag="40")]
         AnnotationsSummary(super::AnnotationsSummary),
+        #[prost(message, tag="41")]
+        ExecutorRuns(super::ExecutorRuns),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====

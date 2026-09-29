@@ -517,6 +517,13 @@ export type DesktopExecutorInbound =
   | { kind: "registered"; ok: boolean; error?: string; reconcileRunIds: string[] }
   | { kind: "ack"; runId: string };
 
+/** One transcript fragment of a desktop-hosted run (plan 20260929-executor-pip), as the executor
+ * package emits it; the renderer forwards it verbatim to the local daemon over the device channel. */
+export type DesktopExecutorFragment =
+  | { kind: "assistant"; text: string; at: number }
+  | { kind: "tool"; tool: string; argument: string; output: string; failed: boolean; at: number }
+  | { kind: "error"; text: string; at: number };
+
 export type DesktopExecutorOutbound =
   | { kind: "register"; hostId: string; hostEpoch: number; capabilities: string[]; ready: boolean; notReadyReason: string }
   | {
@@ -527,4 +534,5 @@ export type DesktopExecutorOutbound =
       summary?: string;
       changedFiles?: string[];
       error?: string;
-    };
+    }
+  | { kind: "transcript"; runId: string; fragment: DesktopExecutorFragment };

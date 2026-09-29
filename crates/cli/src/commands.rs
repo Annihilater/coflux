@@ -597,18 +597,23 @@ pub fn render_executor_timeout(timeout_secs: f64, run_id: &str, phase: &str) -> 
 }
 
 /// Submit. A transport failure is retried with the same submissionId; an explicit daemon refusal
-/// is reported verbatim and never retried.
-fn executor_submit(prompt: &str, write: bool) -> String {
+/// is reported verbatim and never retried. `title` names the run on the desktop's card (plan
+/// 20260929-executor-pip); empty = the daemon falls back to the prompt's first line.
+fn executor_submit(prompt: &str, write: bool, title: &str) -> String {
     let submission = submission_id();
     let request = || {
         with(
             with(
-                with(body("executor.submit"), "submissionId", submission.as_str()),
-                "prompt",
-                prompt,
+                with(
+                    with(body("executor.submit"), "submissionId", submission.as_str()),
+                    "prompt",
+                    prompt,
+                ),
+                "write",
+                write,
             ),
-            "write",
-            write,
+            "title",
+            title,
         )
     };
     let mut attempt = 0;
@@ -635,7 +640,7 @@ fn executor_submit(prompt: &str, write: bool) -> String {
 
 pub fn run_executor(args: &ParsedArgs) {
     if args.positional(1) != Some("run") {
-        crate::die("executor 的子命令只有 run：coflux executor run --prompt=\"<任务>\" [--write]");
+        crate::die("executor 的子命令只有 run：coflux executor run --prompt=\"<任务>\" [--title=\"<标题>\"] [--write]");
     }
     let prompt = args.string("prompt").unwrap_or("").trim().to_string();
     if prompt.is_empty() {
@@ -644,11 +649,12 @@ pub fn run_executor(args: &ParsedArgs) {
         );
     }
     let write = args.flag("write");
+    let title = args.string("title").unwrap_or("").trim().to_string();
     let timeout_secs = executor_timeout_secs(args.string("timeout"));
     let deadline = Duration::try_from_secs_f64(timeout_secs)
         .ok()
         .and_then(|timeout| Instant::now().checked_add(timeout));
-    let run_id = executor_submit(&prompt, write);
+    let run_id = executor_submit(&prompt, write, &title);
     loop {
         // The first poll does not sleep: a rejection (write lock taken, model not configured) has to
         // surface immediately instead of costing the caller a whole poll interval.
