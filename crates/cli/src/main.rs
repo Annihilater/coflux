@@ -99,13 +99,14 @@ coflux —— 账号与终端操作
                           list prints the pending ones as markdown; watch blocks until there are
                           some (default 30 minutes); after implementing one, resolve it with a note
                           the user reads to review the change
-  coflux executor run --prompt=\"<任务>\" [--write] [--timeout <秒>]
+  coflux executor run --prompt=\"<任务>\" [--title=\"<标题>\"] [--write] [--timeout <秒>]
                           把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
                           执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
                           不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
                           Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
                           同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
                           （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
+                          --title 给这次运行起个短标题：用户在本终端上会看到一张进度小卡
                           只有装了 Coflux.app 的这台机器能用
   coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
                           都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
