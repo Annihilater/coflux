@@ -137,6 +137,14 @@ export type DesktopBrowserTunnelFailure = "offline" | "refused" | "unsupported";
 
 export type DesktopBrowserPrepared = { partition: string; mode: DesktopBrowserMode };
 
+/**
+ * Who owns a browser partition's state (plan 20260929-browser-scope-partitions): a project, shared
+ * by every worktree of it (`id` = project id), or a device, for the device view's directory
+ * workspace (`id` = daemon id). The renderer derives it from the workspace; tabs still belong to
+ * their workspace.
+ */
+export type DesktopBrowserScope = { kind: "project" | "device"; id: string };
+
 /** Toolbar and menu actions on one page guest. */
 export type DesktopBrowserCommand = "back" | "forward" | "reload" | "hard-reload" | "stop" | "zoom-in" | "zoom-out" | "zoom-reset";
 
@@ -228,8 +236,8 @@ export type DesktopBrowserEvent =
   | { kind: "devtools-closed"; guestId: number }
   /** A download from any browser page landed in the Downloads folder (or did not). */
   | { kind: "download"; filename: string; state: "completed" | "cancelled" | "interrupted" }
-  /** A workspace's `localhost` changed meaning (the local daemon registered after the tab was prepared). */
-  | { kind: "mode"; workspaceId: string; mode: DesktopBrowserMode }
+  /** A scope's `localhost` changed meaning (the local daemon registered after it was prepared); reaches every tab of that scope. */
+  | { kind: "mode"; scope: DesktopBrowserScope; mode: DesktopBrowserMode }
   /** Browser annotations: an element was picked in annotate mode. */
   | { kind: "annotator-pick"; guestId: number; pick: DesktopAnnotatorPick }
   /** Where the anchored element is now (it follows scrolling); null when it is gone or off the page. */
@@ -363,9 +371,10 @@ export type DesktopBridge = {
    * Built-in browser tabs (plan 20260924-desktop-browser-tab). The renderer owns the `<webview>`
    * elements and the chrome around them; sessions, guest hardening, certificates, downloads,
    * screenshots, favicons and DevTools docking are the main process's. Order is always prepare →
-   * insert the webview (with the returned partition, `src="about:blank"`) → navigate.
+   * insert the webview (with the returned partition, `src="about:blank"`) → navigate. A scope lives
+   * on exactly one device: preparing it again with another `daemonId` is refused.
    */
-  browserPrepare(workspaceId: string, daemonId: string): Promise<DesktopBrowserPrepared>;
+  browserPrepare(scope: DesktopBrowserScope, daemonId: string): Promise<DesktopBrowserPrepared>;
   /** Loads an http(s) URL (or about:blank) in a page guest; anything else is refused by main. */
   browserNavigate(guestId: number, url: string): void;
   browserCommand(guestId: number, command: DesktopBrowserCommand): void;
@@ -379,7 +388,8 @@ export type DesktopBridge = {
   /** Docks the page's DevTools into a host `<webview>` (partition `BROWSER_DEVTOOLS_PARTITION`, still on about:blank). */
   browserOpenDevTools(guestId: number, hostGuestId: number): Promise<boolean>;
   browserCloseDevTools(guestId: number): void;
-  browserClearData(workspaceId: string, target: DesktopBrowserClearTarget): Promise<boolean>;
+  /** Clears the scope's data: every worktree of a project at once. */
+  browserClearData(scope: DesktopBrowserScope, target: DesktopBrowserClearTarget): Promise<boolean>;
   /** The certificate a load of `host` in this page's partition last failed on; null when none is known. */
   browserCertificate(guestId: number, host: string): Promise<DesktopBrowserCertificate | null>;
   /** 信任证书: remembers that certificate for `host` in this page's partition, across restarts. */

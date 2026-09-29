@@ -6,11 +6,17 @@
  * all of it runs under plain Node in the unit tests.
  */
 
-import { BROWSER_DEVTOOLS_PARTITION, BROWSER_PARTITION_PREFIX } from "../shared/browser-partitions";
+import {
+  BROWSER_DEVICE_PARTITION_PREFIX,
+  BROWSER_DEVTOOLS_PARTITION,
+  BROWSER_PROJECT_PARTITION_PREFIX,
+  LEGACY_BROWSER_PARTITION_PREFIX,
+} from "../shared/browser-partitions";
 import type {
   DesktopBrowserClearTarget,
   DesktopBrowserCommand,
   DesktopBrowserRect,
+  DesktopBrowserScope,
   DesktopCommand,
   DesktopDigit,
 } from "../shared/desktop-bridge";
@@ -19,19 +25,61 @@ import type {
 // Partitions and the webview gate
 // ---------------------------------------------------------------------------------------------
 
-/** Workspace ids go into a partition name (and so a directory name): a conservative charset. */
+/** Scope ids go into a partition name (and so a directory name): a conservative charset. */
 export function isPartitionSafeId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 }
 
-export function browserPartitionFor(workspaceId: string): string | null {
-  return isPartitionSafeId(workspaceId) ? `${BROWSER_PARTITION_PREFIX}${workspaceId}` : null;
+const SCOPE_PREFIXES: Readonly<Record<DesktopBrowserScope["kind"], string>> = {
+  project: BROWSER_PROJECT_PARTITION_PREFIX,
+  device: BROWSER_DEVICE_PARTITION_PREFIX,
+};
+
+/** The one persistent partition of a browser scope (plan 20260929-browser-scope-partitions). */
+export function browserPartitionFor(scope: DesktopBrowserScope): string | null {
+  const prefix = SCOPE_PREFIXES[scope.kind];
+  return prefix !== undefined && isPartitionSafeId(scope.id) ? `${prefix}${scope.id}` : null;
 }
 
-export function workspaceIdOfPartition(partition: string): string | null {
-  if (!partition.startsWith(BROWSER_PARTITION_PREFIX)) return null;
-  const id = partition.slice(BROWSER_PARTITION_PREFIX.length);
-  return isPartitionSafeId(id) ? id : null;
+/** The scope a partition name belongs to; null for anything else — legacy per-workspace names included. */
+export function browserScopeOfPartition(partition: string): DesktopBrowserScope | null {
+  for (const kind of ["project", "device"] as const) {
+    const prefix = SCOPE_PREFIXES[kind];
+    if (!partition.startsWith(prefix)) continue;
+    const id = partition.slice(prefix.length);
+    return isPartitionSafeId(id) ? { kind, id } : null;
+  }
+  return null;
+}
+
+/** A scope as it arrives over IPC; null unless both fields are exactly right. */
+export function sanitizeScope(value: unknown): DesktopBrowserScope | null {
+  if (!isRecord(value)) return null;
+  const kind = value.kind;
+  if (kind !== "project" && kind !== "device") return null;
+  return isPartitionSafeId(value.id) ? { kind, id: value.id } : null;
+}
+
+/**
+ * A scope lives on exactly one device: the first prepare records its daemon, and a later prepare
+ * naming another one is refused rather than silently re-pointing the partition (one project's
+ * `localhost` must never lead to two devices over time).
+ */
+export function isSameScopeDaemon(recorded: string | undefined, requested: string): boolean {
+  return recorded === undefined || recorded === requested;
+}
+
+/**
+ * The on-disk directories (direct entries of `<sessionData>/Partitions/`) that belong to legacy
+ * per-workspace partitions and are deleted at startup. Electron stores `persist:<name>` under
+ * `Partitions/<lowercased name>`, so names are compared that way. The DevTools host's name starts
+ * like a legacy one and is excluded explicitly (it is in-memory and never on disk anyway); scope
+ * partitions and anything that is not ours never match.
+ */
+export function legacyPartitionDirectories(names: readonly string[]): string[] {
+  const prefix = LEGACY_BROWSER_PARTITION_PREFIX.slice("persist:".length).toLowerCase();
+  const devtools = BROWSER_DEVTOOLS_PARTITION.toLowerCase();
+  return names.filter((name) => name.startsWith(prefix) && name !== devtools && isPartitionSafeId(name.slice(prefix.length)));
 }
 
 export type WebviewAttachRequest = {
@@ -44,7 +92,7 @@ export type WebviewAttachRequest = {
 };
 
 export type WebviewAttachDecision =
-  | { ok: true; kind: "page"; partition: string; workspaceId: string }
+  | { ok: true; kind: "page"; partition: string; scope: DesktopBrowserScope }
   | { ok: true; kind: "devtools"; partition: string }
   | { ok: false; reason: string };
 
@@ -62,10 +110,10 @@ export function decideWebviewAttach(request: WebviewAttachRequest, isPrepared: (
   if (!partition) return { ok: false, reason: "no partition" };
   if (request.src !== "about:blank") return { ok: false, reason: "attach-time src must be about:blank" };
   if (partition === BROWSER_DEVTOOLS_PARTITION) return { ok: true, kind: "devtools", partition };
-  const workspaceId = workspaceIdOfPartition(partition);
-  if (!workspaceId) return { ok: false, reason: "not a browser partition" };
+  const scope = browserScopeOfPartition(partition);
+  if (!scope) return { ok: false, reason: "not a browser partition" };
   if (!isPrepared(partition)) return { ok: false, reason: "partition not prepared" };
-  return { ok: true, kind: "page", partition, workspaceId };
+  return { ok: true, kind: "page", partition, scope };
 }
 
 /** Where a page guest's main frame may go: http(s), and about:blank. */
@@ -252,7 +300,10 @@ function normalizeHost(host: string): string {
   return host.trim().toLowerCase();
 }
 
-/** The stored trust decisions; a missing or corrupt file trusts nothing. */
+/**
+ * The stored trust decisions; a missing or corrupt file trusts nothing. Only scope partitions are
+ * kept: records of legacy per-workspace partitions are dropped (and leave the file with its next write).
+ */
 export function parseTrustedCertificates(raw: string | null): Record<string, TrustedCertificate[]> {
   if (!raw) return {};
   let parsed: unknown;
@@ -264,7 +315,7 @@ export function parseTrustedCertificates(raw: string | null): Record<string, Tru
   if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.partitions)) return {};
   const result: Record<string, TrustedCertificate[]> = {};
   for (const [partition, entries] of Object.entries(parsed.partitions)) {
-    if (!workspaceIdOfPartition(partition) || !Array.isArray(entries)) continue;
+    if (!browserScopeOfPartition(partition) || !Array.isArray(entries)) continue;
     const list: TrustedCertificate[] = [];
     for (const entry of entries) {
       if (list.length >= MAX_TRUSTED_PER_PARTITION) break;
@@ -316,11 +367,18 @@ export function sanitizeGuestPayload(payload: unknown): { guestId: number } | nu
   return guestId === null ? null : { guestId };
 }
 
-export function sanitizePrepare(payload: unknown): { workspaceId: string; daemonId: string } | null {
-  if (!isRecord(payload) || !isPartitionSafeId(payload.workspaceId)) return null;
+/**
+ * A scope and the device it lives on. A device scope is its own device: its daemon id is the scope
+ * id (and so passes the partition charset), and any other pairing is refused.
+ */
+export function sanitizePrepare(payload: unknown): { scope: DesktopBrowserScope; daemonId: string } | null {
+  if (!isRecord(payload)) return null;
+  const scope = sanitizeScope(payload.scope);
+  if (!scope) return null;
   const daemonId = payload.daemonId;
   if (typeof daemonId !== "string" || daemonId.length > 255 || /[\x00-\x1f\x7f]/.test(daemonId)) return null;
-  return { workspaceId: payload.workspaceId, daemonId };
+  if (scope.kind === "device" && daemonId !== scope.id) return null;
+  return { scope, daemonId };
 }
 
 export function sanitizeNavigate(payload: unknown): { guestId: number; url: string } | null {
@@ -376,11 +434,13 @@ export function sanitizeDevToolsOpen(payload: unknown): { guestId: number; hostG
 
 const CLEAR_TARGETS: readonly DesktopBrowserClearTarget[] = ["cookies", "cache", "certificates"];
 
-export function sanitizeClearData(payload: unknown): { workspaceId: string; target: DesktopBrowserClearTarget } | null {
-  if (!isRecord(payload) || !isPartitionSafeId(payload.workspaceId)) return null;
+export function sanitizeClearData(payload: unknown): { scope: DesktopBrowserScope; target: DesktopBrowserClearTarget } | null {
+  if (!isRecord(payload)) return null;
+  const scope = sanitizeScope(payload.scope);
+  if (!scope) return null;
   const target = payload.target;
   return typeof target === "string" && (CLEAR_TARGETS as readonly string[]).includes(target)
-    ? { workspaceId: payload.workspaceId, target: target as DesktopBrowserClearTarget }
+    ? { scope, target: target as DesktopBrowserClearTarget }
     : null;
 }
 

@@ -31,6 +31,7 @@ import type {
   DesktopBrowserEvent,
   DesktopBrowserMode,
   DesktopBrowserPrepared,
+  DesktopBrowserScope,
   DesktopBrowserTunnelFailure,
   DesktopCommand,
 } from "../shared/desktop-bridge";
@@ -44,6 +45,7 @@ import {
   isAllowedPageNavigation,
   isCertificateTrusted,
   isKeyDown,
+  isSameScopeDaemon,
   parseTrustedCertificates,
   sanitizeBrowserCommand,
   sanitizeCaptureRegion,
@@ -71,13 +73,13 @@ import { isTrustedRendererUrl } from "./ipc-trust";
  * The main-process half of the built-in browser tab (plan 20260924-desktop-browser-tab).
  *
  * The renderer embeds pages with `<webview>` and owns every piece of chrome around them. This module
- * owns what must not be the renderer's: the per-workspace session partitions (permissions, the
+ * owns what must not be the renderer's: the per-scope session partitions (permissions, the
  * remote-workspace network path, certificates, downloads), the gate every `<webview>` passes before
  * it may attach, the hardening and event plumbing of every guest (popups, keys, focus, favicons,
  * navigation state, zoom), docked DevTools, screenshots and clearing data. The rules themselves are
  * pure and live in browser-policy.ts.
  *
- * Order, always: the renderer asks to **prepare** a workspace's partition; only then does it insert
+ * Order, always: the renderer asks to **prepare** a scope's partition; only then does it insert
  * a `<webview>` with that partition and `src="about:blank"`, which the gate admits; only once the
  * guest is attached does it ask main to **navigate**. Preparing is where the session is configured
  * (a remote workspace's proxy is installed there, which is async — the reason it is not done in the
@@ -143,8 +145,9 @@ export type BrowserHost = {
 
 type ConfiguredPartition = {
   session: Session;
-  workspaceId: string;
-  daemonId: string;
+  scope: DesktopBrowserScope;
+  /** The device the scope lives on, fixed by its first prepare: a scope never moves. */
+  readonly daemonId: string;
   /** The mode last reported to the renderer; null before the first prepare. */
   announced: DesktopBrowserMode | null;
   /** The remote partition's own proxy listener; null for a local partition. */
@@ -242,9 +245,9 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     return local !== null && local !== "" && entry.daemonId === local ? "local" : "remote";
   }
 
-  // A workspace prepared while the local daemon id was unknown was reported as remote; once main
-  // learns the id, any partition whose meaning changed flips its network path and is reported again
-  // once the flip is in place.
+  // A scope prepared while the local daemon id was unknown was reported as remote; once main learns
+  // the id, any partition whose meaning changed flips its network path and is reported again once
+  // the flip is in place — to the scope, whose tabs the renderer finds in every workspace of it.
   const stopWatchingDaemon = options.onLocalDaemonChange(() => {
     for (const entry of configured.values()) {
       if (entry.announced === null) continue;
@@ -252,7 +255,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       void queueNetwork(entry).then(() => {
         if (mode !== modeOf(entry) || mode === entry.announced) return;
         entry.announced = mode;
-        send({ kind: "mode", workspaceId: entry.workspaceId, mode });
+        send({ kind: "mode", scope: entry.scope, mode });
       });
     }
   });
@@ -270,7 +273,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!entry.proxy) {
         try {
           entry.proxy = await startPartitionProxy({
-            // The daemon is read per connection: a workspace prepared again may have moved.
+            // The scope's one device: prepare refuses to point a scope anywhere else.
             connectLoopback: (port) => connectLoopback(entry.daemonId, port),
             resolveProxy: (url) => (options.resolveSystemProxy ? options.resolveSystemProxy(url) : Promise.resolve("DIRECT")),
             onLoopbackResult: (port, failure) => {
@@ -386,7 +389,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   }
 
   /**
-   * One-time configuration of a workspace partition. Deliberately nothing of the app's own session:
+   * One-time configuration of a scope partition. Deliberately nothing of the app's own session:
    * no Origin rewrite (guest pages must send their real Origin), no app permissions.
    */
   function configureSession(ses: Session, partition: string): void {
@@ -417,17 +420,17 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     return ses;
   }
 
-  async function prepare(workspaceId: string, daemonId: string): Promise<DesktopBrowserPrepared> {
-    const partition = browserPartitionFor(workspaceId);
-    if (!partition) throw new Error("工作区标识无效");
+  async function prepare(scope: DesktopBrowserScope, daemonId: string): Promise<DesktopBrowserPrepared> {
+    const partition = browserPartitionFor(scope);
+    if (!partition) throw new Error("浏览器分区标识无效");
     let entry = configured.get(partition);
+    // A scope maps to exactly one device (a project never moves; a device scope is its own device).
+    if (!isSameScopeDaemon(entry?.daemonId, daemonId)) throw new Error("这个浏览器分区属于另一台设备");
     if (!entry) {
       const ses = session.fromPartition(partition);
       configureSession(ses, partition);
-      entry = { session: ses, workspaceId, daemonId, announced: null, proxy: null, applied: null, network: Promise.resolve(), tunnelFailures: new Map() };
+      entry = { session: ses, scope, daemonId, announced: null, proxy: null, applied: null, network: Promise.resolve(), tunnelFailures: new Map() };
       configured.set(partition, entry);
-    } else {
-      entry.daemonId = daemonId;
     }
     await waitForLocalDaemonId();
     // Before the renderer may insert a webview: its first navigation must already take this path.
@@ -749,8 +752,9 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
     }
   }
 
-  async function clearData(workspaceId: string, target: DesktopBrowserClearTarget): Promise<boolean> {
-    const partition = browserPartitionFor(workspaceId);
+  /** Clears a scope's data: the tabs of every workspace in it (every worktree of a project) at once. */
+  async function clearData(scope: DesktopBrowserScope, target: DesktopBrowserClearTarget): Promise<boolean> {
+    const partition = browserPartitionFor(scope);
     if (!partition) return false;
     const entry = configured.get(partition);
     const ses = entry?.session ?? session.fromPartition(partition);
@@ -853,7 +857,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizePrepare(payload);
       if (!input) throw new Error("浏览器分区参数无效");
-      return prepare(input.workspaceId, input.daemonId);
+      return prepare(input.scope, input.daemonId);
     });
 
     ipcMain.on(IPC.browserNavigate, (event, payload: unknown) => {
@@ -941,7 +945,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
       if (!allowed(event)) throw new Error("untrusted sender");
       const input = sanitizeClearData(payload);
       if (!input) return false;
-      return clearData(input.workspaceId, input.target).catch((error: unknown) => {
+      return clearData(input.scope, input.target).catch((error: unknown) => {
         options.log("清除浏览器数据失败", String(error));
         return false;
       });

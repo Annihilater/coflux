@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { BROWSER_DEVTOOLS_PARTITION, BROWSER_PARTITION_PREFIX } from "../shared/browser-partitions";
+import {
+  BROWSER_DEVICE_PARTITION_PREFIX,
+  BROWSER_DEVTOOLS_PARTITION,
+  BROWSER_PROJECT_PARTITION_PREFIX,
+  LEGACY_BROWSER_PARTITION_PREFIX,
+  browserScopeKey,
+  browserScopeOfWorkspace,
+} from "../shared/browser-partitions";
 import {
   browserPartitionFor,
+  browserScopeOfPartition,
   classifyGuestKey,
   cropRectInPixels,
   decideWebviewAttach,
@@ -11,6 +19,7 @@ import {
   isAllowedPageNavigation,
   isCertificateTrusted,
   isKeyDown,
+  isSameScopeDaemon,
   parseTrustedCertificates,
   sanitizeBrowserCommand,
   sanitizeCaptureRegion,
@@ -24,20 +33,64 @@ import {
   uniqueDownloadName,
   withTrustedCertificate,
   withoutPartitionCertificates,
-  workspaceIdOfPartition,
   type GuestKeyInput,
 } from "./browser-policy";
 
-const PREPARED = `${BROWSER_PARTITION_PREFIX}ws-1`;
+const PROJECT_A = "6f1c2d3e-0000-4000-8000-00000000000a";
+const PROJECT_B = "6f1c2d3e-0000-4000-8000-00000000000b";
+const DEVICE_1 = "9a8b7c6d-0000-4000-8000-000000000001";
+const DEVICE_2 = "9a8b7c6d-0000-4000-8000-000000000002";
+const PREPARED = `${BROWSER_PROJECT_PARTITION_PREFIX}${PROJECT_A}`;
 const prepared = (partition: string) => partition === PREPARED;
 
-test("partitions are named per workspace and only for safe ids", () => {
-  assert.equal(browserPartitionFor("ws-1"), PREPARED);
-  assert.equal(browserPartitionFor("../etc"), null);
-  assert.equal(browserPartitionFor(""), null);
-  assert.equal(workspaceIdOfPartition(PREPARED), "ws-1");
-  assert.equal(workspaceIdOfPartition("persist:other"), null);
-  assert.equal(workspaceIdOfPartition(BROWSER_DEVTOOLS_PARTITION), null);
+test("the three partition prefixes are pairwise disjoint and none can produce the DevTools host", () => {
+  const prefixes = [BROWSER_PROJECT_PARTITION_PREFIX, BROWSER_DEVICE_PARTITION_PREFIX, LEGACY_BROWSER_PARTITION_PREFIX];
+  for (const left of prefixes) {
+    for (const right of prefixes) {
+      if (left !== right) assert.equal(left.startsWith(right), false, `${left} / ${right}`);
+    }
+    assert.equal(BROWSER_DEVTOOLS_PARTITION.startsWith(left), false, left);
+  }
+});
+
+test("a workspace's scope is its project, or its device when it has no project", () => {
+  const worktree1 = { projectId: PROJECT_A, daemonId: DEVICE_1 };
+  const worktree2 = { projectId: PROJECT_A, daemonId: DEVICE_1 };
+  const otherProject = { projectId: PROJECT_B, daemonId: DEVICE_1 };
+  // proto3: a directory workspace carries "", not undefined.
+  const deviceView = { projectId: "", daemonId: DEVICE_1 };
+  const otherDeviceView = { projectId: "", daemonId: DEVICE_2 };
+  assert.deepEqual(browserScopeOfWorkspace(worktree1), { kind: "project", id: PROJECT_A });
+  assert.deepEqual(browserScopeOfWorkspace(deviceView), { kind: "device", id: DEVICE_1 });
+  const partitionOf = (workspace: { projectId: string; daemonId: string }) => browserPartitionFor(browserScopeOfWorkspace(workspace));
+  assert.equal(partitionOf(worktree1), PREPARED);
+  assert.equal(partitionOf(worktree2), PREPARED);
+  assert.equal(partitionOf(deviceView), `${BROWSER_DEVICE_PARTITION_PREFIX}${DEVICE_1}`);
+  // Two projects, two devices, a project and its device's view: all apart.
+  const distinct = [worktree1, otherProject, deviceView, otherDeviceView].map(partitionOf);
+  assert.equal(new Set(distinct).size, distinct.length);
+  // The same id under both kinds: still different partitions and different keys.
+  assert.notEqual(browserPartitionFor({ kind: "project", id: DEVICE_1 }), browserPartitionFor({ kind: "device", id: DEVICE_1 }));
+  assert.notEqual(browserScopeKey({ kind: "project", id: DEVICE_1 }), browserScopeKey({ kind: "device", id: DEVICE_1 }));
+});
+
+test("partitions are named per scope, only for safe ids, and round-trip to their scope", () => {
+  assert.equal(browserPartitionFor({ kind: "project", id: "../etc" }), null);
+  assert.equal(browserPartitionFor({ kind: "device", id: "" }), null);
+  assert.equal(browserPartitionFor({ kind: "workspace" as "project", id: "ws-1" }), null);
+  for (const scope of [{ kind: "project", id: PROJECT_A }, { kind: "device", id: DEVICE_1 }] as const) {
+    assert.deepEqual(browserScopeOfPartition(browserPartitionFor(scope)!), scope);
+  }
+  assert.equal(browserScopeOfPartition("persist:other"), null);
+  assert.equal(browserScopeOfPartition(`${BROWSER_PROJECT_PARTITION_PREFIX}../x`), null);
+  assert.equal(browserScopeOfPartition(`${LEGACY_BROWSER_PARTITION_PREFIX}${PROJECT_A}`), null);
+  assert.equal(browserScopeOfPartition(BROWSER_DEVTOOLS_PARTITION), null);
+});
+
+test("a scope keeps the device of its first prepare", () => {
+  assert.equal(isSameScopeDaemon(undefined, DEVICE_1), true);
+  assert.equal(isSameScopeDaemon(DEVICE_1, DEVICE_1), true);
+  assert.equal(isSameScopeDaemon(DEVICE_1, DEVICE_2), false);
 });
 
 test("the gate admits a prepared page partition attaching on about:blank", () => {
@@ -45,7 +98,7 @@ test("the gate admits a prepared page partition attaching on about:blank", () =>
     ok: true,
     kind: "page",
     partition: PREPARED,
-    workspaceId: "ws-1",
+    scope: { kind: "project", id: PROJECT_A },
   });
   // Either source of the partition is enough.
   assert.equal(decideWebviewAttach({ paramsPartition: PREPARED, src: "about:blank" }, prepared).ok, true);
@@ -57,13 +110,16 @@ test("the gate rejects unprefixed, unprepared, missing or disagreeing partitions
   assert.equal(reject({ paramsPartition: "persist:evil", src: "about:blank" }), false);
   assert.equal(reject({ paramsPartition: "", src: "about:blank" }), false);
   assert.equal(reject({ src: "about:blank" }), false);
-  assert.equal(reject({ paramsPartition: `${BROWSER_PARTITION_PREFIX}ws-2`, src: "about:blank" }), false);
-  assert.equal(reject({ paramsPartition: `${BROWSER_PARTITION_PREFIX}../x`, src: "about:blank" }), false);
-  assert.equal(reject({ preferencesPartition: PREPARED, paramsPartition: `${BROWSER_PARTITION_PREFIX}ws-2`, src: "about:blank" }), false);
+  assert.equal(reject({ paramsPartition: `${BROWSER_PROJECT_PARTITION_PREFIX}${PROJECT_B}`, src: "about:blank" }), false);
+  assert.equal(reject({ paramsPartition: `${BROWSER_PROJECT_PARTITION_PREFIX}../x`, src: "about:blank" }), false);
+  assert.equal(reject({ preferencesPartition: PREPARED, paramsPartition: `${BROWSER_DEVICE_PARTITION_PREFIX}${DEVICE_1}`, src: "about:blank" }), false);
   assert.equal(reject({ paramsPartition: PREPARED, src: "https://example.com/" }), false);
   assert.equal(reject({ paramsPartition: PREPARED, src: "" }), false);
   assert.equal(reject({ paramsPartition: PREPARED }), false);
   assert.equal(reject({ paramsPartition: PREPARED, src: "file:///etc/passwd" }), false);
+  // A legacy per-workspace partition is no browser partition any more, even when "prepared".
+  const legacy = `${LEGACY_BROWSER_PARTITION_PREFIX}${PROJECT_A}`;
+  assert.deepEqual(decideWebviewAttach({ paramsPartition: legacy, src: "about:blank" }, () => true), { ok: false, reason: "not a browser partition" });
 });
 
 test("the DevTools host is admitted only as its own kind, by its own partition", () => {
@@ -73,9 +129,8 @@ test("the DevTools host is admitted only as its own kind, by its own partition",
     partition: BROWSER_DEVTOOLS_PARTITION,
   });
   assert.equal(decideWebviewAttach({ paramsPartition: BROWSER_DEVTOOLS_PARTITION, src: "devtools://devtools/x" }, () => true).ok, false);
-  // A page partition never becomes a DevTools host, and the persistent twin of the name is just a (workspace) page partition.
-  const twin = decideWebviewAttach({ paramsPartition: `persist:${BROWSER_DEVTOOLS_PARTITION}`, src: "about:blank" }, () => true);
-  assert.equal(twin.ok && twin.kind, "page");
+  // A page partition never becomes a DevTools host; the persistent twin of the name is a legacy name, refused.
+  assert.equal(decideWebviewAttach({ paramsPartition: `persist:${BROWSER_DEVTOOLS_PARTITION}`, src: "about:blank" }, () => true).ok, false);
 });
 
 test("guest navigation is limited to http(s) and about:blank; the DevTools host to devtools:", () => {
@@ -158,7 +213,7 @@ test("downloads never overwrite and never escape the folder", () => {
 });
 
 test("trusted certificates are per partition, survive storage and can be forgotten", () => {
-  const other = `${BROWSER_PARTITION_PREFIX}ws-2`;
+  const other = `${BROWSER_DEVICE_PARTITION_PREFIX}${DEVICE_1}`;
   let store = withTrustedCertificate({}, PREPARED, "Dev.Local", "sha256/abc");
   assert.equal(isCertificateTrusted(store, PREPARED, "dev.local", "sha256/abc"), true);
   assert.equal(isCertificateTrusted(store, PREPARED, "dev.local", "sha256/other"), false);
@@ -172,12 +227,27 @@ test("trusted certificates are per partition, survive storage and can be forgott
   assert.equal(isCertificateTrusted(forgotten, other, "x.local", "sha256/x"), true);
   assert.deepEqual(parseTrustedCertificates("{broken"), {});
   assert.deepEqual(parseTrustedCertificates(JSON.stringify({ version: 1, partitions: { "persist:evil": [{ host: "a", fingerprint: "b" }] } })), {});
+  // Records of legacy per-workspace partitions are dropped; the scope ones beside them survive.
+  const legacy = `${LEGACY_BROWSER_PARTITION_PREFIX}${PROJECT_A}`;
+  const mixed = JSON.stringify({ version: 1, partitions: { [legacy]: [{ host: "a", fingerprint: "b" }], [PREPARED]: [{ host: "c", fingerprint: "d" }] } });
+  assert.deepEqual(parseTrustedCertificates(mixed), { [PREPARED]: [{ host: "c", fingerprint: "d" }] });
 });
 
 test("IPC payloads are validated field by field", () => {
-  assert.deepEqual(sanitizePrepare({ workspaceId: "ws-1", daemonId: "d1" }), { workspaceId: "ws-1", daemonId: "d1" });
-  assert.equal(sanitizePrepare({ workspaceId: "../x", daemonId: "d1" }), null);
-  assert.equal(sanitizePrepare({ workspaceId: "ws-1", daemonId: 3 }), null);
+  const project = { kind: "project", id: PROJECT_A } as const;
+  const device = { kind: "device", id: DEVICE_1 } as const;
+  assert.deepEqual(sanitizePrepare({ scope: project, daemonId: DEVICE_1 }), { scope: project, daemonId: DEVICE_1 });
+  assert.deepEqual(sanitizePrepare({ scope: device, daemonId: DEVICE_1 }), { scope: device, daemonId: DEVICE_1 });
+  // A device scope is its own device.
+  assert.equal(sanitizePrepare({ scope: device, daemonId: DEVICE_2 }), null);
+  assert.equal(sanitizePrepare({ scope: { kind: "project", id: "../x" }, daemonId: DEVICE_1 }), null);
+  assert.equal(sanitizePrepare({ scope: { kind: "device", id: "a b" }, daemonId: "a b" }), null);
+  assert.equal(sanitizePrepare({ scope: { kind: "workspace", id: "ws-1" }, daemonId: DEVICE_1 }), null);
+  assert.equal(sanitizePrepare({ scope: { kind: "project" }, daemonId: DEVICE_1 }), null);
+  assert.equal(sanitizePrepare({ scope: "project:x", daemonId: DEVICE_1 }), null);
+  assert.equal(sanitizePrepare({ workspaceId: "ws-1", daemonId: DEVICE_1 }), null);
+  assert.equal(sanitizePrepare({ scope: project, daemonId: 3 }), null);
+  assert.equal(sanitizePrepare({ scope: project, daemonId: "d\n1" }), null);
 
   assert.deepEqual(sanitizeNavigate({ guestId: 7, url: "http://localhost:3000/" }), { guestId: 7, url: "http://localhost:3000/" });
   assert.equal(sanitizeNavigate({ guestId: 7, url: "file:///etc/passwd" }), null);
@@ -194,8 +264,11 @@ test("IPC payloads are validated field by field", () => {
   assert.deepEqual(sanitizeDevToolsOpen({ guestId: 7, hostGuestId: 8 }), { guestId: 7, hostGuestId: 8 });
   assert.equal(sanitizeDevToolsOpen({ guestId: 7, hostGuestId: 7 }), null);
 
-  assert.deepEqual(sanitizeClearData({ workspaceId: "ws-1", target: "cookies" }), { workspaceId: "ws-1", target: "cookies" });
-  assert.equal(sanitizeClearData({ workspaceId: "ws-1", target: "everything" }), null);
+  assert.deepEqual(sanitizeClearData({ scope: project, target: "cookies" }), { scope: project, target: "cookies" });
+  assert.deepEqual(sanitizeClearData({ scope: device, target: "certificates" }), { scope: device, target: "certificates" });
+  assert.equal(sanitizeClearData({ scope: project, target: "everything" }), null);
+  assert.equal(sanitizeClearData({ scope: { kind: "project", id: "" }, target: "cookies" }), null);
+  assert.equal(sanitizeClearData({ workspaceId: "ws-1", target: "cookies" }), null);
 
   assert.deepEqual(sanitizeCertificateQuery({ guestId: 7, host: "Dev.Local" }), { guestId: 7, host: "dev.local" });
   assert.equal(sanitizeCertificateQuery({ guestId: 7, host: "a b" }), null);
