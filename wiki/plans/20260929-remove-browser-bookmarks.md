@@ -51,7 +51,7 @@ One milestone; the data layer and the UI change together because the UI consumes
 
 ### Milestone 1: bookmarks removed end to end
 
-`browser-library.ts` exports no bookmark type, constant or function; `BrowserLibrary` holds history only; `BrowserView`/`BrowserViews` render no ☆, no bookmarks-bar menu item and no bar, and take no `onOpenTab`; suggestions render history only; comments are updated; `browser-library.test.ts` is rewritten per the Tests decision. Validation: `pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test` → exit 0; `git grep -niE -e bookmark -e 书签 -- apps/desktop/src` → no output.
+`browser-library.ts` exports no bookmark type, constant or function; `BrowserLibrary` holds history only; `BrowserView`/`BrowserViews` render no ☆, no bookmarks-bar menu item and no bar, and take no `onOpenTab`; suggestions render history only; comments are updated; `browser-library.test.ts` is rewritten per the Tests decision. Validation: `pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test` → exit 0; `git grep -niE -e bookmark -e 书签 -- apps/desktop/src ':!*browser-library.test.ts'` → no output.
 
 ## Landmines
 
@@ -85,7 +85,7 @@ Out of scope:
 | Typecheck | `pnpm -C apps/desktop typecheck` | exit 0 |
 | Unit tests | `pnpm -C apps/desktop test` | exit 0 |
 | Build | `pnpm -C apps/desktop build` | exit 0 |
-| No leftovers | `git grep -niE -e bookmark -e 书签 -- apps/desktop/src` | no output (exit 1) |
+| No leftovers | `git grep -niE -e bookmark -e 书签 -- apps/desktop/src ':!*browser-library.test.ts'` | no output (exit 1); the test's stale-data fixture names the old fields literally, by design |
 | No unused locals in touched files | `pnpm -C apps/desktop exec tsc -p tsconfig.renderer.json --noEmit --noUnusedLocals --noUnusedParameters 2>&1 \| grep -E "browser-(view\|library)"` | no output (other files' pre-existing findings are filtered out) |
 | Visual check (acceptance) | `pnpm dev:desktop:prod`, open a browser tab | done by the user by hand, not by an agent |
 
