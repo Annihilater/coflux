@@ -294,6 +294,22 @@ pub struct SecretRequestRef {
     #[prost(double, tag="7")]
     pub expires_at: f64,
 }
+/// One workspace's browser annotations as the center may know them (plan
+/// 20260929-browser-annotations): a revision that changes on every change of the workspace's
+/// annotations, and counts. Deliberately nothing else — no text, no ids: the content travels only
+/// end to end between desktops and the worker, and a desktop showing the workspace refetches it over
+/// the Device channel when the revision changes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceAnnotationSummary {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub revision: u32,
+    #[prost(uint32, tag="3")]
+    pub pending: u32,
+    #[prost(uint32, tag="4")]
+    pub resolved: u32,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum TaskStatus {
@@ -1434,6 +1450,265 @@ pub struct DeviceSecretAnswerAck {
     #[prost(enumeration="SecretAnswerStatus", tag="2")]
     pub status: i32,
 }
+/// Enough about the annotated element to find it again on the page and in the code. Every field is
+/// best effort; the desktop fills what it could read.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationElement {
+    /// A CSS selector that matched exactly this element when it was picked.
+    #[prost(string, tag="1")]
+    pub selector: ::prost::alloc::string::String,
+    /// The element's path from <html>, as tag:nth-of-type(n) steps joined by " > ".
+    #[prost(string, tag="2")]
+    pub dom_path: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub tag: ::prost::alloc::string::String,
+    /// The element's visible text, trimmed and shortened.
+    #[prost(string, tag="4")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub element_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="6")]
+    pub classes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// A few identifying attributes (role, aria-label, name, type, href, alt, placeholder, data-testid…).
+    #[prost(map="string, string", tag="7")]
+    pub attributes: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// A few computed styles (color, font-size, padding…), for mapping onto the design system.
+    #[prost(map="string, string", tag="8")]
+    pub styles: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// Size in CSS pixels when picked.
+    #[prost(double, tag="9")]
+    pub width: f64,
+    #[prost(double, tag="10")]
+    pub height: f64,
+}
+/// Framework source identity of the element, read from the page's own development data.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationSource {
+    /// "react", "vue", or empty when none was recognised.
+    #[prost(string, tag="1")]
+    pub framework: ::prost::alloc::string::String,
+    /// Component names from the innermost outwards.
+    #[prost(string, repeated, tag="2")]
+    pub components: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Source location when the page exposes it (React <= 18 development builds, Vue's __file).
+    #[prost(string, tag="3")]
+    pub file: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub line: u32,
+    #[prost(uint32, tag="5")]
+    pub column: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationImage {
+    /// Assigned by the worker.
+    #[prost(string, tag="1")]
+    pub image_id: ::prost::alloc::string::String,
+    #[prost(enumeration="AnnotationImageKind", tag="2")]
+    pub kind: i32,
+    #[prost(string, tag="3")]
+    pub mime_type: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub size: u32,
+    /// Absolute path of the file on the workspace's device (read-only, filled by the worker).
+    #[prost(string, tag="5")]
+    pub path: ::prost::alloc::string::String,
+}
+/// A comment added when a resolved annotation was reopened.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationFollowUp {
+    #[prost(string, tag="1")]
+    pub comment: ::prost::alloc::string::String,
+    /// The agent's note the comment answers.
+    #[prost(string, tag="2")]
+    pub previous_note: ::prost::alloc::string::String,
+    #[prost(double, tag="3")]
+    pub created_at: f64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Annotation {
+    /// Assigned by the worker on creation.
+    #[prost(string, tag="1")]
+    pub annotation_id: ::prost::alloc::string::String,
+    /// Stable display number within the workspace (#1, #2…), assigned by the worker.
+    #[prost(uint32, tag="2")]
+    pub number: u32,
+    #[prost(enumeration="AnnotationStatus", tag="3")]
+    pub status: i32,
+    #[prost(string, tag="4")]
+    pub page_url: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub page_title: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub comment: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="7")]
+    pub element: ::core::option::Option<AnnotationElement>,
+    #[prost(message, optional, tag="8")]
+    pub source: ::core::option::Option<AnnotationSource>,
+    #[prost(message, repeated, tag="9")]
+    pub images: ::prost::alloc::vec::Vec<AnnotationImage>,
+    /// The agent's note from `coflux annotations resolve`.
+    #[prost(string, tag="10")]
+    pub resolution_note: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="11")]
+    pub follow_ups: ::prost::alloc::vec::Vec<AnnotationFollowUp>,
+    #[prost(double, tag="12")]
+    pub created_at: f64,
+    #[prost(double, tag="13")]
+    pub updated_at: f64,
+    #[prost(double, tag="14")]
+    pub resolved_at: f64,
+}
+/// An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationImageUpload {
+    #[prost(enumeration="AnnotationImageKind", tag="1")]
+    pub kind: i32,
+    #[prost(string, tag="2")]
+    pub mime_type: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="3")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+/// Create (empty annotation_id) or edit an annotation. On edit only the comment, the element
+/// context, the source and the images change; status and numbering are the worker's.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationPut {
+    #[prost(message, optional, tag="1")]
+    pub annotation: ::core::option::Option<Annotation>,
+    #[prost(message, repeated, tag="2")]
+    pub add_images: ::prost::alloc::vec::Vec<AnnotationImageUpload>,
+    #[prost(string, repeated, tag="3")]
+    pub remove_image_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Confirm (or delete) annotations: their image files are deleted with them.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationDelete {
+    #[prost(string, repeated, tag="1")]
+    pub annotation_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// A resolved annotation goes back to pending with an added comment.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationReopen {
+    #[prost(string, tag="1")]
+    pub annotation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub comment: ::prost::alloc::string::String,
+}
+/// Delete every resolved annotation of the workspace.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationClearResolved {
+}
+/// client→worker (SESSION_CONTROL): the workspace's annotations, every status.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAnnotationsList {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_CONTROL).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceAnnotationsListed {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub revision: u32,
+    #[prost(message, repeated, tag="5")]
+    pub annotations: ::prost::alloc::vec::Vec<Annotation>,
+}
+/// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceAnnotationsMutate {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(oneof="device_annotations_mutate::Action", tags="3, 4, 5, 6")]
+    pub action: ::core::option::Option<device_annotations_mutate::Action>,
+}
+/// Nested message and enum types in `DeviceAnnotationsMutate`.
+pub mod device_annotations_mutate {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Action {
+        #[prost(message, tag="3")]
+        Put(super::AnnotationPut),
+        #[prost(message, tag="4")]
+        Delete(super::AnnotationDelete),
+        #[prost(message, tag="5")]
+        Reopen(super::AnnotationReopen),
+        #[prost(message, tag="6")]
+        ClearResolved(super::AnnotationClearResolved),
+    }
+}
+/// worker→client (SESSION_CONTROL): the outcome; `annotation` is the stored result of a put or reopen.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceAnnotationsMutated {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub revision: u32,
+    #[prost(message, optional, tag="5")]
+    pub annotation: ::core::option::Option<Annotation>,
+}
+/// client→worker (SESSION_CONTROL): one image file of an annotation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAnnotationImageRead {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub annotation_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub image_id: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_CONTROL).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAnnotationImageData {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub mime_type: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="5")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+/// client→worker (SESSION_CONTROL): type `text` into an agent's terminal of the workspace, then
+/// Enter, as the worker's agent input does (refused while another person holds the terminal).
+/// Used only when this desktop does not itself hold the terminal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAnnotationHandOff {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub text: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_CONTROL). `held` is set when the refusal is a person holding the terminal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceAnnotationHandOffResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub held: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1442,7 +1717,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 104, 105, 106, 107")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1553,6 +1828,22 @@ pub mod device_envelope {
         SecretAnswer(super::DeviceSecretAnswer),
         #[prost(message, tag="91")]
         SecretAnswerAck(super::DeviceSecretAnswerAck),
+        #[prost(message, tag="100")]
+        AnnotationsList(super::DeviceAnnotationsList),
+        #[prost(message, tag="101")]
+        AnnotationsListed(super::DeviceAnnotationsListed),
+        #[prost(message, tag="102")]
+        AnnotationsMutate(super::DeviceAnnotationsMutate),
+        #[prost(message, tag="103")]
+        AnnotationsMutated(super::DeviceAnnotationsMutated),
+        #[prost(message, tag="104")]
+        AnnotationImageRead(super::DeviceAnnotationImageRead),
+        #[prost(message, tag="105")]
+        AnnotationImageData(super::DeviceAnnotationImageData),
+        #[prost(message, tag="106")]
+        AnnotationHandOff(super::DeviceAnnotationHandOff),
+        #[prost(message, tag="107")]
+        AnnotationHandOffResult(super::DeviceAnnotationHandOffResult),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -1898,6 +2189,83 @@ impl SecretAnswerStatus {
             "SECRET_ANSWER_STATUS_EXPIRED" => Some(Self::Expired),
             "SECRET_ANSWER_STATUS_UNKNOWN_REQUEST" => Some(Self::UnknownRequest),
             "SECRET_ANSWER_STATUS_INVALID" => Some(Self::Invalid),
+            _ => None,
+        }
+    }
+}
+// ===== Browser annotations (plan 20260929-browser-annotations) =====
+//
+// A desktop annotates elements of a page in its built-in browser tab; the annotations belong to
+// the workspace and are kept by the worker of the device hosting it, under
+// $COFLUX_HOME/annotations/<workspace_id>/ (an index plus one file per image). Their content —
+// comments, element context, images — travels only over this end-to-end channel: none of these
+// payloads carries an operation_id and none is ever reported to the center. The center only sees
+// the metadata-only WorkspaceAnnotationSummary (revision and counts).
+//
+// Every request requires DEVICE_SCOPE_SESSION_CONTROL (not RPC): a local workspace's annotations
+// keep working while the center is unreachable. A worker that predates these payloads decodes them
+// as an empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients treat
+// exactly that as "the device's worker does not support annotations", never a timeout.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AnnotationStatus {
+    Unspecified = 0,
+    /// Waiting for an agent.
+    Pending = 1,
+    /// An agent ran `coflux annotations resolve` with a note; waiting for the user to confirm
+    /// (delete) or reopen it.
+    Resolved = 2,
+}
+impl AnnotationStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ANNOTATION_STATUS_UNSPECIFIED",
+            Self::Pending => "ANNOTATION_STATUS_PENDING",
+            Self::Resolved => "ANNOTATION_STATUS_RESOLVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ANNOTATION_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "ANNOTATION_STATUS_PENDING" => Some(Self::Pending),
+            "ANNOTATION_STATUS_RESOLVED" => Some(Self::Resolved),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AnnotationImageKind {
+    Unspecified = 0,
+    /// Captured automatically from the page when the element was picked: its current state.
+    Screenshot = 1,
+    /// Pasted or attached by the user: what it should look like, or any other reference.
+    Reference = 2,
+}
+impl AnnotationImageKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ANNOTATION_IMAGE_KIND_UNSPECIFIED",
+            Self::Screenshot => "ANNOTATION_IMAGE_KIND_SCREENSHOT",
+            Self::Reference => "ANNOTATION_IMAGE_KIND_REFERENCE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ANNOTATION_IMAGE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "ANNOTATION_IMAGE_KIND_SCREENSHOT" => Some(Self::Screenshot),
+            "ANNOTATION_IMAGE_KIND_REFERENCE" => Some(Self::Reference),
             _ => None,
         }
     }
@@ -2253,6 +2621,17 @@ pub struct SecretRequestsUpdated {
     #[prost(message, repeated, tag="2")]
     pub requests: ::prost::alloc::vec::Vec<SecretRequestRef>,
 }
+/// A device's browser annotation summaries (plan 20260929-browser-annotations): the full current
+/// set, broadcast after each daemon AnnotationsSummary report or when the daemon disconnects (empty),
+/// and re-sent per device on subscribe. Revision and counts only; a desktop refetches the content
+/// over the Device channel when a revision changes. In-memory derived fact, never persisted.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationsSummaryUpdated {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StateSnapshot {
     #[prost(message, repeated, tag="1")]
@@ -2366,7 +2745,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -2437,6 +2816,8 @@ pub mod server_to_client {
         DeviceJoinKeyCreated(super::DeviceJoinKeyCreated),
         #[prost(message, tag="45")]
         SecretRequestsUpdated(super::SecretRequestsUpdated),
+        #[prost(message, tag="46")]
+        AnnotationsSummaryUpdated(super::AnnotationsSummaryUpdated),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -2658,6 +3039,17 @@ pub struct SessionAgents {
 pub struct SecretRequests {
     #[prost(message, repeated, tag="1")]
     pub requests: ::prost::alloc::vec::Vec<SecretRequestRef>,
+}
+/// Full idempotent snapshot of this daemon's browser annotations per workspace (plan
+/// 20260929-browser-annotations), same shape as SecretRequests: sent on every change and
+/// unconditionally after authentication; only workspaces that have annotations are listed, empty =
+/// none. Metadata only (revision and counts). The server validates each workspace against its catalog
+/// (it must belong to this daemon), keeps the result in memory only and fans it out to the account's
+/// clients.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AnnotationsSummary {
+    #[prost(message, repeated, tag="1")]
+    pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
 }
 /// ===== agent 协同控制（plan 074）=====
 ///
@@ -2921,7 +3313,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -2985,6 +3377,8 @@ pub mod daemon_to_server {
         DeviceTailcatOpened(super::DeviceTailcatOpened),
         #[prost(message, tag="39")]
         SecretRequests(super::SecretRequests),
+        #[prost(message, tag="40")]
+        AnnotationsSummary(super::AnnotationsSummary),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====

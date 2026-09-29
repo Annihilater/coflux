@@ -261,6 +261,15 @@ message SecretRequestsUpdated {
   repeated SecretRequestRef requests = 2;
 }
 
+// A device's browser annotation summaries (plan 20260929-browser-annotations): the full current
+// set, broadcast after each daemon AnnotationsSummary report or when the daemon disconnects (empty),
+// and re-sent per device on subscribe. Revision and counts only; a desktop refetches the content
+// over the Device channel when a revision changes. In-memory derived fact, never persisted.
+message AnnotationsSummaryUpdated {
+  string daemon_id = 1;
+  repeated WorkspaceAnnotationSummary workspaces = 2;
+}
+
 message StateSnapshot {
   repeated DaemonInfo daemons = 1;
   repeated Project projects = 2;
@@ -384,6 +393,7 @@ message ServerToClient {
     DeviceTailcatClosed device_tailcat_closed = 43;
     DeviceJoinKeyCreated device_join_key_created = 44;
     SecretRequestsUpdated secret_requests_updated = 45;
+    AnnotationsSummaryUpdated annotations_summary_updated = 46;
   }
 }
 

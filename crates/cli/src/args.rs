@@ -12,6 +12,8 @@ const STRING_OPTIONS: &[&str] = &[
     "cwd",
     // executor: the only free-form input is the prompt; the model is configured once in Coflux.app.
     "prompt",
+    // `annotations resolve`: the agent's note on what it changed.
+    "note",
 ];
 const BOOL_OPTIONS: &[&str] = &["password-stdin", "remote", "existing-branch", "json", "enter", "help",
     // executor: read-only by default; --write is the only mode switch.

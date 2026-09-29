@@ -160,6 +160,15 @@ pub enum AgentAction {
     ExecutorStatus { run_id: String },
     /// 取消一条 run（幂等）。
     ExecutorCancel { run_id: String },
+    /// `coflux annotations list` (plan 20260929-browser-annotations): the effective workspace's
+    /// pending browser annotations. Purely local.
+    AnnotationsList,
+    /// `coflux annotations watch`: one bounded round that answers as soon as the effective
+    /// workspace has pending annotations (the CLI loops until its own deadline).
+    AnnotationsWatch { timeout_ms: u64 },
+    /// `coflux annotations resolve <id> --note`: the agent implemented it; the desktops show the
+    /// note and wait for the user to confirm or reopen.
+    AnnotationsResolve { annotation_id: String, note: String },
 }
 
 pub struct AgentResponse {
@@ -544,6 +553,136 @@ async fn handle(
             Ok(()) => AgentResponse::ok(serde_json::json!({ "runId": run_id })),
             Err(message) => AgentResponse::err("404 Not Found", message),
         },
+        AgentAction::AnnotationsList => annotations_list(device, &scope).await,
+        AgentAction::AnnotationsWatch { timeout_ms } => {
+            let timeout = if timeout_ms == 0 {
+                WAIT_ROUND_MAX
+            } else {
+                Duration::from_millis(timeout_ms).min(WAIT_ROUND_MAX)
+            };
+            annotations_watch(device, &scope, timeout).await
+        }
+        AgentAction::AnnotationsResolve { annotation_id, note } => {
+            annotations_resolve(device, &scope, annotation_id, note).await
+        }
+    }
+}
+
+/// The effective workspace and the store an annotation command works on.
+fn annotation_target(
+    device: &Arc<DeviceRuntime>,
+    scope: &WorkspaceScope,
+) -> Result<(String, Arc<crate::annotations::AnnotationStore>), AgentResponse> {
+    let workspace = scope.require_effective()?.to_string();
+    let store = device
+        .annotations()
+        .cloned()
+        .ok_or_else(|| AgentResponse::err("503 Service Unavailable", "annotations are unavailable on this worker"))?;
+    Ok((workspace, store))
+}
+
+/// The JSON every annotation command answers with: which workspace was resolved (so an empty list
+/// explains itself), its pending annotations, and how many resolved ones wait for the user.
+async fn annotations_snapshot(
+    store: Arc<crate::annotations::AnnotationStore>,
+    workspace: String,
+    scope_path: String,
+) -> Result<(serde_json::Value, usize), AgentResponse> {
+    let listed = tokio::task::spawn_blocking(move || {
+        store.list(&workspace).map(|(revision, list)| {
+            let pending: Vec<serde_json::Value> = list
+                .iter()
+                .filter(|annotation| annotation.status == crate::annotations::STATUS_PENDING)
+                .map(|annotation| store.agent_json(&workspace, annotation))
+                .collect();
+            let resolved = list.len() - pending.len();
+            let count = pending.len();
+            (
+                serde_json::json!({
+                    "workspaceId": workspace,
+                    "ref": handle::of(HandleKind::Workspace, &workspace),
+                    "path": scope_path,
+                    "revision": revision,
+                    "annotations": pending,
+                    "resolvedCount": resolved,
+                }),
+                count,
+            )
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err("the annotation store task failed".into()));
+    listed.map_err(|error| AgentResponse::err("500 Internal Server Error", error))
+}
+
+async fn annotations_list(device: &Arc<DeviceRuntime>, scope: &WorkspaceScope) -> AgentResponse {
+    let (workspace, store) = match annotation_target(device, scope) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let path = scope.effective_path.clone().unwrap_or_default();
+    match annotations_snapshot(store, workspace, path).await {
+        Ok((snapshot, _)) => AgentResponse::ok(snapshot),
+        Err(response) => response,
+    }
+}
+
+async fn annotations_watch(
+    device: &Arc<DeviceRuntime>,
+    scope: &WorkspaceScope,
+    timeout: Duration,
+) -> AgentResponse {
+    let (workspace, store) = match annotation_target(device, scope) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let path = scope.effective_path.clone().unwrap_or_default();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut changes = store.subscribe();
+    loop {
+        // Mark the current change as seen before reading, so a change landing in between wakes us.
+        let _ = changes.borrow_and_update();
+        let (mut snapshot, pending) =
+            match annotations_snapshot(store.clone(), workspace.clone(), path.clone()).await {
+                Ok(listed) => listed,
+                Err(response) => return response,
+            };
+        if pending > 0 {
+            if let Some(object) = snapshot.as_object_mut() {
+                object.insert("state".into(), serde_json::json!("pending"));
+            }
+            return AgentResponse::ok(snapshot);
+        }
+        let woke = tokio::time::timeout_at(deadline, changes.changed()).await;
+        if !matches!(woke, Ok(Ok(()))) {
+            if let Some(object) = snapshot.as_object_mut() {
+                object.insert("state".into(), serde_json::json!("waiting"));
+            }
+            return AgentResponse::ok(snapshot);
+        }
+    }
+}
+
+async fn annotations_resolve(
+    device: &Arc<DeviceRuntime>,
+    scope: &WorkspaceScope,
+    annotation_id: String,
+    note: String,
+) -> AgentResponse {
+    let (workspace, store) = match annotation_target(device, scope) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let resolved = tokio::task::spawn_blocking(move || {
+        store
+            .resolve(&workspace, &annotation_id, &note)
+            .map(|annotation| store.agent_json(&workspace, &annotation))
+    })
+    .await
+    .unwrap_or_else(|_| Err("the annotation store task failed".into()));
+    match resolved {
+        Ok(annotation) => AgentResponse::ok(serde_json::json!({ "annotation": annotation })),
+        Err(error) => AgentResponse::err("404 Not Found", error),
     }
 }
 

@@ -7,6 +7,8 @@
 mod agent_ctl;
 mod agent_socket;
 mod agents;
+mod annotations;
+mod atomic_file;
 mod conn_state;
 mod creds;
 mod device;
@@ -1526,6 +1528,10 @@ async fn run_server_connection(
                     force_report_agents(state, observed, to_server_tx).await;
                     // Pending secret requests are memory-only in the center, like presence.
                     device.secrets().publish();
+                    // So is the annotation summary (plan 20260929-browser-annotations).
+                    if let Some(annotations) = device.annotations() {
+                        annotations.publish();
+                    }
                 }
             }
             delivery = checkpoints.claim(connection_epoch), if connection_authed => {

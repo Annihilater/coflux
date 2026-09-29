@@ -108,6 +108,16 @@ message SecretRequests {
   repeated SecretRequestRef requests = 1;
 }
 
+// Full idempotent snapshot of this daemon's browser annotations per workspace (plan
+// 20260929-browser-annotations), same shape as SecretRequests: sent on every change and
+// unconditionally after authentication; only workspaces that have annotations are listed, empty =
+// none. Metadata only (revision and counts). The server validates each workspace against its catalog
+// (it must belong to this daemon), keeps the result in memory only and fans it out to the account's
+// clients.
+message AnnotationsSummary {
+  repeated WorkspaceAnnotationSummary workspaces = 1;
+}
+
 // ===== agent 协同控制（plan 074）=====
 //
 // 跑在 PTY 里的 agent 经 loopback 发起的中心操作。worker 已用调用方 pid 反查进程树确认它
@@ -331,6 +341,7 @@ message DaemonToServer {
     DeviceTailcatInstalled device_tailcat_installed = 37;
     DeviceTailcatOpened device_tailcat_opened = 38;
     SecretRequests secret_requests = 39;
+    AnnotationsSummary annotations_summary = 40;
   }
 }
 
