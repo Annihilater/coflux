@@ -1485,6 +1485,10 @@ pub struct DeviceExecutorTranscript {
     pub summary: ::prost::alloc::string::String,
     #[prost(string, tag="7")]
     pub error: ::prost::alloc::string::String,
+    /// The run's prompt, on the first batch that answers a subscription (empty on every other
+    /// batch). It travels only here, end to end; the center never sees it.
+    #[prost(string, tag="8")]
+    pub prompt: ::prost::alloc::string::String,
 }
 /// client→worker (SESSION_CONTROL): cancel a run, through the ledger's ordinary cancel path (the
 /// one the `/agent` ExecutorCancel action uses). Idempotent; no acknowledgement — the outcome shows

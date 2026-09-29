@@ -4403,6 +4403,7 @@ fn transcript_frame(batch: TranscriptBatch) -> wire::DeviceExecutorTranscript {
         terminal,
         summary,
         error,
+        prompt: batch.prompt,
     }
 }
 
@@ -5763,6 +5764,7 @@ mod tests {
         assert_eq!(backlog.fragments[0].text, "one");
         assert_eq!(backlog.fragments[0].seq, 1);
         assert!(!backlog.ended);
+        assert_eq!(backlog.prompt, "look around");
 
         // Live fragments follow.
         runtime.handle_client_frame(&fixture.local_id, &request_envelope(&fixture.local_id, fragment("two")));

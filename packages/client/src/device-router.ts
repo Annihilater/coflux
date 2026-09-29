@@ -24,7 +24,6 @@ import {
   type DeviceExecutorHostRegistered,
   type DeviceExecutorReport,
   type DeviceExecutorTranscript,
-  type DeviceExecutorTranscriptFragment,
   type DevicePortsResult,
   type DeviceSessionCatalog,
   type FsListed,
@@ -393,6 +392,8 @@ interface ControlWaiter<T> {
 
 /** What a transcript subscriber receives (plan 20260929-executor-pip). */
 export type ExecutorTranscriptEvent =
+  /** The run's prompt, from the first batch answering the subscription. */
+  | { kind: "prompt"; prompt: string }
   /** Backlog or live fragments, in seq order; `omitted` = the worker's buffer cap already dropped
    * fragments older than the first one here. */
   | { kind: "fragments"; fragments: DeviceExecutorTranscript["fragments"]; omitted: boolean }
@@ -401,6 +402,10 @@ export type ExecutorTranscriptEvent =
   /** This device's worker predates transcript viewing (its own reply, never a timeout): the card
    * shows metadata only. Delivered at most once per channel generation. */
   | { kind: "unsupported" };
+
+/** The host→worker fragment frame as a plain init shape (no `$typeName`), so the desktop bridge can
+ * build it from the main process's message without the protocol runtime. */
+export type ExecutorTranscriptFragmentInit = Extract<DeviceEnvelopePayload, { case: "executorTranscriptFragment" }>["value"];
 
 /** One transcript subscription: re-sent on every new session-lane generation from the last seq it
  * has, so a reconnect resumes rather than replays. Outside `pendingRequests` on purpose — it is a
@@ -1760,6 +1765,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.executorViewerFrames = undefined;
     const subscription = route.executorSubscriptions.get(transcript.runId);
     if (!subscription) return;
+    if (transcript.prompt) subscription.listener({ kind: "prompt", prompt: transcript.prompt });
     if (transcript.fragments.length > 0 || transcript.omitted) {
       for (const fragment of transcript.fragments) {
         if (fragment.seq > subscription.fromSeq) subscription.fromSeq = fragment.seq;
@@ -1828,7 +1834,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
 
   /** The desktop host forwards one transcript fragment of a run it executes (plan
    * 20260929-executor-pip); same lane and same loopback rule as its reports. */
-  function sendExecutorTranscriptFragment(daemonId: string, fragment: DeviceExecutorTranscriptFragment): boolean {
+  function sendExecutorTranscriptFragment(daemonId: string, fragment: ExecutorTranscriptFragmentInit): boolean {
     const channel = routeFor(daemonId).sessionLane.active;
     if (!channel) return false;
     return sendOn(channel, normalizePayload({ case: "executorTranscriptFragment", value: fragment }));

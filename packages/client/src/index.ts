@@ -48,4 +48,5 @@ export {
   type DeviceInputState,
   type DeviceTransportMode,
   type DeviceTransportState,
+  type ExecutorTranscriptFragmentInit,
 } from "./device-router";

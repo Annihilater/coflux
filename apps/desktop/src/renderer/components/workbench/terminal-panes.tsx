@@ -49,6 +49,9 @@ export function TerminalPanes({
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   // Agent secret requests (plan 20260926-agent-secret-input): a card over the requesting pane.
   const secretRequests = useStore(client.store, (state) => state.secretRequests);
+  // Executor runs (plan 20260929-executor-pip): a picture-in-picture card over the caller's pane.
+  // The map's reference only changes when the center sends a new snapshot.
+  const executorRuns = useStore(client.store, (state) => state.executorRuns);
   const daemons = useStore(client.store, (state) => state.daemons);
   const workspaces = useStore(client.store, (state) => state.workspaces);
 
@@ -91,6 +94,8 @@ export function TerminalPanes({
             execInWorkspace={client.execInWorkspace}
             onOpenBrowserTab={onOpenBrowserTab}
             secretCards={secretCards}
+            executorRuns={executorRuns}
+            executorClient={client}
           />
         );
       })}

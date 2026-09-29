@@ -241,6 +241,8 @@ pub struct TranscriptBatch {
     pub fragments: Vec<wire::ExecutorTranscriptFragment>,
     pub omitted: bool,
     pub end: Option<RunEnd>,
+    /// The run's prompt, on the first batch answering a subscription only.
+    pub prompt: String,
 }
 
 fn run_end(record: &RunRecord) -> Option<RunEnd> {
@@ -391,6 +393,7 @@ impl ExecutorLedger {
                             fragments: vec![stored.clone()],
                             omitted: false,
                             end: None,
+                            prompt: String::new(),
                         },
                     })
                     .collect()
@@ -403,13 +406,14 @@ impl ExecutorLedger {
     /// when the cap already dropped something it never saw), then live fragments until the run
     /// ends. A finished or unknown run answers with a single end batch and no registration.
     pub fn subscribe_transcript(&mut self, channel_id: &str, run_id: &str, from_seq: u64) -> Vec<Effect> {
-        let batch = |fragments, omitted, end| Effect::Transcript {
+        let batch = |fragments, omitted, end, prompt: &str| Effect::Transcript {
             channel_id: channel_id.to_string(),
             batch: TranscriptBatch {
                 run_id: run_id.to_string(),
                 fragments,
                 omitted,
                 end,
+                prompt: prompt.to_string(),
             },
         };
         let Some(record) = self.runs.get(run_id) else {
@@ -421,11 +425,13 @@ impl ExecutorLedger {
                     summary: String::new(),
                     error: "this worker runtime has no record of the run".into(),
                 }),
+                "",
             )];
         };
         if record.done() {
-            return vec![batch(Vec::new(), false, run_end(record))];
+            return vec![batch(Vec::new(), false, run_end(record), &record.prompt)];
         }
+        let prompt = record.prompt.clone();
         self.viewers
             .entry(run_id.to_string())
             .or_default()
@@ -441,16 +447,23 @@ impl ExecutorLedger {
         for fragment in backlog {
             let size = fragment.encoded_len();
             if !current.is_empty() && current_bytes + size > TRANSCRIPT_BATCH_BYTES {
-                effects.push(batch(std::mem::take(&mut current), omitted && effects.is_empty(), None));
+                let first = effects.is_empty();
+                effects.push(batch(
+                    std::mem::take(&mut current),
+                    omitted && first,
+                    None,
+                    if first { &prompt } else { "" },
+                ));
                 current_bytes = 0;
             }
             current_bytes += size;
             current.push(fragment);
         }
         // Always answer, even with nothing: the viewer learns the subscription was taken and that
-        // nothing older exists (or was dropped).
+        // nothing older exists (or was dropped), and gets the prompt.
         if !current.is_empty() || effects.is_empty() {
-            effects.push(batch(current, omitted && effects.is_empty(), None));
+            let first = effects.is_empty();
+            effects.push(batch(current, omitted && first, None, if first { &prompt } else { "" }));
         }
         effects
     }
@@ -502,6 +515,7 @@ impl ExecutorLedger {
                         fragments: Vec::new(),
                         omitted: false,
                         end: Some(end.clone()),
+                        prompt: String::new(),
                     },
                 });
             }
@@ -1495,6 +1509,7 @@ mod tests {
         assert_eq!(batches[0].1.fragments[0].seq, 1);
         assert_eq!(batches[0].1.fragments[1].seq, 2);
         assert!(!batches[0].1.omitted);
+        assert_eq!(batches[0].1.prompt, "清掉 clippy 警告", "the first batch carries the prompt");
 
         // A fragment for an unknown or finished run is dropped too.
         assert!(ledger.append_fragment("host-a", "run-nope", assistant("x"), 7.0).is_empty());
@@ -1576,6 +1591,8 @@ mod tests {
         assert!(batches.len() > 1, "a 1 MiB backlog goes out in several batches");
         assert!(batches[0].1.omitted, "the first batch carries the omitted marker");
         assert!(batches[1..].iter().all(|(_, batch)| !batch.omitted));
+        assert!(!batches[0].1.prompt.is_empty());
+        assert!(batches[1..].iter().all(|(_, batch)| batch.prompt.is_empty()), "the prompt rides the first batch only");
         let first_seq = batches[0].1.fragments[0].seq;
         assert!(first_seq > 1, "the oldest fragments are gone");
         let last_seq = batches.last().unwrap().1.fragments.last().unwrap().seq;

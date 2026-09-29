@@ -2581,6 +2581,10 @@ public struct Coflux_V1_DeviceExecutorTranscript: Sendable {
 
   public var error: String = String()
 
+  /// The run's prompt, on the first batch that answers a subscription (empty on every other
+  /// batch). It travels only here, end to end; the center never sees it.
+  public var prompt: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -7784,7 +7788,7 @@ extension Coflux_V1_DeviceExecutorTranscriptUnsubscribe: SwiftProtobuf.Message, 
 
 extension Coflux_V1_DeviceExecutorTranscript: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceExecutorTranscript"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{1}fragments\0\u{1}omitted\0\u{1}ended\0\u{1}terminal\0\u{1}summary\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_id\0\u{1}fragments\0\u{1}omitted\0\u{1}ended\0\u{1}terminal\0\u{1}summary\0\u{1}error\0\u{1}prompt\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7799,6 +7803,7 @@ extension Coflux_V1_DeviceExecutorTranscript: SwiftProtobuf.Message, SwiftProtob
       case 5: try { try decoder.decodeSingularStringField(value: &self.terminal) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.summary) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.prompt) }()
       default: break
       }
     }
@@ -7826,6 +7831,9 @@ extension Coflux_V1_DeviceExecutorTranscript: SwiftProtobuf.Message, SwiftProtob
     if !self.error.isEmpty {
       try visitor.visitSingularStringField(value: self.error, fieldNumber: 7)
     }
+    if !self.prompt.isEmpty {
+      try visitor.visitSingularStringField(value: self.prompt, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -7837,6 +7845,7 @@ extension Coflux_V1_DeviceExecutorTranscript: SwiftProtobuf.Message, SwiftProtob
     if lhs.terminal != rhs.terminal {return false}
     if lhs.summary != rhs.summary {return false}
     if lhs.error != rhs.error {return false}
+    if lhs.prompt != rhs.prompt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

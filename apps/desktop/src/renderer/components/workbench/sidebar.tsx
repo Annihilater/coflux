@@ -9,6 +9,7 @@ import { AccountFooter, type SettingsTooltipControl } from "@/components/workben
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
+import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
@@ -81,6 +82,10 @@ export function Sidebar(props: SidebarProps) {
   const localSessions = useStore(client.store, (state) => state.localSessions);
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // Executor runs (plan 20260929-executor-pip): a workspace whose terminal has one delegated a
+  // sub-task; the row shows activity for it when the agents themselves are idle.
+  const executorRuns = useStore(client.store, (state) => state.executorRuns);
+  const executorTaskIds = executorTaskIdsOf(executorRuns);
   // 首快照未到之前 projects 是空数组：数据没到 ≠ 数据为空（plan 078 第③跳），
   // 「还没有项目」引导空态要等快照确认真空才渲染。
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
@@ -249,6 +254,9 @@ export function Sidebar(props: SidebarProps) {
                         // workspaceActivity（packages/client），UI 只做呈现。
                         const activity = workspaceActivity(workspace.id, daemon?.online ?? false, tasks, sessionAgents);
                         const activityText = activityLabel(activity);
+                        // A live executor run on one of this workspace's terminals: shown in the icon
+                        // slot when nothing else is, and always as a tooltip line.
+                        const executorBusy = (daemon?.online ?? false) && tasks.some((task) => task.workspaceId === workspace.id && executorTaskIds.has(task.id));
                         // agent 经 `coflux progress` 播报的进度短评（plan 088）：与活动状态是两个
                         // 维度（状态 hooks 自动判定，短评 agent 主动播报），跨 hook 事件存活。
                         const progress = workspaceProgress(workspace.id, tasks, sessionAgents);
@@ -265,6 +273,12 @@ export function Sidebar(props: SidebarProps) {
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                   <ActivityIcon activity={activity} />
                                   <span className="truncate">{activityText}</span>
+                                </span>
+                              ) : null}
+                              {executorBusy ? (
+                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                  <ActivityDots status="active" />
+                                  <span className="truncate">executor 正在执行子任务</span>
                                 </span>
                               ) : null}
                               {/* agent 经 `coflux notify` 主动留的话（plan 074）：状态图标只能表达
@@ -330,6 +344,8 @@ export function Sidebar(props: SidebarProps) {
                                   有活动状态时呈现点阵，中性态保留 GitBranch。 */}
                               {activity.status !== "idle" ? (
                                 <ActivityIcon activity={activity} labeled />
+                              ) : executorBusy ? (
+                                <ActivityDots status="active" label="executor 正在执行子任务" />
                               ) : (
                                 <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
                               )}
