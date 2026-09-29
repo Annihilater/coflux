@@ -82,11 +82,19 @@ test("elapsed time reads m:ss under an hour and h:mm:ss beyond, and the clock st
   assert.equal(runClockStart({ startedAt: 25, submittedAt: 10 }), 25);
 });
 
-test("a card outlives its run only while expanded", () => {
-  assert.equal(retainAfterEnd({ live: true, expanded: false }), true);
-  assert.equal(retainAfterEnd({ live: true, expanded: true }), true);
-  assert.equal(retainAfterEnd({ live: false, expanded: true }), true);
-  assert.equal(retainAfterEnd({ live: false, expanded: false }), false);
+test("a collapsed card disappears the moment either end signal arrives; only an expanded one outlives its run", () => {
+  // Going, by both signals: shown either way.
+  assert.equal(retainAfterEnd({ live: true, ended: false, expanded: false }), true);
+  assert.equal(retainAfterEnd({ live: true, ended: false, expanded: true }), true);
+  // The worker's `ended` batch arrived before the center dropped the run.
+  assert.equal(retainAfterEnd({ live: true, ended: true, expanded: false }), false);
+  assert.equal(retainAfterEnd({ live: true, ended: true, expanded: true }), true);
+  // The center dropped the run before (or without) the worker's end frame.
+  assert.equal(retainAfterEnd({ live: false, ended: false, expanded: false }), false);
+  assert.equal(retainAfterEnd({ live: false, ended: false, expanded: true }), true);
+  // Both signals in: same rule.
+  assert.equal(retainAfterEnd({ live: false, ended: true, expanded: false }), false);
+  assert.equal(retainAfterEnd({ live: false, ended: true, expanded: true }), true);
 });
 
 test("runs are grouped by their caller terminal in submit order", () => {

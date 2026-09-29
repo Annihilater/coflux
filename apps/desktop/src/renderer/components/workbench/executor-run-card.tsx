@@ -225,7 +225,9 @@ function ExecutorRunCard({
     if (!client.stopExecutorRun(run)) showToast({ body: "设备通道未连接，稍后再试", type: "error" });
   }, [client, run, ended, showToast]);
 
-  if (!retainAfterEnd({ live, expanded })) return null;
+  // A collapsed card goes the moment the run is over by either signal — the worker's end batch or
+  // the center's snapshot — never lingering on an ended state; an expanded panel stays.
+  if (!retainAfterEnd({ live, ended: transcript.end !== null, expanded })) return null;
 
   const state: CardState = ended
     // An empty terminal = the center dropped the run before (or without) the worker's end frame.

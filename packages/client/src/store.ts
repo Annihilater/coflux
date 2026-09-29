@@ -86,7 +86,7 @@ export type ExecutorRunState = {
   hostLost: boolean;
 };
 
-export type { ExecutorTranscriptEvent };
+export type { ExecutorTranscriptEvent } from "./device-router";
 
 function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
   switch (status) {

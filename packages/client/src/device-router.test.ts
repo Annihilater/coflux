@@ -1341,6 +1341,8 @@ test("an id-less empty_payload answering a transcript subscription never sets he
   assert.equal(h.errors.length, errorsBefore, "an outdated worker is the card's state, not a global error");
 
   // The heartbeat keeps running: the next period still sends a ping and its pong still lands.
+  // Had the empty_payload been attributed to the heartbeat, the interval would be gone (no
+  // second ping) and no pong could ever yield a reading again.
   const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
   h.clock.advance(15_000);
   await flush();
@@ -1348,10 +1350,15 @@ test("an id-less empty_payload answering a transcript subscription never sets he
   assert.equal(pings.length, pingsBefore + 1, "heartbeats keep running");
   const latest = pings.at(-1);
   if (latest?.case !== "ping") throw new Error("missing ping");
+  // The interval is anchored at the lane's start, so this ping went out at t=15000, not at the
+  // clock's current position; the reading is measured from then.
+  const statesBefore = h.states.length;
   h.clock.advance(4);
   h.adapter.emit(session, { case: "pong", value: { requestId: latest.value.requestId } });
   await flush();
-  assert.equal(h.states.at(-1)?.rttMs, 4, "the pong still yields an RTT: the heartbeat was never marked unsupported");
+  const rtt = h.states.at(-1)?.rttMs;
+  assert.ok(h.states.length > statesBefore, "the pong republishes the transport state");
+  assert.ok(typeof rtt === "number" && rtt >= 0 && rtt <= h.clock.current, `the pong still yields an RTT (${rtt}): the heartbeat was never marked unsupported`);
 
   // A stop on this generation is not even sent: the worker cannot understand it.
   assert.equal(h.router.stopExecutorRun("daemon-1", "run-1"), false);

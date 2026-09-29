@@ -125,12 +125,14 @@ export function runClockStart(run: Pick<ExecutorRunState, "startedAt" | "submitt
 }
 
 /**
- * Whether a card is still shown once its run has left the live set: only while it is expanded
- * (the panel stays with the final state until the user collapses or closes it). A collapsed card
- * disappears the moment its run ends.
+ * Whether a card is still shown. A run is over when either signal says so — the worker's `ended`
+ * batch on the transcript subscription, or the center's snapshot dropping it (`live` false) —
+ * whichever arrives first, and a collapsed card disappears at that moment. An expanded panel
+ * stays, with the final state, until the user collapses or closes it.
  */
-export function retainAfterEnd(state: { live: boolean; expanded: boolean }): boolean {
-  return state.live || state.expanded;
+export function retainAfterEnd(state: { live: boolean; ended: boolean; expanded: boolean }): boolean {
+  if (state.expanded) return true;
+  return state.live && !state.ended;
 }
 
 /** How a terminal state reads on the card. */
