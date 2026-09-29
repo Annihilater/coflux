@@ -1434,6 +1434,93 @@ pub struct DeviceSecretAnswerAck {
     #[prost(enumeration="SecretAnswerStatus", tag="2")]
     pub status: i32,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceChangedFile {
+    /// Path relative to the worktree root, in the working tree (the new path of a rename).
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    /// Set only for renames: the path at the base commit.
+    #[prost(string, optional, tag="2")]
+    pub old_path: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration="DeviceChangeStatus", tag="3")]
+    pub status: i32,
+    #[prost(uint32, tag="4")]
+    pub additions: u32,
+    #[prost(uint32, tag="5")]
+    pub deletions: u32,
+    /// git numstat reports `-\t-`, or an untracked file contains NUL. Line counts are then zero.
+    #[prost(bool, tag="6")]
+    pub binary: bool,
+    /// The larger of the base-side and working-tree sizes, in bytes; the client's large-diff guard.
+    #[prost(uint64, tag="7")]
+    pub size: u64,
+}
+/// client→worker (RPC).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceChangesListRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+/// worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
+/// file; the totals equal the workspace's diff stat.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceChangesList {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// The commit every per-file request must compare against: merge-base of the default branch and
+    /// HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
+    /// untracked files are listed.
+    #[prost(string, tag="4")]
+    pub base: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="5")]
+    pub files: ::prost::alloc::vec::Vec<DeviceChangedFile>,
+}
+/// client→worker (RPC): the content of one changed file.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceChangesFileRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// The `base` of the list this file came from (a full commit id, or empty).
+    #[prost(string, tag="3")]
+    pub base: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub path: ::prost::alloc::string::String,
+    /// The base-side path of a rename.
+    #[prost(string, optional, tag="5")]
+    pub old_path: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
+/// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceChangesFile {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag="4")]
+    pub old_exists: bool,
+    #[prost(bool, tag="5")]
+    pub new_exists: bool,
+    #[prost(string, tag="6")]
+    pub old_content: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub new_content: ::prost::alloc::string::String,
+    #[prost(string, tag="8")]
+    pub patch: ::prost::alloc::string::String,
+    /// Either side contains NUL; contents are then left empty.
+    #[prost(bool, tag="9")]
+    pub binary: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1442,7 +1529,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1553,6 +1640,14 @@ pub mod device_envelope {
         SecretAnswer(super::DeviceSecretAnswer),
         #[prost(message, tag="91")]
         SecretAnswerAck(super::DeviceSecretAnswerAck),
+        #[prost(message, tag="100")]
+        ChangesListRequest(super::DeviceChangesListRequest),
+        #[prost(message, tag="101")]
+        ChangesList(super::DeviceChangesList),
+        #[prost(message, tag="102")]
+        ChangesFileRequest(super::DeviceChangesFileRequest),
+        #[prost(message, tag="103")]
+        ChangesFile(super::DeviceChangesFile),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -1898,6 +1993,55 @@ impl SecretAnswerStatus {
             "SECRET_ANSWER_STATUS_EXPIRED" => Some(Self::Expired),
             "SECRET_ANSWER_STATUS_UNKNOWN_REQUEST" => Some(Self::UnknownRequest),
             "SECRET_ANSWER_STATUS_INVALID" => Some(Self::Invalid),
+            _ => None,
+        }
+    }
+}
+// ===== Workspace changes (plan 20260929-changes-file-tree) =====
+//
+// The desktop changes view asks the worker for the list of changed files in one round trip, then
+// fetches the content of one file at a time. Both are client→worker RPC requests (DEVICE_SCOPE_RPC)
+// keyed by workspace_id; the worker resolves the worktree and default branch itself.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that, arriving on
+// the RPC channel, to their in-flight changes requests and report that the daemon needs updating.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DeviceChangeStatus {
+    Unspecified = 0,
+    Added = 1,
+    Modified = 2,
+    Deleted = 3,
+    Renamed = 4,
+    /// Not tracked by git and not ignored (`git ls-files --others --exclude-standard`).
+    Untracked = 5,
+}
+impl DeviceChangeStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DEVICE_CHANGE_STATUS_UNSPECIFIED",
+            Self::Added => "DEVICE_CHANGE_STATUS_ADDED",
+            Self::Modified => "DEVICE_CHANGE_STATUS_MODIFIED",
+            Self::Deleted => "DEVICE_CHANGE_STATUS_DELETED",
+            Self::Renamed => "DEVICE_CHANGE_STATUS_RENAMED",
+            Self::Untracked => "DEVICE_CHANGE_STATUS_UNTRACKED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DEVICE_CHANGE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "DEVICE_CHANGE_STATUS_ADDED" => Some(Self::Added),
+            "DEVICE_CHANGE_STATUS_MODIFIED" => Some(Self::Modified),
+            "DEVICE_CHANGE_STATUS_DELETED" => Some(Self::Deleted),
+            "DEVICE_CHANGE_STATUS_RENAMED" => Some(Self::Renamed),
+            "DEVICE_CHANGE_STATUS_UNTRACKED" => Some(Self::Untracked),
             _ => None,
         }
     }

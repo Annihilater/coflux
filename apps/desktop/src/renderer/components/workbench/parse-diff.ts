@@ -1,127 +1,164 @@
-export type DiffLineType = "add" | "del" | "context";
+/**
+ * The changes view's diff model (plan 20260929-changes-file-tree).
+ *
+ * The worker sends one file's two sides whole plus git's `-U0` patch between them. Only the hunk
+ * headers of that patch are read: they say which line ranges changed, and everything between them
+ * is equal by construction, so each side can be rendered — and highlighted — as a whole file, and
+ * any folded stretch can be revealed from the lines already here.
+ */
 
-export type DiffLine = {
-  type: DiffLineType;
-  content: string;
-  oldLine?: number;
-  newLine?: number;
-};
+/** A `@@ -a,b +c,d @@` header; counts default to 1 when git omits them. */
+export type HunkRange = { oldStart: number; oldCount: number; newStart: number; newCount: number };
 
-export type DiffHunk = {
-  header: string;
-  lines: DiffLine[];
-};
+export type DiffSegment =
+  | { kind: "equal"; oldStart: number; newStart: number; length: number }
+  | { kind: "change"; oldStart: number; oldCount: number; newStart: number; newCount: number };
 
-export type DiffFile = {
-  path: string;
-  status: "added" | "deleted" | "modified" | "renamed";
-  /** status === "renamed" 时的原路径。 */
-  renamedFrom?: string;
-  binary: boolean;
-  additions: number;
-  deletions: number;
-  hunks: DiffHunk[];
-};
+export type DiffMode = "split" | "inline";
 
-const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+/** Lines of context kept around every change; longer unchanged stretches fold into a gap row. */
+export const CONTEXT_LINES = 3;
 
-/** "--- a/foo" / "+++ b/foo" / "--- /dev/null" → "foo" / "" */
-function stripPathPrefix(line: string): string {
-  const rest = line.slice(4);
-  if (rest === "/dev/null") return "";
-  return rest.replace(/^[ab]\//, "");
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/** Hunk ranges of a unified patch, in order. Everything but the `@@` headers is ignored. */
+export function parseHunkRanges(patch: string): HunkRange[] {
+  const ranges: HunkRange[] = [];
+  for (const line of patch.split("\n")) {
+    if (!line.startsWith("@@ ")) continue;
+    const match = HUNK_HEADER_RE.exec(line);
+    if (!match) continue;
+    ranges.push({
+      oldStart: Number(match[1]),
+      oldCount: match[2] === undefined ? 1 : Number(match[2]),
+      newStart: Number(match[3]),
+      newCount: match[4] === undefined ? 1 : Number(match[4]),
+    });
+  }
+  return ranges;
 }
 
 /**
- * 解析 `git diff` 的 unified diff 文本（可含多文件，`diff --git` 分隔）。
- * 与 untracked 文件的单文件 `git diff --no-index` 输出共用（格式一致，见 plan 025 landmine）。
- * ponytail: 不处理路径含 " b/" 字面量等极端转义边界，读取型视图，非严格 diff 引擎。
+ * A file's lines the way git counts them: a final line without a trailing newline is still a line,
+ * a trailing newline does not open another one. A CR before the newline is display noise and dropped.
  */
-export function parseUnifiedDiff(text: string): DiffFile[] {
-  if (!text.trim()) return [];
-  const lines = text.split("\n");
-  if (lines[lines.length - 1] === "") lines.pop(); // 尾随换行产生的空段
+export function splitLines(content: string): string[] {
+  if (content === "") return [];
+  const lines = content.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+}
 
-  const files: DiffFile[] = [];
-  const HEADER_RE = /^diff --git a\/(.+) b\/(.+)$/;
-  let i = 0;
-  while (i < lines.length) {
-    const headerMatch = HEADER_RE.exec(lines[i] ?? "");
-    if (!headerMatch) {
-      i++;
-      continue;
-    }
-    i++; // 跳过 "diff --git a/x b/y" 本身
+/**
+ * Walks the hunks over both sides and returns alternating equal/change segments covering every
+ * line. `-U0` headers name an empty range by the line *before* it, hence the `count === 0` case.
+ * Inputs that disagree (a race between the list and the content) are clamped rather than trusted:
+ * a surplus on one side becomes part of the change instead of misaligning everything after it.
+ */
+export function buildSegments(oldTotal: number, newTotal: number, hunks: HunkRange[]): DiffSegment[] {
+  const segments: DiffSegment[] = [];
+  let oldAt = 0;
+  let newAt = 0;
 
-    // binary diff 没有 "--- "/"+++ " 行，路径只能来自 header（rename 时 a/ b/ 不同名，取 b 侧）。
-    let oldPath = headerMatch[2]!;
-    let newPath = headerMatch[2]!;
-    let status: DiffFile["status"] = "modified";
-    let renamedFrom: string | undefined;
-    let binary = false;
-    const hunks: DiffHunk[] = [];
+  const pushEqualThenChange = (oldUntil: number, newUntil: number, oldEnd: number, newEnd: number) => {
+    const equal = Math.max(0, Math.min(oldUntil - oldAt, newUntil - newAt));
+    if (equal > 0) segments.push({ kind: "equal", oldStart: oldAt, newStart: newAt, length: equal });
+    const oldStart = oldAt + equal;
+    const newStart = newAt + equal;
+    const oldCount = Math.max(0, oldEnd - oldStart);
+    const newCount = Math.max(0, newEnd - newStart);
+    if (oldCount > 0 || newCount > 0) segments.push({ kind: "change", oldStart, oldCount, newStart, newCount });
+    oldAt = Math.max(oldAt, oldEnd);
+    newAt = Math.max(newAt, newEnd);
+  };
 
-    while (i < lines.length && !lines[i]!.startsWith("diff --git ")) {
-      const line = lines[i]!;
-      if (line.startsWith("new file mode")) {
-        status = "added";
-        i++;
-      } else if (line.startsWith("deleted file mode")) {
-        status = "deleted";
-        i++;
-      } else if (line.startsWith("rename from ")) {
-        status = "renamed";
-        renamedFrom = line.slice("rename from ".length);
-        i++;
-      } else if (line.startsWith("rename to ")) {
-        newPath = line.slice("rename to ".length);
-        i++;
-      } else if (line.startsWith("Binary files ") && line.endsWith(" differ")) {
-        binary = true;
-        i++;
-      } else if (line.startsWith("--- ")) {
-        oldPath = stripPathPrefix(line);
-        i++;
-      } else if (line.startsWith("+++ ")) {
-        newPath = stripPathPrefix(line);
-        i++;
-      } else if (line.startsWith("@@ ")) {
-        const header = line;
-        const match = HUNK_HEADER_RE.exec(header);
-        let oldLine = match ? Number(match[1]) : undefined;
-        let newLine = match ? Number(match[2]) : undefined;
-        i++;
-        const hunkLines: DiffLine[] = [];
-        while (i < lines.length && !lines[i]!.startsWith("@@ ") && !lines[i]!.startsWith("diff --git ")) {
-          const l = lines[i]!;
-          if (l.startsWith("\\")) {
-            i++; // "\ No newline at end of file"
-            continue;
-          }
-          if (l.startsWith("+")) {
-            hunkLines.push({ type: "add", content: l.slice(1), newLine });
-            if (newLine !== undefined) newLine++;
-          } else if (l.startsWith("-")) {
-            hunkLines.push({ type: "del", content: l.slice(1), oldLine });
-            if (oldLine !== undefined) oldLine++;
-          } else {
-            hunkLines.push({ type: "context", content: l.slice(1), oldLine, newLine });
-            if (oldLine !== undefined) oldLine++;
-            if (newLine !== undefined) newLine++;
-          }
-          i++;
-        }
-        hunks.push({ header, lines: hunkLines });
-      } else {
-        i++;
-      }
-    }
-
-    const path = newPath || oldPath;
-    if (!path) continue;
-    const additions = hunks.reduce((n, h) => n + h.lines.filter((l) => l.type === "add").length, 0);
-    const deletions = hunks.reduce((n, h) => n + h.lines.filter((l) => l.type === "del").length, 0);
-    files.push({ path, status, renamedFrom, binary, additions, deletions, hunks });
+  for (const hunk of hunks) {
+    const oldStart = clamp(hunk.oldCount === 0 ? hunk.oldStart : hunk.oldStart - 1, oldAt, oldTotal);
+    const newStart = clamp(hunk.newCount === 0 ? hunk.newStart : hunk.newStart - 1, newAt, newTotal);
+    const oldEnd = Math.min(oldTotal, oldStart + hunk.oldCount);
+    const newEnd = Math.min(newTotal, newStart + hunk.newCount);
+    pushEqualThenChange(oldStart, newStart, oldEnd, newEnd);
   }
-  return files;
+  pushEqualThenChange(oldTotal, newTotal, oldTotal, newTotal);
+  return segments;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+export function hasChanges(segments: DiffSegment[]): boolean {
+  return segments.some((segment) => segment.kind === "change");
+}
+
+export type GapRow = { kind: "gap"; id: string; hidden: number };
+/** Side-by-side: one row per line pair; a missing side is empty filler. */
+export type SplitRow = {
+  kind: "split";
+  left: { line: number; changed: boolean } | null;
+  right: { line: number; changed: boolean } | null;
+};
+/** Inline: deletions, then additions, then context, each with the line numbers it has. */
+export type InlineRow = { kind: "inline"; type: "context" | "del" | "add"; oldLine: number | null; newLine: number | null };
+export type DiffRow = GapRow | SplitRow | InlineRow;
+
+/** A stable id for an equal stretch, so its expanded state survives re-rendering. */
+export function gapId(segment: { oldStart: number; newStart: number }): string {
+  return `${segment.oldStart}:${segment.newStart}`;
+}
+
+/**
+ * Display rows for one file. Every equal stretch keeps `context` lines next to a change (none at
+ * the file's edges) and folds the rest into one gap row, unless its id is in `expanded`.
+ * Line numbers in rows are 0-based indexes into the side's lines.
+ */
+export function buildDiffRows(
+  segments: DiffSegment[],
+  mode: DiffMode,
+  expanded: ReadonlySet<string>,
+  context = CONTEXT_LINES,
+): DiffRow[] {
+  const rows: DiffRow[] = [];
+  const pushEqual = (oldLine: number, newLine: number) => {
+    if (mode === "split") rows.push({ kind: "split", left: { line: oldLine, changed: false }, right: { line: newLine, changed: false } });
+    else rows.push({ kind: "inline", type: "context", oldLine, newLine });
+  };
+
+  segments.forEach((segment, index) => {
+    if (segment.kind === "change") {
+      if (mode === "split") {
+        const pairs = Math.max(segment.oldCount, segment.newCount);
+        for (let offset = 0; offset < pairs; offset += 1) {
+          rows.push({
+            kind: "split",
+            left: offset < segment.oldCount ? { line: segment.oldStart + offset, changed: true } : null,
+            right: offset < segment.newCount ? { line: segment.newStart + offset, changed: true } : null,
+          });
+        }
+      } else {
+        for (let offset = 0; offset < segment.oldCount; offset += 1) {
+          rows.push({ kind: "inline", type: "del", oldLine: segment.oldStart + offset, newLine: null });
+        }
+        for (let offset = 0; offset < segment.newCount; offset += 1) {
+          rows.push({ kind: "inline", type: "add", oldLine: null, newLine: segment.newStart + offset });
+        }
+      }
+      return;
+    }
+
+    const id = gapId(segment);
+    const head = index === 0 ? 0 : context;
+    const tail = index === segments.length - 1 ? 0 : context;
+    const hidden = segment.length - head - tail;
+    if (hidden <= 0 || expanded.has(id)) {
+      for (let offset = 0; offset < segment.length; offset += 1) pushEqual(segment.oldStart + offset, segment.newStart + offset);
+      return;
+    }
+    for (let offset = 0; offset < head; offset += 1) pushEqual(segment.oldStart + offset, segment.newStart + offset);
+    rows.push({ kind: "gap", id, hidden });
+    for (let offset = segment.length - tail; offset < segment.length; offset += 1) {
+      pushEqual(segment.oldStart + offset, segment.newStart + offset);
+    }
+  });
+  return rows;
 }

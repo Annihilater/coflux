@@ -13,6 +13,8 @@ import {
   type ClientToServerPayload,
   type DeviceEnvelope,
   type DeviceEnvelopePayload,
+  type DeviceChangesFile,
+  type DeviceChangesList,
   type DeviceExecutorAssign,
   type DeviceExecutorHostRegistered,
   type DeviceExecutorReport,
@@ -68,6 +70,14 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 
 const HEARTBEAT_MAX_MISSES = 2;
+
+/** Error code of a request the device's worker is too old to understand (it answered an id-less
+ * `empty_payload` on the RPC lane while the request was in flight). */
+export const DAEMON_OUTDATED_CODE = "daemon_outdated";
+const DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新后才能查看变更";
+/** The changes view reads one file at a time; a file near the worker's 6 MB per-side cap on a slow
+ * link needs longer than the default RPC timeout. */
+const CHANGES_FILE_TIMEOUT_MS = 45_000;
 
 const CONTROL_DATA_GRACE_MS = 15_000;
 const LEASE_EXPIRY_MARGIN_MS = 2_000;
@@ -1473,7 +1483,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // 归给心跳，是新 client 对旧 daemon 唯一可能的归因；不归就会顺着默认路径落到
     // options.onError，变成每个心跳周期骚扰用户一次，且骚扰的恰恰是最该被安静降级的旧设备。
     // 归因后顺手关掉这条 route 的心跳：在旧 daemon 上它永远不会成功，再发只是白费往返。
-    if (route.pendingPing && (code === "empty_payload" || code === "unsupported_payload")
+    // Heartbeats only travel on the session lane, so only an error that arrived there can be the
+    // heartbeat's: an id-less error on the elevated lane belongs to an RPC request (below).
+    if (channel.lane === "session" && route.pendingPing && (code === "empty_payload" || code === "unsupported_payload")
       && (!requestId || requestId === route.pendingPing.requestId)) {
       route.pendingPing = undefined;
       route.rttMs = undefined;
@@ -1486,6 +1498,23 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       route.heartbeatTimer = undefined;
       if (route.lastPublished) publish(route, route.lastPublished.mode, route.lastPublished.detail);
       return true;
+    }
+    // A worker built before the changes RPCs (plan 20260929-changes-file-tree) cannot decode them:
+    // prost leaves the payload empty and the worker answers `empty_payload` without a request id.
+    // RPC requests only travel on the elevated lane, so an id-less `empty_payload` there is
+    // attributed to the changes requests in flight on that channel and fails them promptly with a
+    // code the view renders as "the daemon needs updating", instead of a 20 s timeout plus a stray
+    // global error.
+    if (!requestId && code === "empty_payload" && channel.lane === "elevated") {
+      const outdated = [...route.pendingRequests.values()].filter(
+        (pending) => pending.sentGeneration === channel.generation && isChangesRequest(pending.payload),
+      );
+      if (outdated.length > 0) {
+        for (const pending of outdated) {
+          finishPendingWithError(route, pending, new DeviceRouteError(DAEMON_OUTDATED_MESSAGE, DAEMON_OUTDATED_CODE));
+        }
+        return true;
+      }
     }
     if (requestId) {
       for (const session of route.sessions.values()) {
@@ -2219,6 +2248,30 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("fsReadResult", response);
   }
 
+  async function changesList(daemonId: string, workspaceId: string): Promise<DeviceChangesList> {
+    const response = await request(daemonId, DeviceScope.RPC, {
+      case: "changesListRequest",
+      value: { requestId: randomUUID(), workspaceId },
+    });
+    if (response.case === "changesList") return response.value;
+    throw unexpectedResponse("changesList", response);
+  }
+
+  async function changesFile(
+    daemonId: string,
+    workspaceId: string,
+    base: string,
+    path: string,
+    oldPath?: string,
+  ): Promise<DeviceChangesFile> {
+    const response = await request(daemonId, DeviceScope.RPC, {
+      case: "changesFileRequest",
+      value: { requestId: randomUUID(), workspaceId, base, path, oldPath },
+    }, CHANGES_FILE_TIMEOUT_MS);
+    if (response.case === "changesFile") return response.value;
+    throw unexpectedResponse("changesFile", response);
+  }
+
   async function fsWrite(daemonId: string, workspaceId: string, path: string, data: Uint8Array, temp: boolean): Promise<FsWriteResult> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "fsWrite",
@@ -2549,6 +2602,8 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     fsList,
     fsRead,
     fsWrite,
+    changesList,
+    changesFile,
     requestPorts,
     answerSecret,
     executePrepared,
@@ -2577,10 +2632,17 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "fsWrite":
     case "portsRequest":
     case "secretAnswer":
+    case "changesListRequest":
+    case "changesFileRequest":
       return payload.value.requestId;
     default:
       return undefined;
   }
+}
+
+/** Payloads added by plan 20260929-changes-file-tree: the ones an older worker decodes as empty. */
+function isChangesRequest(payload: RuntimeDevicePayload): boolean {
+  return payload.case === "changesListRequest" || payload.case === "changesFileRequest";
 }
 
 function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
@@ -2597,6 +2659,8 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "fsWriteResult":
     case "portsResult":
     case "secretAnswerAck":
+    case "changesList":
+    case "changesFile":
       return payload.value.requestId;
     case "error":
       return payload.value.requestId;

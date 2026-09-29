@@ -2878,6 +2878,49 @@ impl DeviceRuntime {
                     error,
                 })
             }
+            // Changes view (plan 20260929-changes-file-tree): the worker resolves the worktree and
+            // default branch itself, like every other workspace RPC.
+            device_envelope::Payload::ChangesListRequest(request) => {
+                let Some((root, default_branch)) =
+                    workspace_entry(&services.state, &request.workspace_id)
+                else {
+                    return device_error(
+                        Some(request.request_id),
+                        "workspace_unknown",
+                        "workspaceId 不属于本 daemon 当前清单",
+                    );
+                };
+                match crate::changes::list_changes(&root, &default_branch).await {
+                    Ok((base, files)) => {
+                        device_envelope::Payload::ChangesList(wire::DeviceChangesList {
+                            request_id: request.request_id,
+                            ok: true,
+                            error: None,
+                            base,
+                            files,
+                        })
+                    }
+                    Err(error) => device_envelope::Payload::ChangesList(wire::DeviceChangesList {
+                        request_id: request.request_id,
+                        ok: false,
+                        error: Some(error),
+                        base: String::new(),
+                        files: Vec::new(),
+                    }),
+                }
+            }
+            device_envelope::Payload::ChangesFileRequest(request) => {
+                let Some(root) = workspace_root(&services.state, &request.workspace_id) else {
+                    return device_error(
+                        Some(request.request_id),
+                        "workspace_unknown",
+                        "workspaceId 不属于本 daemon 当前清单",
+                    );
+                };
+                device_envelope::Payload::ChangesFile(
+                    crate::changes::read_change_file(&root, request).await,
+                )
+            }
             device_envelope::Payload::PortsRequest(request) => {
                 let alive = services.state.lock().unwrap().alive.clone();
                 let sessions =
@@ -3910,6 +3953,22 @@ fn workspace_root(state: &Arc<Mutex<WorkerState>>, workspace_id: &str) -> Option
         .map(|(path, _default_branch)| path.clone())
 }
 
+/// The workspace's worktree path and default branch, as the center's WorkspaceList states them.
+fn workspace_entry(
+    state: &Arc<Mutex<WorkerState>>,
+    workspace_id: &str,
+) -> Option<(String, String)> {
+    if workspace_id.is_empty() {
+        return None;
+    }
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get(workspace_id)
+        .cloned()
+}
+
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_FRAME_ID_BYTES
@@ -3998,6 +4057,8 @@ fn clear_request_id(payload: &mut device_envelope::Payload) {
         device_envelope::Payload::FsRead(value) => value.request_id.clear(),
         device_envelope::Payload::FsWrite(value) => value.request_id.clear(),
         device_envelope::Payload::PortsRequest(value) => value.request_id.clear(),
+        device_envelope::Payload::ChangesListRequest(value) => value.request_id.clear(),
+        device_envelope::Payload::ChangesFileRequest(value) => value.request_id.clear(),
         _ => {}
     }
 }
@@ -4023,6 +4084,8 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::FsReadResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsWriteResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::PortsResult(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::ChangesList(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::ChangesFile(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::Pong(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::Error(value) => {
             value.request_id = (!request_id.is_empty()).then(|| request_id.to_string())
@@ -4101,7 +4164,9 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::FsList(_)
         | device_envelope::Payload::FsRead(_)
         | device_envelope::Payload::FsWrite(_)
-        | device_envelope::Payload::PortsRequest(_) => Some(DeviceScope::Rpc),
+        | device_envelope::Payload::PortsRequest(_)
+        | device_envelope::Payload::ChangesListRequest(_)
+        | device_envelope::Payload::ChangesFileRequest(_) => Some(DeviceScope::Rpc),
         // Loopback tunnel: RPC already allows `exec` on the device, so reaching its loopback
         // ports grants nothing new. Opened/Failed are worker-initiated and stay unmapped here.
         device_envelope::Payload::LoopbackOpen(_)
@@ -4142,7 +4207,9 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::FsListed(_)
         | device_envelope::Payload::FsReadResult(_)
         | device_envelope::Payload::FsWriteResult(_)
-        | device_envelope::Payload::PortsResult(_) => Some(DeviceScope::Rpc),
+        | device_envelope::Payload::PortsResult(_)
+        | device_envelope::Payload::ChangesList(_)
+        | device_envelope::Payload::ChangesFile(_) => Some(DeviceScope::Rpc),
         device_envelope::Payload::LoopbackOpened(_)
         | device_envelope::Payload::LoopbackFailed(_)
         | device_envelope::Payload::LoopbackData(_)
@@ -4185,6 +4252,8 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::FsRead(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsWrite(value) => Some(value.request_id.clone()),
         device_envelope::Payload::PortsRequest(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::ChangesListRequest(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::ChangesFileRequest(value) => Some(value.request_id.clone()),
         device_envelope::Payload::Ping(value) => Some(value.request_id.clone()),
         // Only so a scope refusal reaches the waiting answer; answers never enter the call ledger.
         device_envelope::Payload::SecretAnswer(value) => Some(value.request_id.clone()),

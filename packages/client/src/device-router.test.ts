@@ -1219,6 +1219,92 @@ test("旧 daemon 对 ping 回 unsupported_payload 时静默降级，不弹错误
   h.router.destroy();
 });
 
+/* ===== Old worker vs the changes RPCs (plan 20260929-changes-file-tree) =====
+ * A worker built before the changes RPCs decodes them as an empty oneof and answers `empty_payload`
+ * without a request id. Heartbeats only travel on the session lane and RPC requests only on the
+ * elevated lane, so the lane the error arrives on decides who it belongs to. */
+
+test("an id-less empty_payload on the elevated lane fails the changes request and leaves the heartbeat alone", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const session = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(session);
+  await flush();
+  const ping = payloads(session).find((payload) => payload?.case === "ping");
+  if (ping?.case !== "ping") throw new Error("the session lane should send a ping once open");
+
+  const listing = h.router.changesList("daemon-1", "workspace-1");
+  const outcome = listing.then(() => undefined, (error: unknown) => error);
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  assert.ok(payloads(elevated).some((payload) => payload?.case === "changesListRequest"), "the list request goes out on the elevated lane");
+
+  const errorsBefore = h.errors.length;
+  // Exactly what an old worker sends: no request id.
+  h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  const error = await outcome;
+  assert.ok(error instanceof Error, "the list request must fail without waiting for the 20 s timeout");
+  assert.equal((error as Error & { code?: string }).code, "daemon_outdated");
+  assert.equal(h.errors.length, errorsBefore, "an outdated daemon is the view's hint, not a global error");
+
+  // The heartbeat did not claim it: the ping is still in flight, its pong still yields an RTT and
+  // the next period still sends a ping.
+  h.clock.advance(7);
+  h.adapter.emit(session, { case: "pong", value: { requestId: ping.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 7);
+  const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(15_000);
+  await flush();
+  assert.equal(payloads(session).filter((payload) => payload?.case === "ping").length, pingsBefore + 1, "heartbeats keep running");
+  release();
+  h.router.destroy();
+});
+
+test("an id-less empty_payload on the session lane is still the heartbeat's and does not touch a changes request", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const session = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(session);
+  await flush();
+  assert.ok(payloads(session).some((payload) => payload?.case === "ping"));
+
+  const listing = h.router.changesList("daemon-1", "workspace-1");
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  const request = payloads(elevated).find((payload) => payload?.case === "changesListRequest");
+  if (request?.case !== "changesListRequest") throw new Error("missing changesListRequest");
+
+  const errorsBefore = h.errors.length;
+  h.adapter.emit(session, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  assert.equal(h.errors.length, errorsBefore, "the heartbeat branch swallows it as before");
+
+  // The list request is untouched and still completes with its own response.
+  h.adapter.emit(elevated, {
+    case: "changesList",
+    value: { requestId: request.value.requestId, ok: true, base: "abc", files: [] },
+  });
+  const result = await listing;
+  assert.equal(result.base, "abc");
+
+  const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(60_000);
+  await flush();
+  assert.equal(payloads(session).filter((payload) => payload?.case === "ping").length, pingsBefore, "heartbeat marked unsupported, as before");
+  release();
+  h.router.destroy();
+});
+
 /* ===== 侧栏常开测量（plan 20260914）=====
  * 侧栏要对每台**在线但未选中**的设备显示延迟与路径，就必须真有一条连接——没有无连接的
  * 测量通道。所以 measureOnly 重新成为一等 session lane 需求：它拨 remote、跑心跳，但仍然
