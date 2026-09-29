@@ -205,7 +205,7 @@ function DesktopAttention({ client, bridge, selectedWorkspaceId }: { client: Cof
     for (const { workspaceId, entry } of entered) {
       // 正看着这个工作区且窗口有焦点：人已经在现场，只留角标不弹通知
       if (workspaceId === selectedWorkspaceId && document.hasFocus()) continue;
-      bridge.notify({ workspaceId, ...attentionNotificationText(entry) });
+      bridge.notify({ workspaceId, ...(entry.taskId ? { taskId: entry.taskId } : {}), ...attentionNotificationText(entry) });
     }
   }, [workspaces, daemons, tasks, sessionAgents, projects, bridge, selectedWorkspaceId, unreadCount]);
 
@@ -355,8 +355,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 设备详情的载体（plan 048）：该设备的 canonical 目录工作区 = isDirWorkspace 且
   // daemonId 匹配、createdAt 最早。与 server 侧 terminalCreate 幂等复用规则同构。
-  const canonicalDirWorkspaceOf = (daemonId: string): Workspace | null =>
-    workspaces
+  const canonicalDirWorkspaceOf = (daemonId: string, from: readonly Workspace[] = workspaces): Workspace | null =>
+    from
       .filter((workspace) => isDirWorkspace(workspace) && workspace.daemonId === daemonId)
       .sort((left, right) => left.createdAt - right.createdAt)[0] ?? null;
 
@@ -733,37 +733,45 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   /**
-   * Land on a terminal tab, wherever it lives. A terminal already in some group activates there and
-   * that group takes focus; one the layout does not hold yet lands in the focused group. The target
-   * workspace's layout is updated before it is selected, so its first render already shows the tab.
+   * Land on a terminal tab, wherever it lives — the one routine behind the palette and every
+   * notification click. A terminal already in some group activates there and that group takes
+   * focus; one the layout does not hold yet lands in the focused group. The target workspace's
+   * layout is updated before it is selected, so its first render already shows the tab. Any task
+   * the store still holds lands, whatever its status: an inbox notification may point at an exited
+   * terminal. Reads the store rather than render state, since notification listeners may hold an
+   * older closure. Returns whether it landed; the caller owns every fallback.
    */
-  function openPaletteTerminal(workspaceId: string, taskId: string) {
-    activateTaskByUser(workspaceId, taskId);
+  function landOnTask(taskId: string): boolean {
+    const state = client.store.getState();
+    const task = state.tasks.find((item) => item.id === taskId);
+    const workspace = task && state.workspaces.find((item) => item.id === task.workspaceId);
+    if (!task || !workspace) return false;
+    activateTaskByUser(workspace.id, taskId);
+    setSettingsOpen(false);
     // A directory workspace is the carrier of a device detail view, and selecting it directly
     // would leave the sidebar with nothing highlighted. Select the device instead — but only when
     // this really is the workspace that view resolves to, otherwise the panel would land elsewhere.
-    const workspace = workspaces.find((item) => item.id === workspaceId);
-    if (workspace && isDirWorkspace(workspace) && canonicalDirWorkspaceOf(workspace.daemonId)?.id === workspaceId) {
+    if (isDirWorkspace(workspace) && canonicalDirWorkspaceOf(workspace.daemonId, state.workspaces)?.id === workspace.id) {
       selectDevice(workspace.daemonId);
-      return;
+      return true;
     }
-    selectWorkspace(workspaceId);
-  }
-
-  function navigateNotificationTask(taskId: string): boolean {
-    const state = client.store.getState();
-    const task = state.tasks.find((item) => item.id === taskId);
-    if (!task || !state.workspaces.some((item) => item.id === task.workspaceId)) return false;
-    activateTaskByUser(task.workspaceId, taskId);
-    setSettingsOpen(false);
-    selectWorkspace(task.workspaceId);
+    selectWorkspace(workspace.id);
     return true;
   }
+  const landOnTaskRef = useRef(landOnTask);
+  landOnTaskRef.current = landOnTask;
 
-  // 点系统通知 → 主进程把窗口带到前台并回传工作区 id → 选中它（工作区已删则安静忽略）。
+  // The palette names the workspace too; the task alone decides where it lands.
+  function openPaletteTerminal(_workspaceId: string, taskId: string) {
+    landOnTask(taskId);
+  }
+
+  // 点系统通知 → 主进程把窗口带到前台、键盘交还工作台页，回传工作区 id 与等待中的终端 → 落到那个终端；
+  // 终端已不在则退回选中工作区（工作区也已删则安静忽略）。
   useEffect(() => {
-    return desktop.onFocusWorkspace((workspaceId) => {
-      if (client.store.getState().workspaces.some((workspace) => workspace.id === workspaceId)) selectWorkspace(workspaceId);
+    return desktop.onFocusWorkspace((target) => {
+      if (target.taskId && landOnTaskRef.current(target.taskId)) return;
+      if (client.store.getState().workspaces.some((workspace) => workspace.id === target.workspaceId)) selectWorkspace(target.workspaceId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
@@ -1590,7 +1598,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
           workspaceId={activeWorkspaceId}
           onOpenInBrowser={activeWorkspaceId ? (port) => openBrowserTab(activeWorkspaceId, localPortUrl(port)) : undefined}
         />
-        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={navigateNotificationTask} />
+        <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={landOnTask} />
       </div>
     </div>
   );

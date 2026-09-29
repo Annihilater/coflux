@@ -67,3 +67,19 @@ test("恢复后清零；恢复再进入才再次提醒；批准 → 提问视为
   assert.deepEqual(kindChanged.entered.map((item) => item.entry.kind), ["question"]);
   assert.equal(kindChanged.badgeCount, 1);
 });
+
+test("两个终端同时等待：快照的 taskId 与标题里的 agent 属于同一个任务", () => {
+  const tasks = [task("t-1", "ws-a", "s-1"), task("t-2", "ws-a", "s-2")];
+  const sessionAgents = {
+    "s-1": { ...agent("t-1", "question", "继续？"), agent: "codex" },
+    "s-2": { ...agent("t-2", "approval"), agent: "claude" },
+  };
+  const snapshot = attentionSnapshot({ ...base, tasks, sessionAgents });
+  assert.equal(snapshot["ws-a"].kind, "approval");
+  assert.equal(snapshot["ws-a"].agent, "claude");
+  assert.equal(snapshot["ws-a"].taskId, "t-2");
+
+  const questions = attentionSnapshot({ ...base, tasks, sessionAgents: { ...sessionAgents, "s-2": { ...agent("t-2", "question"), agent: "claude" } } });
+  assert.equal(questions["ws-a"].agent, "codex");
+  assert.equal(questions["ws-a"].taskId, "t-1");
+});
