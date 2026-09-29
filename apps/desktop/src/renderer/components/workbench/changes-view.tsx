@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, ChevronRight, FileDiff, LoaderCircle, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, FileDiff, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import type { CofluxClient, ExecResult } from "@coflux/client";
+import type { ChangedFile, CofluxClient } from "@coflux/client";
+import { ChangesDiffPane, type ChangeFileData, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
+import { ChangesFileTree } from "@/components/workbench/changes-file-tree";
 import { shouldRefreshChanges, type ChangesRefreshObservation } from "@/components/workbench/changes-refresh";
-import { highlightLines, resolveLang, type HighlightToken } from "@/components/workbench/diff-highlight";
-import { parseUnifiedDiff, type DiffFile } from "@/components/workbench/parse-diff";
-import { cn } from "@/lib/utils";
+import { ancestorKeys, buildChangesTree, pickSelection, treeFileOrder } from "@/components/workbench/changes-tree";
+import type { DiffMode } from "@/components/workbench/parse-diff";
+import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
+import { usePaneWidth } from "@/components/workbench/use-pane-width";
 
 type ChangesViewProps = {
   workspaceId: string;
@@ -19,82 +22,138 @@ type ChangesViewProps = {
   deletions: number;
 };
 
-/** exec 未致命失败但 exitCode 非 0（`--no-index` 恒如此）时仍视为成功，只有 relay 层失败才是错误。 */
-function execFailed(result: ExecResult): boolean {
-  return !result.ok;
+/* Plan 20260929-changes-file-tree: a file tree beside one file's diff. The list comes from one
+ * device RPC; only the selected file's content is fetched, against the base the list returned. */
+
+const TREE_WIDTH_KEY = "coflux_changes_tree_width";
+const DIFF_MODE_KEY = "coflux_changes_diff_mode";
+
+/** Large-diff guard, from the list entry, before anything is fetched: a file whose larger side or
+ * changed-line count crosses either threshold waits for 「仍然加载」. */
+const LARGE_FILE_BYTES = 1024 * 1024;
+const LARGE_CHANGED_LINES = 3000;
+/** The worker refuses sides above 6 MB (crates/worker/src/changes.rs `MAX_SIDE_BYTES`). */
+const MAX_FILE_BYTES = 6 * 1024 * 1024;
+
+type ListState = { base: string; files: ChangedFile[]; order: string[] };
+type ListError = { message: string; daemonOutdated: boolean };
+/** The last content request's outcome, tagged with what it was for. */
+type ContentState =
+  | { key: string; status: "loading" }
+  | { key: string; status: "error"; message: string }
+  | { key: string; status: "ready"; data: ChangeFileData };
+
+function readDiffMode(): DiffMode {
+  try {
+    return localStorage.getItem(DIFF_MODE_KEY) === "inline" ? "inline" : "split";
+  } catch {
+    return "split";
+  }
 }
 
-async function resolveBase(client: CofluxClient, workspaceId: string, defaultBranch: string): Promise<string> {
-  if (!defaultBranch.trim()) return "HEAD";
-  const result = await client.execInWorkspace(workspaceId, "git", ["merge-base", defaultBranch, "HEAD"]);
-  const sha = !execFailed(result) && result.exitCode === 0 ? result.stdout.trim() : "";
-  return sha || "HEAD";
+function persistDiffMode(mode: DiffMode) {
+  try {
+    localStorage.setItem(DIFF_MODE_KEY, mode);
+  } catch {
+    // Without localStorage the choice still holds for this session.
+  }
+}
+
+function isRenameOnly(file: ChangedFile): boolean {
+  return file.status === "renamed" && !file.binary && file.additions === 0 && file.deletions === 0;
+}
+
+function isLarge(file: ChangedFile): boolean {
+  return file.size > LARGE_FILE_BYTES || file.additions + file.deletions > LARGE_CHANGED_LINES;
+}
+
+/** Whether the right pane shows fetched content for this file at all. */
+function wantsContent(file: ChangedFile, forced: ReadonlySet<string>): boolean {
+  if (file.binary || isRenameOnly(file) || file.size > MAX_FILE_BYTES) return false;
+  return !isLarge(file) || forced.has(file.path);
+}
+
+function contentKey(base: string, file: ChangedFile): string {
+  return `${base}\0${file.oldPath ?? ""}\0${file.path}`;
+}
+
+function daemonOutdatedMessage(): string {
+  return "这台设备的 daemon 版本过旧，不支持查看变更。更新 daemon 后重试。";
 }
 
 export function ChangesView({ workspaceId, active, client, defaultBranch, additions, deletions }: ChangesViewProps) {
-  const [files, setFiles] = useState<DiffFile[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [list, setList] = useState<ListState | null>(null);
+  const [listError, setListError] = useState<ListError | null>(null);
+  const [listLoading, setListLoading] = useState(false);
   const [manualRevision, setManualRevision] = useState(0);
-  // 折叠态按路径保留：跨重拉不重置（本组件常驻挂载，随工作区切换隐藏而非卸载）。
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [highlighted, setHighlighted] = useState<Record<string, HighlightToken[][]>>({});
+  // This component stays mounted per workspace (hidden, not unmounted), so the selection, the
+  // folded folders and the forced large files survive closing and reopening the overlay.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const [forced, setForced] = useState<ReadonlySet<string>>(() => new Set());
+  const [content, setContent] = useState<ContentState | null>(null);
+  /** Bumped after every list load and on retry: the current file is refetched even if unchanged. */
+  const [contentRevision, setContentRevision] = useState(0);
+  const [mode, setMode] = useState<DiffMode>(readDiffMode);
+  const treeWidth = usePaneWidth({ storageKey: TREE_WIDTH_KEY, defaultWidth: 300, min: 180, max: 640 });
 
   const lastObservationRef = useRef<ChangesRefreshObservation | null>(null);
   const generationRef = useRef(0);
+  /** Set synchronously while a list request is in flight, so the content effect of the same commit
+   * does not fetch against the base that is about to be replaced. */
+  const listInFlightRef = useRef(false);
+  // A list load resolves after at least one commit, so these are current when it reads them.
+  const selectedRef = useRef<string | null>(null);
+  const listRef = useRef<ListState | null>(null);
+  useEffect(() => {
+    selectedRef.current = selectedPath;
+    listRef.current = list;
+  }, [selectedPath, list]);
 
-  async function load() {
+  const tree = useMemo(() => buildChangesTree(list?.files ?? []), [list]);
+  const selectedFile = useMemo(
+    () => (list && selectedPath ? (list.files.find((file) => file.path === selectedPath) ?? null) : null),
+    [list, selectedPath],
+  );
+  const totals = useMemo(() => {
+    let added = 0;
+    let deleted = 0;
+    for (const file of list?.files ?? []) {
+      added += file.additions;
+      deleted += file.deletions;
+    }
+    return { added, deleted };
+  }, [list]);
+
+  async function loadList() {
     const generation = ++generationRef.current;
-    setLoading(true);
-    setError(null);
+    listInFlightRef.current = true;
+    setListLoading(true);
     try {
-      const base = await resolveBase(client, workspaceId, defaultBranch);
+      const result = await client.listWorkspaceChanges(workspaceId);
       if (generation !== generationRef.current) return;
-
-      const [trackedDiff, untrackedList] = await Promise.all([
-        client.execInWorkspace(workspaceId, "git", ["-c", "core.quotepath=false", "diff", base]),
-        client.execInWorkspace(workspaceId, "git", ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"]),
-      ]);
-      if (generation !== generationRef.current) return;
-      if (execFailed(trackedDiff) || trackedDiff.exitCode !== 0) {
-        throw new Error(trackedDiff.error || trackedDiff.stderr.trim() || "获取变更失败");
+      if (!result.ok) {
+        setListError({ message: result.error, daemonOutdated: result.daemonOutdated });
+        return;
       }
-      if (execFailed(untrackedList) || untrackedList.exitCode !== 0) {
-        throw new Error(untrackedList.error || untrackedList.stderr.trim() || "获取未跟踪文件列表失败");
+      const nextTree = buildChangesTree(result.files);
+      const order = treeFileOrder(nextTree);
+      const previous = listRef.current;
+      const nextSelected = pickSelection(previous?.order ?? null, selectedRef.current, order);
+      setListError(null);
+      setList({ base: result.base, files: result.files, order });
+      setSelectedPath(nextSelected);
+      if (nextSelected) {
+        // Reveal a selection that sits in a folded folder.
+        const ancestors = ancestorKeys(nextTree, nextSelected);
+        setCollapsed((current) => (ancestors.some((key) => current.has(key)) ? new Set([...current].filter((key) => !ancestors.includes(key))) : current));
       }
-
-      const untrackedPaths = untrackedList.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-
-      // ponytail: 分批（每批 8 并发）而非一次性 Promise.all，避免大量未跟踪文件同时打几十上百个 relay。
-      const BATCH_SIZE = 8;
-      const untrackedDiffs: ExecResult[] = [];
-      for (let start = 0; start < untrackedPaths.length; start += BATCH_SIZE) {
-        const batch = untrackedPaths.slice(start, start + BATCH_SIZE);
-        const results = await Promise.all(
-          batch.map((path) =>
-            client.execInWorkspace(workspaceId, "git", ["-c", "core.quotepath=false", "diff", "--no-index", "--", "/dev/null", path]),
-          ),
-        );
-        if (generation !== generationRef.current) return;
-        untrackedDiffs.push(...results);
-      }
-
-      const trackedFiles = parseUnifiedDiff(trackedDiff.stdout);
-      // `--no-index` 有差异时 exit code 恒为 1（正常成功，非错误，见 plan 025 landmine）；
-      // 只有 relay 层失败（ok:false）才跳过该文件。
-      const untrackedFiles = untrackedDiffs
-        .filter((result) => !execFailed(result))
-        .flatMap((result) => parseUnifiedDiff(result.stdout));
-
-      setFiles([...trackedFiles, ...untrackedFiles]);
-    } catch (err) {
-      if (generation !== generationRef.current) return;
-      setError(err instanceof Error ? err.message : "获取变更失败");
+      setContentRevision((revision) => revision + 1);
     } finally {
-      if (generation === generationRef.current) setLoading(false);
+      if (generation === generationRef.current) {
+        listInFlightRef.current = false;
+        setListLoading(false);
+      }
     }
   }
 
@@ -103,51 +162,79 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     const shouldRefresh = shouldRefreshChanges(lastObservationRef.current, observation);
     lastObservationRef.current = observation;
     if (!shouldRefresh) return;
-    void load();
+    void loadList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision]);
 
-  // 逐文件异步高亮：整份 hunks 拼接成一份 code 一次性 tokenize，保留跨行语法上下文。
-  useEffect(() => {
-    if (!files) return;
-    const generation = generationRef.current;
-    setHighlighted({});
-    for (const file of files) {
-      if (file.binary) continue;
-      const allLines = file.hunks.flatMap((h) => h.lines);
-      const code = allLines.map((l) => l.content).join("\n");
-      const lang = resolveLang(file.path);
-      void highlightLines(code, lang).then((tokens) => {
-        if (generation !== generationRef.current) return;
-        setHighlighted((prev) => ({ ...prev, [file.path]: tokens }));
-      });
-    }
-  }, [files]);
+  const wantedKey = active && list && selectedFile && wantsContent(selectedFile, forced) ? contentKey(list.base, selectedFile) : null;
 
-  function toggleCollapse(path: string) {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
+  // Only the selected file is fetched, and only while the view is active: a background workspace
+  // never fetches. A refresh of the same file keeps its current content on screen until the new
+  // one arrives, so the pane keeps its scroll position.
+  useEffect(() => {
+    if (!wantedKey || !list || !selectedFile || listInFlightRef.current) return;
+    let cancelled = false;
+    const key = wantedKey;
+    setContent((current) => (current?.key === key && current.status === "ready" ? current : { key, status: "loading" }));
+    void client.readWorkspaceChangeFile(workspaceId, list.base, selectedFile.path, selectedFile.oldPath).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        const { ok: _ok, ...data } = result;
+        setContent({ key, status: "ready", data });
+      } else {
+        setContent({ key, status: "error", message: result.daemonOutdated ? daemonOutdatedMessage() : result.error });
+      }
     });
-  }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantedKey, contentRevision]);
 
   function requestRefresh() {
     setManualRevision((revision) => revision + 1);
   }
 
-  if (error) {
+  function setExpanded(key: string, expanded: boolean) {
+    setCollapsed((current) => {
+      if (expanded === !current.has(key)) return current;
+      const next = new Set(current);
+      if (expanded) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function changeMode(next: DiffMode) {
+    setMode(next);
+    persistDiffMode(next);
+  }
+
+  function paneState(file: ChangedFile): DiffPaneState {
+    if (file.binary) return { kind: "binary" };
+    if (isRenameOnly(file)) return { kind: "rename-only", from: file.oldPath ?? "" };
+    if (file.size > MAX_FILE_BYTES) return { kind: "large", canLoad: false };
+    if (isLarge(file) && !forced.has(file.path)) return { kind: "large", canLoad: true };
+    const key = list ? contentKey(list.base, file) : null;
+    if (!content || content.key !== key) return { kind: "loading" };
+    if (content.status === "ready") return { kind: "ready", data: content.data };
+    if (content.status === "error") return { kind: "error", message: content.message };
+    return { kind: "loading" };
+  }
+
+  if (listError) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-        <AlertCircle className="size-6 text-destructive" />
-        <p className="max-w-sm text-sm text-muted-foreground">{error}</p>
-        <Button label="重试" variant="secondary" size="sm" isLoading={loading} onClick={requestRefresh} />
+        <AlertCircle className={listError.daemonOutdated ? "size-6 text-warning" : "size-6 text-destructive"} />
+        <p className="max-w-sm text-sm text-muted-foreground">
+          {listError.daemonOutdated ? daemonOutdatedMessage() : listError.message}
+        </p>
+        <Button label="重试" variant="secondary" size="sm" isLoading={listLoading} onClick={requestRefresh} />
       </div>
     );
   }
 
-  if (files === null) {
+  if (list === null) {
     return (
       <div className="flex h-full items-center justify-center">
         <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
@@ -155,116 +242,58 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     );
   }
 
-  if (files.length === 0) {
+  if (list.files.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
         <FileDiff className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">这个工作区还没有变更</p>
-        <Button label="刷新" variant="ghost" size="sm" isLoading={loading} onClick={requestRefresh} />
+        <Button label="刷新" variant="ghost" size="sm" isLoading={listLoading} onClick={requestRefresh} />
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-border bg-background px-4 py-2 text-xs text-muted-foreground">
-        <span>{files.length} 个文件</span>
-        <span className="font-mono tabular-nums">
-          <span className="text-success">+{additions}</span> <span className="text-destructive">−{deletions}</span>
-        </span>
-        <IconButton
-          className="ml-auto"
-          label="刷新变更"
-          tooltip="刷新变更"
-          variant="ghost"
-          size="sm"
-          icon={<RefreshCw className="size-3.5" />}
-          isLoading={loading}
-          onClick={requestRefresh}
-        />
+    <div className="flex h-full min-h-0">
+      <div className="relative flex shrink-0 flex-col border-r border-border bg-background" style={{ width: treeWidth.width }}>
+        <div className="flex h-9 shrink-0 items-center gap-3 border-b border-border pl-3 pr-1.5 text-xs text-muted-foreground">
+          <span className="whitespace-nowrap">{list.files.length} 个文件</span>
+          <span className="min-w-0 truncate font-mono tabular-nums">
+            <span className="text-success">+{totals.added}</span> <span className="text-destructive">−{totals.deleted}</span>
+          </span>
+          <IconButton
+            className="ml-auto"
+            label="刷新变更"
+            tooltip="刷新变更"
+            variant="ghost"
+            size="sm"
+            icon={<RefreshCw className="size-3.5" />}
+            isLoading={listLoading}
+            onClick={requestRefresh}
+          />
+        </div>
+        <div className="min-h-0 flex-1">
+          <ChangesFileTree
+            nodes={tree}
+            collapsed={collapsed}
+            onSetExpanded={setExpanded}
+            selectedPath={selectedPath}
+            onSelect={setSelectedPath}
+            active={active}
+          />
+        </div>
+        <SidebarResizeHandle control={treeWidth} />
       </div>
-      <div className="flex flex-col gap-3 p-4">
-        {files.map((file) => {
-          const isCollapsed = collapsed.has(file.path);
-          const tokens = highlighted[file.path];
-          let lineIndex = 0;
-          return (
-            <div key={file.path} className="overflow-hidden rounded-md border border-border bg-card">
-              <button
-                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/40"
-                onClick={() => toggleCollapse(file.path)}
-              >
-                {isCollapsed ? (
-                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                ) : (
-                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                )}
-                <FileDiff className="size-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                  {file.path}
-                  {file.status === "renamed" && file.renamedFrom ? (
-                    <span className="ml-1.5 text-muted-foreground">← {file.renamedFrom}</span>
-                  ) : null}
-                </span>
-                {file.binary ? (
-                  <span className="shrink-0 text-2xs text-muted-foreground">二进制文件</span>
-                ) : (
-                  <span className="shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums">
-                    <span className="text-success">+{file.additions}</span>{" "}
-                    <span className="text-destructive">−{file.deletions}</span>
-                  </span>
-                )}
-              </button>
-              {!isCollapsed && !file.binary && file.status === "renamed" && file.hunks.length === 0 ? (
-                <div className="border-t border-border px-3 py-2 text-2xs text-muted-foreground">
-                  重命名自 {file.renamedFrom}
-                </div>
-              ) : null}
-              {!isCollapsed && !file.binary && file.hunks.length > 0 ? (
-                <div className="overflow-x-auto border-t border-border font-mono text-xs leading-5">
-                  {file.hunks.map((hunk, hunkIndex) => (
-                    <div key={hunkIndex}>
-                      <div className="bg-muted/40 px-3 py-1 text-2xs text-muted-foreground">{hunk.header}</div>
-                      {hunk.lines.map((line, lineInHunkIndex) => {
-                        const tokenLine = tokens?.[lineIndex];
-                        lineIndex++;
-                        return (
-                          <div
-                            key={lineInHunkIndex}
-                            className={cn(
-                              "flex px-3",
-                              line.type === "add" && "bg-success/10",
-                              line.type === "del" && "bg-destructive/10",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "mr-2 w-3 shrink-0 select-none",
-                                line.type === "add" && "text-success",
-                                line.type === "del" && "text-destructive",
-                              )}
-                            >
-                              {line.type === "add" ? "+" : line.type === "del" ? "-" : " "}
-                            </span>
-                            <span className="whitespace-pre">
-                              {tokenLine
-                                ? tokenLine.map((token, tokenIndex) => (
-                                    <span key={tokenIndex} style={token.color ? { color: token.color } : undefined}>
-                                      {token.content}
-                                    </span>
-                                  ))
-                                : line.content || " "}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
+      <div className="min-w-0 flex-1">
+        {selectedFile ? (
+          <ChangesDiffPane
+            file={selectedFile}
+            state={paneState(selectedFile)}
+            mode={mode}
+            onModeChange={changeMode}
+            onRetry={() => setContentRevision((revision) => revision + 1)}
+            onForceLoad={() => setForced((current) => new Set(current).add(selectedFile.path))}
+          />
+        ) : null}
       </div>
     </div>
   );
