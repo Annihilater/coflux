@@ -383,8 +383,8 @@ if (!app.requestSingleInstanceLock()) {
         bootstrap: () => ({ tailcat: tailcatEnabled, platform: process.platform, version: app.getVersion(), serverUrl, origin: DESKTOP_ORIGIN }),
         // Activate the window on click and hand the keyboard to the workbench page (a focused
         // built-in browser page would otherwise keep it, as in `sendCommand`), then route an inbox
-        // notification to its exact notification and terminal IDs, or attention to its
-        // workspace. The two kinds are told apart by `notificationId`, never `taskId`.
+        // notification to its exact notification and terminal IDs, or attention to its waiting
+        // terminal in its workspace. The two kinds are told apart by `notificationId`, never `taskId`.
         notify: (notification) => {
           if (notification.notificationId && mainWindow?.isFocused() && mainWindow.isVisible() && !mainWindow.isMinimized()) return;
           showWorkspaceNotification(notification, (target) => {
@@ -392,7 +392,7 @@ if (!app.requestSingleInstanceLock()) {
             if (!mainWindow || mainWindow.isDestroyed()) return;
             mainWindow.webContents.focus();
             if (target.notificationId) sendToRenderer(IPC.focusNotification, target);
-            else sendToRenderer(IPC.focusWorkspace, target.workspaceId);
+            else sendToRenderer(IPC.focusWorkspace, { workspaceId: target.workspaceId, ...(target.taskId ? { taskId: target.taskId } : {}) });
           });
         },
         setBadge: setDockBadge,

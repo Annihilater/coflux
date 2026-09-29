@@ -18,6 +18,7 @@ import type {
   DesktopExecutorSaveResult,
   DesktopExecutorSettings,
   DesktopExecutorTestResult,
+  DesktopFocusTarget,
   DesktopLoginOptions,
   DesktopLoginProvider,
   DesktopNotification,
@@ -91,7 +92,7 @@ const bridge: DesktopBridge = {
     return subscribe<DesktopNotification>(IPC.focusNotification, listener);
   },
   onFocusWorkspace(listener) {
-    return subscribe<string>(IPC.focusWorkspace, listener);
+    return subscribe<DesktopFocusTarget>(IPC.focusWorkspace, listener);
   },
   onCommand(listener) {
     return subscribe<DesktopCommand>(IPC.command, listener);

@@ -77,8 +77,9 @@ function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
 export type WorkspaceActivity =
   | { status: "idle" }
   | { status: "active"; agent?: string }
-  | { status: "approval"; agent: string }
-  | { status: "question"; agent: string; message?: string }
+  /** `taskId`: the waiting terminal whose agent is named here — the first approval (else question) in `tasks` order. */
+  | { status: "approval"; agent: string; taskId?: string }
+  | { status: "question"; agent: string; message?: string; taskId?: string }
   | { status: "done"; agent: string };
 
 /** 工作区活动聚合（对齐 Vibe Island）：纯粹转述 hook 上报，无阈值、无时钟推断。
@@ -91,21 +92,21 @@ export function workspaceActivity(
   sessionAgents: Record<string, SessionAgentState>,
 ): WorkspaceActivity {
   if (!daemonOnline) return { status: "idle" };
-  let approval: string | null = null;
-  let question: SessionAgentState | null = null;
+  let approval: { agent: string; taskId: string } | null = null;
+  let question: { entry: SessionAgentState; taskId: string } | null = null;
   let active: string | undefined;
   let done: string | null = null;
   for (const task of tasks) {
     if (task.workspaceId !== workspaceId || task.status !== TaskStatus.RUNNING || !task.sessionId) continue;
     const entry = sessionAgents[task.sessionId];
     if (entry === undefined) continue;
-    if (entry.state === "approval") approval = approval ?? entry.agent;
-    else if (entry.state === "question") question = question ?? entry;
+    if (entry.state === "approval") approval = approval ?? { agent: entry.agent, taskId: task.id };
+    else if (entry.state === "question") question = question ?? { entry, taskId: task.id };
     else if (entry.state === "active") active = active ?? entry.agent;
     else if (entry.state === "done" || entry.state === "waiting") done = done ?? entry.agent;
   }
-  if (approval !== null) return { status: "approval", agent: approval };
-  if (question !== null) return { status: "question", agent: question.agent, message: question.message || undefined };
+  if (approval !== null) return { status: "approval", agent: approval.agent, taskId: approval.taskId };
+  if (question !== null) return { status: "question", agent: question.entry.agent, message: question.entry.message || undefined, taskId: question.taskId };
   if (active !== undefined) return { status: "active", agent: active };
   if (done !== null) return { status: "done", agent: done };
   return { status: "idle" };

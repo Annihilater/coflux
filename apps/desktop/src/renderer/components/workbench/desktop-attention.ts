@@ -14,6 +14,8 @@ export type AttentionEntry = {
   message?: string;
   projectName?: string;
   branch: string;
+  /** The waiting terminal: the same task whose agent is named above, so a click lands where the title points. */
+  taskId?: string;
 };
 
 /** workspaceId → 等待态；不在其中的工作区 = 不需要人 */
@@ -37,6 +39,7 @@ export function attentionSnapshot(input: {
       message: activity.status === "question" ? activity.message : undefined,
       projectName: input.projects.find((project) => project.id === workspace.projectId)?.name,
       branch: workspace.branch,
+      taskId: activity.taskId,
     };
   }
   return snapshot;

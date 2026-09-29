@@ -112,6 +112,9 @@ export type DesktopNotification = {
   body: string;
 };
 
+/** Where a clicked attention notification lands: the waiting terminal, else its workspace. */
+export type DesktopFocusTarget = Pick<DesktopNotification, "workspaceId" | "taskId">;
+
 /**
  * Built-in browser tabs (plan 20260924-desktop-browser-tab). Whether a workspace's `localhost` is
  * this Mac (`local`) or another device (`remote`) is decided by the main process from the local
@@ -212,7 +215,8 @@ export type DesktopBridge = {
    */
   writeClipboard(text: string): void;
   onFocusNotification(listener: (notification: DesktopNotification) => void): () => void;
-  onFocusWorkspace(listener: (workspaceId: string) => void): () => void;
+  /** An attention notification was clicked: its workspace and, when known, the waiting terminal. */
+  onFocusWorkspace(listener: (target: DesktopFocusTarget) => void): () => void;
   onCommand(listener: (command: DesktopCommand) => void): () => void;
   checkForUpdates(): void;
   installUpdate(): void;
