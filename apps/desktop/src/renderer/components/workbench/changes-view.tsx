@@ -125,7 +125,9 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     return { added, deleted };
   }, [list]);
 
-  async function loadList() {
+  /** `opening`: the overlay was just opened. A vanished selection then falls back to the first file;
+   * during a refresh while open it moves to its neighbour in tree order instead. */
+  async function loadList(opening: boolean) {
     const generation = ++generationRef.current;
     listInFlightRef.current = true;
     setListLoading(true);
@@ -138,8 +140,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       }
       const nextTree = buildChangesTree(result.files);
       const order = treeFileOrder(nextTree);
-      const previous = listRef.current;
-      const nextSelected = pickSelection(previous?.order ?? null, selectedRef.current, order);
+      const previousOrder = opening ? null : (listRef.current?.order ?? null);
+      const nextSelected = pickSelection(previousOrder, selectedRef.current, order);
       setListError(null);
       setList({ base: result.base, files: result.files, order });
       setSelectedPath(nextSelected);
@@ -159,10 +161,11 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
 
   useEffect(() => {
     const observation = { active, workspaceId, defaultBranch, additions, deletions, manualRevision };
-    const shouldRefresh = shouldRefreshChanges(lastObservationRef.current, observation);
+    const previous = lastObservationRef.current;
+    const shouldRefresh = shouldRefreshChanges(previous, observation);
     lastObservationRef.current = observation;
     if (!shouldRefresh) return;
-    void loadList();
+    void loadList(!previous?.active);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision]);
 
