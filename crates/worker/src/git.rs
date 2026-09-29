@@ -3,7 +3,7 @@
 use std::process::Stdio;
 use tokio::process::Command;
 
-pub(crate) async fn run_git(args: &[&str]) -> (bool, String, String) {
+async fn run_git(args: &[&str]) -> (bool, String, String) {
     match Command::new("git")
         .args(args)
         .stdin(Stdio::null())

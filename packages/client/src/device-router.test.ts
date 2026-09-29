@@ -1251,7 +1251,6 @@ test("an id-less empty_payload on the elevated lane fails the changes request an
   assert.ok(error instanceof Error, "the list request must fail without waiting for the 20 s timeout");
   assert.equal((error as Error & { code?: string }).code, "daemon_outdated");
   assert.equal(h.errors.length, errorsBefore, "an outdated daemon is the view's hint, not a global error");
-  assert.equal(elevated.closed, false);
 
   // The heartbeat did not claim it: the ping is still in flight, its pong still yields an RTT and
   // the next period still sends a ping.

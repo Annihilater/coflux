@@ -31,6 +31,21 @@ const STATUS_TONE: Record<ChangedFileStatus, string> = {
   deleted: "text-destructive",
 };
 
+/**
+ * An editable element the user can see. A terminal's input textarea never counts: the overlay
+ * covers the terminals, and a covered element still passes `checkVisibility()`.
+ */
+function isVisibleTypingTarget(element: Element | null): boolean {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.closest("[data-terminal-host]")) return false;
+  const editable =
+    element instanceof HTMLTextAreaElement ||
+    (element instanceof HTMLInputElement && !["button", "checkbox", "radio", "submit", "reset", "range", "color", "file"].includes(element.type)) ||
+    element.isContentEditable;
+  if (!editable) return false;
+  return typeof element.checkVisibility === "function" ? element.checkVisibility() : element.offsetParent !== null;
+}
+
 const INDENT_PX = 12;
 const BASE_PADDING_PX = 8;
 
@@ -58,13 +73,13 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
     row?.scrollIntoView({ block: "nearest" });
   }, [focusedKey, rows]);
 
-  // Opening the overlay hands the keyboard to the tree when nothing else holds it (the terminal
-  // lets go of focus when the overlay covers it).
+  // Opening the overlay hands the keyboard to the tree — including when it was opened from the
+  // dock's 「变更」 button, which holds focus at that moment — unless the user is typing into
+  // something still on screen.
   useEffect(() => {
     if (!active) return;
     const frame = requestAnimationFrame(() => {
-      const current = document.activeElement;
-      if (current && current !== document.body) return;
+      if (isVisibleTypingTarget(document.activeElement)) return;
       containerRef.current?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
