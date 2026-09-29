@@ -1305,6 +1305,118 @@ test("an id-less empty_payload on the session lane is still the heartbeat's and 
   h.router.destroy();
 });
 
+/* ===== Old worker vs executor transcript viewing (plan 20260929-executor-pip) =====
+ * A transcript subscription is a long-lived frame outside pendingRequests, so the router keeps its
+ * own count of viewer frames an old worker would answer with a request-id-less `empty_payload`.
+ * That attribution runs ahead of the heartbeat's and must never mark the heartbeat unsupported. */
+
+test("an id-less empty_payload answering a transcript subscription never sets heartbeatUnsupported", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const session = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(session);
+  await flush();
+  const ping = payloads(session).find((payload) => payload?.case === "ping");
+  if (ping?.case !== "ping") throw new Error("the session lane should send a ping once open");
+  // The worker answers the ping: it is known to understand heartbeats before any viewer frame.
+  h.clock.advance(3);
+  h.adapter.emit(session, { case: "pong", value: { requestId: ping.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 3);
+
+  const events: string[] = [];
+  const unsubscribe = h.router.subscribeExecutorTranscript("daemon-1", "run-1", 0n, (event) => events.push(event.kind));
+  await flush();
+  const subscribe = payloads(session).find((payload) => payload?.case === "executorTranscriptSubscribe");
+  if (subscribe?.case !== "executorTranscriptSubscribe") throw new Error("the subscription goes out on the session lane");
+  assert.equal(subscribe.value.runId, "run-1");
+
+  const errorsBefore = h.errors.length;
+  // Exactly what an old worker sends: no request id, on the session lane.
+  h.adapter.emit(session, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  assert.deepEqual(events, ["unsupported"], "the subscriber learns the route cannot show a transcript");
+  assert.equal(h.errors.length, errorsBefore, "an outdated worker is the card's state, not a global error");
+
+  // The heartbeat keeps running: the next period still sends a ping and its pong still lands.
+  const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(15_000);
+  await flush();
+  const pings = payloads(session).filter((payload) => payload?.case === "ping");
+  assert.equal(pings.length, pingsBefore + 1, "heartbeats keep running");
+  const latest = pings.at(-1);
+  if (latest?.case !== "ping") throw new Error("missing ping");
+  h.clock.advance(4);
+  h.adapter.emit(session, { case: "pong", value: { requestId: latest.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 4, "the pong still yields an RTT: the heartbeat was never marked unsupported");
+
+  // A stop on this generation is not even sent: the worker cannot understand it.
+  assert.equal(h.router.stopExecutorRun("daemon-1", "run-1"), false);
+  unsubscribe();
+  release();
+  h.router.destroy();
+});
+
+test("a transcript subscription resumes from its last seq on a new channel and ends with the run", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const first = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(first);
+  await flush();
+
+  const events: Array<{ kind: string; seqs?: bigint[]; terminal?: string }> = [];
+  h.router.subscribeExecutorTranscript("daemon-1", "run-1", 0n, (event) => {
+    if (event.kind === "fragments") events.push({ kind: event.kind, seqs: event.fragments.map((fragment) => fragment.seq) });
+    else if (event.kind === "ended") events.push({ kind: event.kind, terminal: event.terminal });
+    else events.push({ kind: event.kind });
+  });
+  await flush();
+  const subscribe = payloads(first).find((payload) => payload?.case === "executorTranscriptSubscribe");
+  if (subscribe?.case !== "executorTranscriptSubscribe") throw new Error("missing subscribe");
+  assert.equal(subscribe.value.fromSeq, 0n);
+
+  h.adapter.emit(first, {
+    case: "executorTranscript",
+    value: { runId: "run-1", fragments: [{ seq: 1n, kind: 1, text: "a" }, { seq: 2n, kind: 1, text: "b" }], omitted: true },
+  });
+  await flush();
+  assert.deepEqual(events, [{ kind: "fragments", seqs: [1n, 2n] }]);
+
+  // A stop goes out on the same lane once the worker has proven itself.
+  assert.equal(h.router.stopExecutorRun("daemon-1", "run-1"), true);
+  assert.ok(payloads(first).some((payload) => payload?.case === "executorStop"));
+
+  // The lane drops (a viewer frame fails to send) and comes back: the subscription is re-sent
+  // from seq 2, not from the start.
+  first.sendOk = false;
+  assert.equal(h.router.stopExecutorRun("daemon-1", "run-1"), false);
+  assert.equal(first.closed, true);
+  h.clock.advance(350);
+  await flush();
+  const second = latestOpen(h.adapter, "direct");
+  assert.notEqual(second, first, "a new session-lane channel was opened");
+  h.adapter.resolve(second);
+  await flush();
+  const resumed = payloads(second).find((payload) => payload?.case === "executorTranscriptSubscribe");
+  if (resumed?.case !== "executorTranscriptSubscribe") throw new Error("the subscription must be re-sent on the new channel");
+  assert.equal(resumed.value.fromSeq, 2n);
+
+  h.adapter.emit(second, {
+    case: "executorTranscript",
+    value: { runId: "run-1", fragments: [{ seq: 3n, kind: 2, tool: "bash", argument: "ls", output: "x" }], omitted: false },
+  });
+  h.adapter.emit(second, { case: "executorTranscript", value: { runId: "run-1", fragments: [], ended: true, terminal: "cancelled" } });
+  await flush();
+  assert.deepEqual(events.slice(1), [{ kind: "fragments", seqs: [3n] }, { kind: "ended", terminal: "cancelled" }]);
+  release();
+  h.router.destroy();
+});
+
 /* ===== 侧栏常开测量（plan 20260914）=====
  * 侧栏要对每台**在线但未选中**的设备显示延迟与路径，就必须真有一条连接——没有无连接的
  * 测量通道。所以 measureOnly 重新成为一等 session lane 需求：它拨 remote、跑心跳，但仍然

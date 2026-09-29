@@ -23,6 +23,8 @@ import {
   type DeviceExecutorAssign,
   type DeviceExecutorHostRegistered,
   type DeviceExecutorReport,
+  type DeviceExecutorTranscript,
+  type DeviceExecutorTranscriptFragment,
   type DevicePortsResult,
   type DeviceSessionCatalog,
   type FsListed,
@@ -355,6 +357,19 @@ interface DeviceRoute {
   /** Further `empty_payload` replies still expected on that generation for annotation requests that
    * were already failed together with the first one; swallowed, never shown as a generic error. */
   annotationStrayErrors?: { generation: bigint; count: number };
+  /** Executor transcript subscriptions by run id (plan 20260929-executor-pip). */
+  executorSubscriptions: Map<string, ExecutorSubscription>;
+  /** Executor viewer frames (subscribe / unsubscribe / stop) sent on a session-lane generation
+   * whose worker is not yet known to understand them: each one may come back from an old worker as
+   * one request-id-less `empty_payload`, and this is how many such replies are still expected.
+   * Their attribution runs ahead of the heartbeat's and never touches `heartbeatUnsupported`. */
+  executorViewerFrames?: { generation: bigint; count: number };
+  /** A DeviceExecutorTranscript arrived on this generation: the worker understands the viewer
+   * frames, so no `empty_payload` on it can be theirs. */
+  executorSupportedGeneration?: bigint;
+  /** The generation on which the worker answered a viewer frame with `empty_payload`: transcripts
+   * are unsupported on this route until a new channel (a hot-upgraded worker, a reconnect). */
+  executorUnsupportedGeneration?: bigint;
   /** publish 过的最后一组 (mode, detail)：心跳只更新 rtt，需要照原样重发一次状态。 */
   lastPublished?: { mode: DeviceTransportMode; detail: string };
   retainCount: number;
@@ -374,6 +389,29 @@ interface ControlWaiter<T> {
   reject: (error: Error) => void;
   timer: TimerHandle;
   abort?: () => void;
+}
+
+/** What a transcript subscriber receives (plan 20260929-executor-pip). */
+export type ExecutorTranscriptEvent =
+  /** Backlog or live fragments, in seq order; `omitted` = the worker's buffer cap already dropped
+   * fragments older than the first one here. */
+  | { kind: "fragments"; fragments: DeviceExecutorTranscript["fragments"]; omitted: boolean }
+  /** The run reached a terminal state; the subscription is over. */
+  | { kind: "ended"; terminal: string; summary: string; error: string }
+  /** This device's worker predates transcript viewing (its own reply, never a timeout): the card
+   * shows metadata only. Delivered at most once per channel generation. */
+  | { kind: "unsupported" };
+
+/** One transcript subscription: re-sent on every new session-lane generation from the last seq it
+ * has, so a reconnect resumes rather than replays. Outside `pendingRequests` on purpose — it is a
+ * long-lived frame with no request id and no timeout. */
+interface ExecutorSubscription {
+  runId: string;
+  /** The highest seq received; the next subscribe asks for what follows it. */
+  fromSeq: bigint;
+  listener: (event: ExecutorTranscriptEvent) => void;
+  sentGeneration?: bigint;
+  unsupportedGeneration?: bigint;
 }
 
 class DeviceRouteError extends Error {
@@ -531,6 +569,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
         sessions: new Map(),
         pendingRequests: new Map(),
         pendingOperations: new Map(),
+        executorSubscriptions: new Map(),
         localFailure: "",
         grantLoaded: !options.enableLocalTransport,
         directRetryAttempts: 0,
@@ -1145,6 +1184,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       }
     }
     flushLane(route, "session");
+    flushExecutorSubscriptions(route);
     sendCatalogRequest(route);
     maintainCatalogTimer(route);
     maintainHeartbeatTimer(route);
@@ -1461,6 +1501,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
       case "executorReportAck":
         options.onExecutorReportAck?.(route.daemonId, payload.value.runId);
         break;
+      case "executorTranscript":
+        handleExecutorTranscript(route, channel, payload.value);
+        break;
       case "pong": {
         // 心跳不走 pendingRequests（那条路带 demand 语义，会把按需拨号的连接钉住不放），
         // 故在这里自行配对：只认最后发出的那一发，迟到的旧 pong 直接丢。
@@ -1513,6 +1556,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // Browser annotations (plan 20260929-browser-annotations) are attributed the same way, first:
     // an older worker answers each annotation request with a request-id-less `empty_payload`.
     if (!requestId && code === "empty_payload" && attributeAnnotationsUnsupported(route, channel)) return true;
+    // Executor viewer frames (plan 20260929-executor-pip) are attributed the same way, ahead of the
+    // heartbeat: they are long-lived frames outside pendingRequests, so the route keeps its own
+    // count of the ones an old worker would still answer. Never sets heartbeatUnsupported.
+    if (!requestId && code === "empty_payload" && attributeExecutorUnsupported(route, channel)) return true;
     // Heartbeats only travel on the session lane, so only an error that arrived there can be the
     // heartbeat's: an id-less error on the elevated lane belongs to an RPC request (below).
     if (channel.lane === "session" && route.pendingPing && (code === "empty_payload" || code === "unsupported_payload")
@@ -1648,6 +1695,143 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function annotationsUnsupportedNow(route: DeviceRoute): boolean {
     const generation = route.annotationsUnsupportedGeneration;
     return generation !== undefined && route.sessionLane.active?.generation === generation;
+  }
+
+  /* ===== Executor transcript viewers (plan 20260929-executor-pip) ===== */
+
+  /** Whether a request-id-less `empty_payload` on the session lane belongs to an executor viewer
+   * frame in flight on this channel. Under the same confirmed-heartbeat rule as annotations: when a
+   * ping is also in flight on a worker not yet known to answer pings, the reply is left to the
+   * heartbeat. A worker that already sent a transcript on this generation cannot be the author. */
+  function attributeExecutorUnsupported(route: DeviceRoute, channel: DeviceChannel): boolean {
+    if (channel.lane !== "session") return false;
+    if (route.executorSupportedGeneration === channel.generation) return false;
+    const frames = route.executorViewerFrames;
+    if (!frames || frames.generation !== channel.generation || frames.count <= 0) return false;
+    if (route.pendingPing && !route.heartbeatConfirmed) return false;
+    frames.count -= 1;
+    route.executorUnsupportedGeneration = channel.generation;
+    for (const subscription of route.executorSubscriptions.values()) {
+      if (subscription.sentGeneration !== channel.generation || subscription.unsupportedGeneration === channel.generation) continue;
+      subscription.unsupportedGeneration = channel.generation;
+      subscription.listener({ kind: "unsupported" });
+    }
+    return true;
+  }
+
+  function executorUnsupportedOn(route: DeviceRoute, channel: DeviceChannel): boolean {
+    return route.executorUnsupportedGeneration === channel.generation;
+  }
+
+  /** Send one viewer frame on the active session lane, counting it as a possible `empty_payload`
+   * source until the worker has proven itself on this generation. */
+  function sendExecutorViewerFrame(route: DeviceRoute, channel: DeviceChannel, payload: DeviceEnvelopePayload): boolean {
+    if (!sendOn(channel, normalizePayload(payload))) {
+      loseChannel(route, channel, "executor viewer frame 发送失败");
+      return false;
+    }
+    if (route.executorSupportedGeneration !== channel.generation) {
+      const frames = route.executorViewerFrames;
+      if (frames && frames.generation === channel.generation) frames.count += 1;
+      else route.executorViewerFrames = { generation: channel.generation, count: 1 };
+    }
+    return true;
+  }
+
+  /** (Re)send every subscription not yet sent on the active session-lane generation. */
+  function flushExecutorSubscriptions(route: DeviceRoute): void {
+    const channel = route.sessionLane.active;
+    if (!channel || executorUnsupportedOn(route, channel)) return;
+    for (const subscription of route.executorSubscriptions.values()) {
+      if (subscription.sentGeneration === channel.generation) continue;
+      if (!channelCovers(channel, DeviceScope.SESSION_READ)) return;
+      subscription.sentGeneration = channel.generation;
+      if (!sendExecutorViewerFrame(route, channel, {
+        case: "executorTranscriptSubscribe",
+        value: { runId: subscription.runId, fromSeq: subscription.fromSeq },
+      })) return;
+    }
+  }
+
+  function handleExecutorTranscript(route: DeviceRoute, channel: DeviceChannel, transcript: DeviceExecutorTranscript): void {
+    // The worker answered a viewer frame: it understands them, so any later id-less error on this
+    // generation is not theirs.
+    route.executorSupportedGeneration = channel.generation;
+    route.executorViewerFrames = undefined;
+    const subscription = route.executorSubscriptions.get(transcript.runId);
+    if (!subscription) return;
+    if (transcript.fragments.length > 0 || transcript.omitted) {
+      for (const fragment of transcript.fragments) {
+        if (fragment.seq > subscription.fromSeq) subscription.fromSeq = fragment.seq;
+      }
+      subscription.listener({ kind: "fragments", fragments: transcript.fragments, omitted: transcript.omitted });
+    }
+    if (transcript.ended) {
+      dropExecutorSubscription(route, subscription);
+      subscription.listener({ kind: "ended", terminal: transcript.terminal, summary: transcript.summary, error: transcript.error });
+    }
+  }
+
+  function dropExecutorSubscription(route: DeviceRoute, subscription: ExecutorSubscription): void {
+    if (route.executorSubscriptions.get(subscription.runId) !== subscription) return;
+    route.executorSubscriptions.delete(subscription.runId);
+    route.transientDemand = Math.max(0, route.transientDemand - 1);
+    releaseIdle(route);
+  }
+
+  /**
+   * Follow a run's transcript on the device that hosts it: the backlog after `fromSeq` (0 = all
+   * the worker still has), then live fragments, then the end. Needs SESSION_READ on the session
+   * lane and nothing else. The route is held for the subscription's life, and a reconnect re-sends
+   * the subscription from the last seq received. Returns the unsubscribe function.
+   */
+  function subscribeExecutorTranscript(
+    daemonId: string,
+    runId: string,
+    fromSeq: bigint,
+    listener: (event: ExecutorTranscriptEvent) => void,
+  ): () => void {
+    const route = routeFor(daemonId);
+    const previous = route.executorSubscriptions.get(runId);
+    if (previous) dropExecutorSubscription(route, previous);
+    const subscription: ExecutorSubscription = { runId, fromSeq, listener };
+    route.executorSubscriptions.set(runId, subscription);
+    route.transientDemand += 1;
+    const channel = route.sessionLane.active;
+    if (channel) {
+      if (executorUnsupportedOn(route, channel)) {
+        subscription.unsupportedGeneration = channel.generation;
+        listener({ kind: "unsupported" });
+      } else flushExecutorSubscriptions(route);
+    } else {
+      void ensureSessionLane(route).catch(() => scheduleRecovery(route, route.sessionLane));
+    }
+    return () => {
+      if (route.executorSubscriptions.get(runId) !== subscription) return;
+      const active = route.sessionLane.active;
+      if (active && subscription.sentGeneration === active.generation && !executorUnsupportedOn(route, active)) {
+        sendExecutorViewerFrame(route, active, { case: "executorTranscriptUnsubscribe", value: { runId } });
+      }
+      dropExecutorSubscription(route, subscription);
+    };
+  }
+
+  /** Cancel a run through the worker's ordinary cancel path. Needs SESSION_CONTROL on the active
+   * session lane; false when there is no such lane right now (nothing is queued — the card's stop
+   * is a click, and the user can click again). */
+  function stopExecutorRun(daemonId: string, runId: string): boolean {
+    const route = routeFor(daemonId);
+    const channel = route.sessionLane.active;
+    if (!channelCovers(channel, DeviceScope.SESSION_CONTROL) || executorUnsupportedOn(route, channel)) return false;
+    return sendExecutorViewerFrame(route, channel, { case: "executorStop", value: { runId } });
+  }
+
+  /** The desktop host forwards one transcript fragment of a run it executes (plan
+   * 20260929-executor-pip); same lane and same loopback rule as its reports. */
+  function sendExecutorTranscriptFragment(daemonId: string, fragment: DeviceExecutorTranscriptFragment): boolean {
+    const channel = routeFor(daemonId).sessionLane.active;
+    if (!channel) return false;
+    return sendOn(channel, normalizePayload({ case: "executorTranscriptFragment", value: fragment }));
   }
 
   function handleAttached(route: DeviceRoute, channel: DeviceChannel, attached: Extract<RuntimeDevicePayload, { case: "sessionAttached" }>["value"]): void {
@@ -2693,6 +2877,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     }
     route.pendingRequests.clear();
     route.pendingOperations.clear();
+    // Transcript subscriptions die with the route; the subscriber's own unsubscribe becomes a no-op.
+    route.transientDemand = Math.max(0, route.transientDemand - route.executorSubscriptions.size);
+    route.executorSubscriptions.clear();
+    route.executorViewerFrames = undefined;
   }
 
   function rejectControlWaiters(message: string): void {
@@ -2718,6 +2906,9 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     sendInput,
     sendExecutorHostRegister,
     sendExecutorReport,
+    sendExecutorTranscriptFragment,
+    subscribeExecutorTranscript,
+    stopExecutorRun,
     resize,
     stopSession,
     suspendSession,

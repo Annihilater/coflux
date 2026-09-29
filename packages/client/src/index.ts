@@ -32,6 +32,8 @@ export {
   type SecretRequestState,
   type SecretAnswer,
   type SecretAnswerResult,
+  type ExecutorRunState,
+  type ExecutorTranscriptEvent,
   type WorkspaceActivity,
   type AnnotationSummaryState,
   type AnnotationFailure,

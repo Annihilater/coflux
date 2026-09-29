@@ -67,6 +67,27 @@ export type SecretAnswerResult =
 
 export type SecretAnswer = { kind: "provide"; value: string } | { kind: "decline" } | { kind: "cancel" };
 
+/** One live executor run (plan 20260929-executor-pip), bound to the terminal (`sessionId` /
+ * `taskId`) whose agent ran `coflux executor run`. Metadata only: the transcript arrives through
+ * `subscribeExecutorTranscript`. `title` is the agent's text (or its prompt's first line) and must
+ * be presented as such. Replaced per device by `executorRunsUpdated`. */
+export type ExecutorRunState = {
+  runId: string;
+  daemonId: string;
+  sessionId: string;
+  taskId: string;
+  title: string;
+  write: boolean;
+  phase: "queued" | "accepted" | "running";
+  submittedAt: number;
+  /** 0 until the host reported the run running. */
+  startedAt: number;
+  /** The host executing the run is not connected to the worker right now. */
+  hostLost: boolean;
+};
+
+export type { ExecutorTranscriptEvent };
+
 function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
   switch (status) {
     case SecretAnswerStatus.ACCEPTED:
@@ -189,6 +210,7 @@ import {
   type DeviceInputState,
   type DeviceRouter,
   type DeviceTransportState,
+  type ExecutorTranscriptEvent,
 } from "./device-router";
 
 export type { AuthCredential, ConnectionStatus } from "./connection";
@@ -423,6 +445,9 @@ export type CofluxState = {
   /** Pending secret requests (plan 20260926-agent-secret-input): requestId → request, replaced per
    * device by secretRequestsUpdated. Live-only: never written to the offline catalog. */
   secretRequests: Record<string, SecretRequestState>;
+  /** Live executor runs (plan 20260929-executor-pip): runId → run, replaced per device by
+   * executorRunsUpdated. Live-only, like secretRequests; a run that leaves the set has ended. */
+  executorRuns: Record<string, ExecutorRunState>;
   /** Browser annotation summaries (plan 20260929-browser-annotations): workspaceId → revision and
    * counts, replaced per device by annotationsSummaryUpdated. Live-only, like secretRequests. */
   annotationSummaries: Record<string, AnnotationSummaryState>;
@@ -539,6 +564,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     sessionCheckpoints: {},
     sessionAgents: {},
     secretRequests: {},
+    executorRuns: {},
     annotationSummaries: {},
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
@@ -697,8 +723,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const secretRequests = Object.fromEntries(
         Object.entries(state.secretRequests).filter(([, request]) => request.sessionId !== sessionId),
       );
+      // A run's card lives on its caller's terminal; the center drops the run with the session.
+      const executorRuns = Object.fromEntries(
+        Object.entries(state.executorRuns).filter(([, run]) => run.sessionId !== sessionId),
+      );
       return {
         secretRequests,
+        executorRuns,
         localSessions: upsert(state.localSessions, local, (item) => item.daemonId === daemonId && item.sessionId === sessionId),
         tasks: state.tasks.map((task) => task.id === taskId && task.sessionId === sessionId
           ? { ...task, status: TaskStatus.EXITED, sessionId: undefined, exitCode }
@@ -972,6 +1003,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
             sessionAgents: {},
             // Same for pending secret requests: re-sent per device right after the snapshot.
             secretRequests: {},
+            executorRuns: {},
             annotationSummaries: {},
             snapshotRevision: state.snapshotRevision + 1,
           };
@@ -993,6 +1025,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           tasks: state.tasks.filter((task) => task.daemonId !== value.daemonId),
           sessionAgents: Object.fromEntries(Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId)),
           secretRequests: Object.fromEntries(Object.entries(state.secretRequests).filter(([, entry]) => entry.daemonId !== value.daemonId)),
+          executorRuns: Object.fromEntries(Object.entries(state.executorRuns).filter(([, entry]) => entry.daemonId !== value.daemonId)),
           annotationSummaries: Object.fromEntries(Object.entries(state.annotationSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId)),
         }));
         break;
@@ -1136,6 +1169,32 @@ export function createCofluxClient(options: CofluxClientOptions) {
             };
           }
           return { secretRequests };
+        });
+        break;
+      }
+      case "executorRunsUpdated": {
+        const value = payload.value;
+        store.setState((state) => {
+          // Full replacement per device (empty = none running on it).
+          const executorRuns: Record<string, ExecutorRunState> = Object.fromEntries(
+            Object.entries(state.executorRuns).filter(([, entry]) => entry.daemonId !== value.daemonId),
+          );
+          for (const run of value.runs) {
+            const phase = run.phase === "accepted" || run.phase === "running" ? run.phase : "queued";
+            executorRuns[run.runId] = {
+              runId: run.runId,
+              daemonId: value.daemonId,
+              sessionId: run.sessionId,
+              taskId: run.taskId,
+              title: run.title,
+              write: run.write,
+              phase,
+              submittedAt: run.submittedAt,
+              startedAt: run.startedAt,
+              hostLost: run.hostLost,
+            };
+          }
+          return { executorRuns };
         });
         break;
       }
@@ -1297,6 +1356,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       sessionCheckpoints: {},
       sessionAgents: {},
       secretRequests: {},
+      executorRuns: {},
       annotationSummaries: {},
     });
   }
@@ -1641,6 +1701,25 @@ export function createCofluxClient(options: CofluxClientOptions) {
     handOffAnnotations,
     sendExecutorHostRegister: deviceRouter.sendExecutorHostRegister,
     sendExecutorReport: deviceRouter.sendExecutorReport,
+    /** The desktop host forwards one transcript fragment of a run it executes (plan
+     * 20260929-executor-pip) to the local daemon, which buffers it for every viewer. */
+    sendExecutorTranscriptFragment: deviceRouter.sendExecutorTranscriptFragment,
+    /** Follow a run's transcript (plan 20260929-executor-pip) over the Device channel of the device
+     * that hosts it: the backlog after `fromSeq`, then live fragments, then the end. The route is
+     * held while subscribed; a reconnect resumes from the last seq. Returns the unsubscribe. */
+    subscribeExecutorTranscript(
+      run: Pick<ExecutorRunState, "daemonId" | "runId">,
+      fromSeq: number,
+      listener: (event: ExecutorTranscriptEvent) => void,
+    ): () => void {
+      return deviceRouter.subscribeExecutorTranscript(run.daemonId, run.runId, BigInt(Math.max(0, Math.floor(fromSeq))), listener);
+    },
+    /** Stop a run from its card (plan 20260929-executor-pip): one click, no confirmation; the
+     * worker cancels it through the same path the CLI's timeout uses. False when the device's
+     * channel is not up or cannot carry it right now. */
+    stopExecutorRun(run: Pick<ExecutorRunState, "daemonId" | "runId">): boolean {
+      return deviceRouter.stopExecutorRun(run.daemonId, run.runId);
+    },
     registerSessionConsumer,
     listDeviceDirectory,
     execInWorkspace,

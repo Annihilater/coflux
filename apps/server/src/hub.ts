@@ -56,6 +56,7 @@ import {
   type DeviceSessionInfo,
   type SessionAgentRef,
   type SecretRequestRef,
+  type ExecutorRunRef,
   type WorkspaceAnnotationSummary,
   type SessionCheckpoint,
   type AgentControlRequest,
@@ -111,6 +112,11 @@ const MAX_AGENT_ENTRIES = 1024;
 /** Pending secret requests per daemon (plan 20260926-agent-secret-input); the worker caps itself at 64. */
 const MAX_SECRET_REQUEST_ENTRIES = 64;
 const MAX_SECRET_REASON_BYTES = 2000;
+/** Executor runs snapshot (plan 20260929-executor-pip): the worker's ledger holds at most 64 runs,
+ * and a title is at most 120 characters there — the byte cap only guards a malformed sender. */
+const MAX_EXECUTOR_RUN_ENTRIES = 64;
+const MAX_EXECUTOR_TITLE_BYTES = 1000;
+const EXECUTOR_PHASES = new Set(["queued", "accepted", "running"]);
 const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 /** Workspaces per daemon in one annotation summary (plan 20260929-browser-annotations); the worker
  * applies the same cap. */
@@ -221,6 +227,20 @@ interface SecretRequestData {
   reason: string;
   createdAt: number;
   expiresAt: number;
+}
+
+/** One live executor run (plan 20260929-executor-pip): metadata bound to the caller's terminal,
+ * never the prompt or the transcript. Plain object like SecretRequestData. */
+interface ExecutorRunData {
+  runId: string;
+  sessionId: SessionId;
+  taskId: TaskId;
+  title: string;
+  write: boolean;
+  phase: string;
+  submittedAt: number;
+  startedAt: number;
+  hostLost: boolean;
 }
 
 /** One workspace's browser annotation summary (plan 20260929-browser-annotations): a revision and
@@ -551,6 +571,11 @@ export class Hub {
    * resurrect requests nobody can answer. Cleared and broadcast empty when the daemon disconnects;
    * re-sent per device on subscribe. */
   private secretRequests = new Map<DaemonId, { accountId: AccountId; requests: SecretRequestData[] }>();
+  /** Live executor runs (plan 20260929-executor-pip): the daemon's latest ExecutorRuns snapshot,
+   * validated like secret requests (each entry names a session of this daemon under the stated
+   * task). Memory only, never persisted: the runs live in the worker's memory and die with it.
+   * Cleared and broadcast empty when the daemon disconnects; re-sent per device on subscribe. */
+  private executorRuns = new Map<DaemonId, { accountId: AccountId; runs: ExecutorRunData[] }>();
   /** Browser annotation summaries (plan 20260929-browser-annotations): the daemon's latest
    * AnnotationsSummary, each workspace checked against the store. Memory only: revision and counts,
    * never content (which travels only end to end between desktops and the worker). Cleared and
@@ -1956,6 +1981,64 @@ export class Hub {
     this.broadcast(daemon.accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: valid } });
   }
 
+  /** Live executor runs (plan 20260929-executor-pip): each entry must name a session of this
+   * daemon that belongs to the stated task (catalog live or runtime route, the presence rule), so a
+   * card is only ever bound to a terminal the center knows; malformed or foreign entries are
+   * dropped. An unchanged snapshot is absorbed (the worker re-sends unconditionally after
+   * authentication). */
+  private acceptExecutorRuns(daemon: DaemonConn, runs: readonly ExecutorRunRef[]): void {
+    const daemonId = daemon.info.daemonId;
+    const live = this.catalog.get(daemonId);
+    const valid: ExecutorRunData[] = [];
+    const seen = new Set<string>();
+    for (const entry of runs.slice(0, MAX_EXECUTOR_RUN_ENTRIES)) {
+      if (!validControlId(entry.runId) || seen.has(entry.runId)) continue;
+      if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
+      if (!entry.title || Buffer.byteLength(entry.title) > MAX_EXECUTOR_TITLE_BYTES) continue;
+      if (!EXECUTOR_PHASES.has(entry.phase)) continue;
+      if (!Number.isFinite(entry.submittedAt) || !Number.isFinite(entry.startedAt)) continue;
+      const catalogInfo = live?.get(entry.sessionId);
+      const runtime = this.sessions.get(entry.sessionId);
+      const matchesKnownSession = catalogInfo
+        ? catalogInfo.taskId === entry.taskId
+        : runtime?.daemonId === daemonId && runtime.taskId === entry.taskId;
+      if (!matchesKnownSession) continue;
+      seen.add(entry.runId);
+      valid.push({
+        runId: entry.runId,
+        sessionId: entry.sessionId,
+        taskId: entry.taskId,
+        title: entry.title,
+        write: entry.write,
+        phase: entry.phase,
+        submittedAt: entry.submittedAt,
+        startedAt: entry.startedAt,
+        hostLost: entry.hostLost,
+      });
+    }
+    const previous = this.executorRuns.get(daemonId);
+    const unchanged =
+      previous !== undefined &&
+      previous.runs.length === valid.length &&
+      previous.runs.every(
+        (p, i) =>
+          p.runId === valid[i]!.runId &&
+          p.sessionId === valid[i]!.sessionId &&
+          p.taskId === valid[i]!.taskId &&
+          p.title === valid[i]!.title &&
+          p.write === valid[i]!.write &&
+          p.phase === valid[i]!.phase &&
+          p.submittedAt === valid[i]!.submittedAt &&
+          p.startedAt === valid[i]!.startedAt &&
+          p.hostLost === valid[i]!.hostLost,
+      );
+    if (unchanged) return;
+    if (valid.length === 0 && previous === undefined) return;
+    if (valid.length === 0) this.executorRuns.delete(daemonId);
+    else this.executorRuns.set(daemonId, { accountId: daemon.accountId, runs: valid });
+    this.broadcast(daemon.accountId, { case: "executorRunsUpdated", value: { daemonId, runs: valid } });
+  }
+
   /** Browser annotation summaries (plan 20260929-browser-annotations): each entry must name a
    * workspace of this daemon in the store; malformed or foreign entries are dropped. The store read
    * is awaited, so the daemon connection and the snapshot's sequence are re-checked afterwards: a
@@ -2436,6 +2519,11 @@ export class Hub {
         if (daemon) this.acceptSecretRequests(daemon, msg.payload.value.requests);
         break;
       }
+      case "executorRuns": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) this.acceptExecutorRuns(daemon, msg.payload.value.runs);
+        break;
+      }
       case "annotationsSummary": {
         const daemon = this.currentDaemon(conn);
         // Not awaited: validation reads the store, and a sequence check makes the latest snapshot win.
@@ -2889,6 +2977,11 @@ export class Hub {
       if (this.secretRequests.delete(daemonId)) {
         this.broadcast(accountId, { case: "secretRequestsUpdated", value: { daemonId, requests: [] } });
       }
+      // Executor runs are the worker's memory too (plan 20260929-executor-pip): with the
+      // connection gone nothing can report on them, so every card closes.
+      if (this.executorRuns.delete(daemonId)) {
+        this.broadcast(accountId, { case: "executorRunsUpdated", value: { daemonId, runs: [] } });
+      }
       // Annotation summaries are the connection's derived fact too; a validation still in flight
       // for this connection is discarded by the sequence bump.
       this.annotationSummarySeq.set(daemonId, (this.annotationSummarySeq.get(daemonId) ?? 0) + 1);
@@ -2984,6 +3077,10 @@ export class Hub {
         // Pending secret requests follow the same rule: the client clears them with the snapshot.
         for (const [daemonId, entry] of this.secretRequests) {
           if (entry.accountId === accountId) this.sendClientNow(client, { case: "secretRequestsUpdated", value: { daemonId, requests: entry.requests } });
+        }
+        // Live executor runs too (plan 20260929-executor-pip).
+        for (const [daemonId, entry] of this.executorRuns) {
+          if (entry.accountId === accountId) this.sendClientNow(client, { case: "executorRunsUpdated", value: { daemonId, runs: entry.runs } });
         }
         // Annotation summaries too (plan 20260929-browser-annotations).
         for (const [daemonId, entry] of this.annotationSummaries) {
