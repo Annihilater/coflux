@@ -27,6 +27,13 @@ export {
   type SecretAnswer,
   type SecretAnswerResult,
   type WorkspaceActivity,
+  type AnnotationSummaryState,
+  type AnnotationFailure,
+  type AnnotationListResult,
+  type AnnotationMutateResult,
+  type AnnotationImageResult,
+  type AnnotationHandOffResult,
+  type AnnotationChange,
 } from "./store";
 export {
   type NativeRemoteTransport,

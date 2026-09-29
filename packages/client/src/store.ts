@@ -6,6 +6,13 @@ import {
   SecretAnswerKind,
   SecretAnswerStatus,
   type AccountNotification,
+  type Annotation,
+  type AnnotationPut,
+  type DeviceAnnotationsMutate,
+  create,
+  AnnotationClearResolvedSchema,
+  AnnotationDeleteSchema,
+  AnnotationReopenSchema,
   type ClientToServerPayload,
   type DaemonInfo,
   type DeviceSessionCatalog,
@@ -74,6 +81,40 @@ function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
   }
 }
 
+/** One workspace's browser annotation summary (plan 20260929-browser-annotations): the revision
+ * and counts the center relays. Content is never here; it is fetched over the Device channel. */
+export type AnnotationSummaryState = {
+  daemonId: string;
+  revision: number;
+  pending: number;
+  resolved: number;
+};
+
+/** Why an annotation call failed: `unsupported` = the device runs an older coflux (from its own
+ * reply, never a timeout); `unreachable` = the device could not be reached or did not answer;
+ * `refused` = the worker answered and refused (the message says why). */
+export type AnnotationFailure = { ok: false; reason: "unsupported" | "unreachable" | "refused"; error: string };
+export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[] } | AnnotationFailure;
+export type AnnotationMutateResult = { ok: true; revision: number; annotation?: Annotation } | AnnotationFailure;
+export type AnnotationImageResult = { ok: true; mimeType: string; data: Uint8Array } | AnnotationFailure;
+/** `held`: someone else holds the terminal. */
+export type AnnotationHandOffResult = { ok: true } | (AnnotationFailure & { held?: boolean });
+export type AnnotationChange =
+  | { kind: "put"; put: AnnotationPut }
+  | { kind: "delete"; annotationIds: string[] }
+  | { kind: "reopen"; annotationId: string; comment: string }
+  | { kind: "clear-resolved" };
+
+/** The pause between a handed-off instruction and its Enter: an agent's TUI treats one fast burst
+ * ending in CR as a paste. The worker's path uses the same value. */
+const HAND_OFF_ENTER_DELAY_MS = 150;
+
+function annotationFailure(error: unknown): AnnotationFailure {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  return { ok: false, reason: code === ANNOTATIONS_UNSUPPORTED ? "unsupported" : "unreachable", error: message };
+}
+
 export type WorkspaceActivity =
   | { status: "idle" }
   | { status: "active"; agent?: string }
@@ -129,6 +170,7 @@ export function workspaceProgress(
 
 import { createConnection, type AuthCredential, type ClientKind, type ConnectionStatus, type ServerPayload } from "./connection";
 import {
+  ANNOTATIONS_UNSUPPORTED,
   createDeviceRouter,
   type DeviceInputState,
   type DeviceRouter,
@@ -312,6 +354,9 @@ export type CofluxState = {
   /** Pending secret requests (plan 20260926-agent-secret-input): requestId → request, replaced per
    * device by secretRequestsUpdated. Live-only: never written to the offline catalog. */
   secretRequests: Record<string, SecretRequestState>;
+  /** Browser annotation summaries (plan 20260929-browser-annotations): workspaceId → revision and
+   * counts, replaced per device by annotationsSummaryUpdated. Live-only, like secretRequests. */
+  annotationSummaries: Record<string, AnnotationSummaryState>;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -425,6 +470,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     sessionCheckpoints: {},
     sessionAgents: {},
     secretRequests: {},
+    annotationSummaries: {},
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -857,6 +903,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
             sessionAgents: {},
             // Same for pending secret requests: re-sent per device right after the snapshot.
             secretRequests: {},
+            annotationSummaries: {},
             snapshotRevision: state.snapshotRevision + 1,
           };
         });
@@ -877,6 +924,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           tasks: state.tasks.filter((task) => task.daemonId !== value.daemonId),
           sessionAgents: Object.fromEntries(Object.entries(state.sessionAgents).filter(([, entry]) => entry.daemonId !== value.daemonId)),
           secretRequests: Object.fromEntries(Object.entries(state.secretRequests).filter(([, entry]) => entry.daemonId !== value.daemonId)),
+          annotationSummaries: Object.fromEntries(Object.entries(state.annotationSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId)),
         }));
         break;
       }
@@ -1022,6 +1070,25 @@ export function createCofluxClient(options: CofluxClientOptions) {
         });
         break;
       }
+      case "annotationsSummaryUpdated": {
+        const value = payload.value;
+        store.setState((state) => {
+          // Full replacement per device (empty = no annotations on it).
+          const annotationSummaries: Record<string, AnnotationSummaryState> = Object.fromEntries(
+            Object.entries(state.annotationSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId),
+          );
+          for (const entry of value.workspaces) {
+            annotationSummaries[entry.workspaceId] = {
+              daemonId: value.daemonId,
+              revision: entry.revision,
+              pending: entry.pending,
+              resolved: entry.resolved,
+            };
+          }
+          return { annotationSummaries };
+        });
+        break;
+      }
       case "taskReadResult": {
         const value = payload.value;
         const pending = pendingTaskReads.get(value.taskId);
@@ -1161,6 +1228,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       sessionCheckpoints: {},
       sessionAgents: {},
       secretRequests: {},
+      annotationSummaries: {},
     });
   }
 
@@ -1295,6 +1363,86 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /* ---------------- browser annotations (plan 20260929-browser-annotations) ---------------- */
+  // Content goes end to end to the worker of the workspace's device over the Device channel; the
+  // store keeps none of it (only the summaries the center relays).
+
+  function annotationDaemon(workspaceId: string): string | null {
+    return store.getState().workspaces.find((item) => item.id === workspaceId)?.daemonId ?? null;
+  }
+
+  async function listAnnotations(workspaceId: string): Promise<AnnotationListResult> {
+    const daemonId = annotationDaemon(workspaceId);
+    if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.listAnnotations(daemonId, workspaceId);
+      if (!result.ok) return { ok: false, reason: "refused", error: result.error };
+      return { ok: true, revision: result.revision, annotations: result.annotations };
+    } catch (error) {
+      return annotationFailure(error);
+    }
+  }
+
+  async function changeAnnotations(workspaceId: string, change: AnnotationChange): Promise<AnnotationMutateResult> {
+    const daemonId = annotationDaemon(workspaceId);
+    if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
+    const action: DeviceAnnotationsMutate["action"] =
+      change.kind === "put"
+        ? { case: "put", value: change.put }
+        : change.kind === "delete"
+          ? { case: "delete", value: create(AnnotationDeleteSchema, { annotationIds: change.annotationIds }) }
+          : change.kind === "reopen"
+            ? { case: "reopen", value: create(AnnotationReopenSchema, { annotationId: change.annotationId, comment: change.comment }) }
+            : { case: "clearResolved", value: create(AnnotationClearResolvedSchema) };
+    try {
+      const result = await deviceRouter.mutateAnnotations(daemonId, workspaceId, action);
+      if (!result.ok) return { ok: false, reason: "refused", error: result.error };
+      return { ok: true, revision: result.revision, annotation: result.annotation };
+    } catch (error) {
+      return annotationFailure(error);
+    }
+  }
+
+  async function readAnnotationImage(workspaceId: string, annotationId: string, imageId: string): Promise<AnnotationImageResult> {
+    const daemonId = annotationDaemon(workspaceId);
+    if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.readAnnotationImage(daemonId, workspaceId, annotationId, imageId);
+      if (!result.ok) return { ok: false, reason: "refused", error: result.error };
+      return { ok: true, mimeType: result.mimeType, data: result.data };
+    } catch (error) {
+      return annotationFailure(error);
+    }
+  }
+
+  /** 「交给 agent」: type `text`, then Enter, into the agent terminal `taskId` of the workspace
+   * without focusing or opening it. A terminal this client already drives gets the keystrokes as
+   * the user's own; any other goes through the worker's agent input, which refuses while someone
+   * else holds the terminal. */
+  async function handOffAnnotations(workspaceId: string, taskId: string, text: string): Promise<AnnotationHandOffResult> {
+    const task = store.getState().tasks.find((item) => item.id === taskId);
+    if (!task?.sessionId || task.workspaceId !== workspaceId || task.status !== TaskStatus.RUNNING) {
+      return { ok: false, reason: "refused", error: "终端已不在运行" };
+    }
+    const sessionId = task.sessionId;
+    if (deviceRouter.holdsSession(task.daemonId, sessionId)) {
+      const encoder = new TextEncoder();
+      if (!deviceRouter.sendInput(task.daemonId, sessionId, encoder.encode(text))) {
+        return { ok: false, reason: "unreachable", error: "终端输入暂时无法送达" };
+      }
+      await new Promise((resolve) => setTimeout(resolve, HAND_OFF_ENTER_DELAY_MS));
+      deviceRouter.sendInput(task.daemonId, sessionId, encoder.encode("\r"));
+      return { ok: true };
+    }
+    try {
+      const result = await deviceRouter.handOffAnnotations(task.daemonId, workspaceId, sessionId, text);
+      if (!result.ok) return { ok: false, reason: "refused", error: result.error, held: result.held };
+      return { ok: true };
+    } catch (error) {
+      return annotationFailure(error);
+    }
+  }
+
   /** 本地失败（exec/checkout 等非服务端错误）汇入同一个全局错误提示通道 */
   function reportLocalError(message: string) {
     errorSequence += 1;
@@ -1368,6 +1516,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
       };
     },
     answerSecretRequest,
+    listAnnotations,
+    changeAnnotations,
+    readAnnotationImage,
+    handOffAnnotations,
     sendExecutorHostRegister: deviceRouter.sendExecutorHostRegister,
     sendExecutorReport: deviceRouter.sendExecutorReport,
     registerSessionConsumer,
