@@ -111,11 +111,11 @@ function readJson(path) {
 }
 
 /** A second real daemon (supervisor + worker) in its own home, holding `joinKey` in the key file. */
-function spawnKeyedDaemon(joinKey, name) {
+async function spawnKeyedDaemon(joinKey, name) {
   const home = mkdtempSync(join(tmpdir(), "coflux-join-key-home-"));
   extraHomes.push(home);
   writeFileSync(join(home, "join-key.json"), JSON.stringify({ key: joinKey }) + "\n", { mode: 0o600 });
-  const daemon = spawnDaemon({ ...stack.daemonEnv, COFLUX_HOME: home, COFLUX_DEVICE_NAME: name });
+  const daemon = await spawnDaemon({ ...stack.daemonEnv, COFLUX_HOME: home, COFLUX_DEVICE_NAME: name });
   extraDaemons.push(daemon);
   return { home, daemon };
 }
@@ -153,7 +153,7 @@ test("a key minted by one account never yields a device in another", async () =>
 
 test("a real daemon joins with the key file, and the key file is gone", async () => {
   const key = await mint(clients.get(ALICE));
-  const { home } = spawnKeyedDaemon(key, "join-key-real");
+  const { home } = await spawnKeyedDaemon(key, "join-key-real");
   const credPath = join(home, "credentials.json");
   await waitUntil(() => existsSync(credPath), "credentials.json");
   await waitUntil(() => !existsSync(join(home, "join-key.json")), "the key file to be deleted");
@@ -167,7 +167,7 @@ test("a real daemon joins with the key file, and the key file is gone", async ()
 test("a real daemon with a spent key records the rejection and keeps running", async () => {
   const key = await mint(clients.get(ALICE));
   await expectEnrolled(key); // spend it
-  const { home, daemon } = spawnKeyedDaemon(key, "join-key-rejected");
+  const { home, daemon } = await spawnKeyedDaemon(key, "join-key-rejected");
   const outcomePath = join(home, "join-outcome.json");
   await waitUntil(() => readJson(outcomePath)?.status === "rejected", "a rejected outcome");
   assert.ok(readJson(outcomePath).reason, "the outcome carries the server's reason");
