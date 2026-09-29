@@ -46,20 +46,31 @@ public final class HelperServer {
         }
     }
 
-    /// Stop listening and drop the connection. Idempotent, and the socket file is unlinked only by
-    /// the call that owned it: a retired helper stops early, and the replacement binds the same
-    /// path — a second stop must never remove the successor's socket.
+    /// Stop listening and drop the connection. Idempotent.
     public func stop() {
         queue.sync {
             current?.close()
             current = nil
-            acceptSource?.cancel()
-            acceptSource = nil
-            if listenFD >= 0 {
-                Darwin.close(listenFD)
-                listenFD = -1
-                unlink(path)
-            }
+            self.stopListeningLocked()
+        }
+    }
+
+    /// Give up the socket (no new connections; the path is free for a successor) while the
+    /// connection in service, if any, stays up. Idempotent.
+    public func stopListening() {
+        queue.sync { self.stopListeningLocked() }
+    }
+
+    /// On the queue. The socket file is unlinked only by the call that owned it: a retired helper
+    /// stops early and the replacement binds the same path — a later stop must never remove the
+    /// successor's socket.
+    private func stopListeningLocked() {
+        acceptSource?.cancel()
+        acceptSource = nil
+        if listenFD >= 0 {
+            Darwin.close(listenFD)
+            listenFD = -1
+            unlink(path)
         }
     }
 

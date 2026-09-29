@@ -88,12 +88,23 @@ public final class ScreenHelper: HelperServerDelegate {
             log("hello from worker \(hello.workerVersion): \(ack.ok ? "ok" : "refused")")
         case .channelClosed(let closed)?:
             laneClosed(closed.channelID)
-        case .retire?:
+        case .retire(let retire)?:
             // A newer desktop build shipped another helper: give up the socket now so it can take
-            // the path, and exit as soon as no session is held.
-            log("retire requested by worker; this helper is stale")
+            // the path. The connection this came on stays up, so a live session keeps being served
+            // until it ends, and this process exits then (or now, holding none). With tear_down the
+            // worker cannot serve through this helper at all: the session ends at once — display
+            // removed, arrangement restored, no grace — before exiting. Two helpers never hold
+            // virtual displays at the same time.
             retiring = true
-            server.stop()
+            server.stopListening()
+            if retire.tearDown, let session {
+                log("retire with tear-down requested by worker; ending the session now")
+                tearDown(session, restore: true)
+                arbiter.end()
+                self.session = nil
+            } else {
+                log("retire requested by worker; \(session == nil ? "exiting" : "serving the live session until it ends")")
+            }
             exitIfRetired()
         case .envelope(let envelope)?:
             guard greeted else { return }
@@ -669,10 +680,12 @@ public final class ScreenHelper: HelperServerDelegate {
         server.stop()
     }
 
-    /// Stale and holding nothing: leave now (the socket is already gone).
+    /// Stale and holding nothing: leave now (the socket is already gone; the worker reconnects to
+    /// the shipped helper on its own).
     private func exitIfRetired() {
         guard retiring, session == nil else { return }
         log("retired; exiting")
+        server.stop()
         exit(0)
     }
 

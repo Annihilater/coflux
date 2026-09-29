@@ -4078,7 +4078,7 @@ export class Hub {
     if (!accountId) return { ok: false, reason: "rejected" };
     const registered = await this.registerDaemonConn(
       conn,
-      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion, capabilities: info.capabilities },
+      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion, capabilities: [...info.capabilities] },
       accountId,
       info.arch,
       { case: "daemonEnrolled", value: { daemonId, deviceToken, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },

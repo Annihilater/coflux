@@ -121,6 +121,47 @@ pub fn is_droppable_payload(payload: &device_envelope::Payload) -> bool {
     matches!(payload, device_envelope::Payload::ScreenCursor(_))
 }
 
+/// What the hello ack of the helper answering the socket calls for.
+#[derive(Debug, PartialEq, Eq)]
+enum HelloVerdict {
+    /// The shipped helper: serve.
+    Serve,
+    /// A compatible helper of another version holding a live session: tell it to retire (stop
+    /// listening, exit when that session ends) and keep serving that session over this connection.
+    /// Two helpers must never hold virtual displays at once, so the shipped one waits its turn.
+    RetireAfterSession,
+    /// A compatible helper of another version holding nothing: tell it to retire and replace it now.
+    Replace(String),
+    /// A helper this worker cannot serve through (protocol, refused hello): it must tear its session
+    /// down at once — display removed, arrangement restored, no grace — and exit; then replace it.
+    TearDown(String),
+}
+
+fn hello_verdict(ack: &coflux_protocol::wire::ScreenHelperHelloAck, expected_version: Option<&str>) -> HelloVerdict {
+    if ack.protocol_version != SCREEN_HELPER_PROTOCOL_VERSION || !ack.ok {
+        return HelloVerdict::TearDown(format!(
+            "helper {} refused hello (protocol {}, ours {}): {}",
+            ack.helper_version,
+            ack.protocol_version,
+            SCREEN_HELPER_PROTOCOL_VERSION,
+            ack.error.clone().unwrap_or_default()
+        ));
+    }
+    match expected_version {
+        Some(expected) if expected != ack.helper_version => {
+            if ack.session_active {
+                HelloVerdict::RetireAfterSession
+            } else {
+                HelloVerdict::Replace(format!(
+                    "helper {} answered but this runtime ships {expected}",
+                    ack.helper_version
+                ))
+            }
+        }
+        _ => HelloVerdict::Serve,
+    }
+}
+
 /// Why a helper connection ended.
 #[derive(Debug, PartialEq, Eq)]
 enum ServeError {
@@ -392,29 +433,27 @@ impl Bridge {
                     for frame in inbound.drain(..) {
                         match frame.payload {
                             Some(screen_helper_frame::Payload::HelloAck(ack)) => {
-                                let stale = if ack.protocol_version != SCREEN_HELPER_PROTOCOL_VERSION || !ack.ok {
-                                    Some(format!(
-                                        "helper {} refused hello (protocol {}, ours {}): {}",
-                                        ack.helper_version,
-                                        ack.protocol_version,
-                                        SCREEN_HELPER_PROTOCOL_VERSION,
-                                        ack.error.clone().unwrap_or_default()
-                                    ))
-                                } else if expected_version.is_some_and(|expected| expected != ack.helper_version) {
-                                    Some(format!(
-                                        "helper {} answered but this runtime ships {}",
-                                        ack.helper_version,
-                                        expected_version.unwrap_or_default()
-                                    ))
-                                } else {
-                                    None
+                                let retire = |tear_down: bool| ScreenHelperFrame {
+                                    payload: Some(screen_helper_frame::Payload::Retire(ScreenHelperRetire { tear_down })),
                                 };
-                                if let Some(message) = stale {
-                                    let retire = ScreenHelperFrame {
-                                        payload: Some(screen_helper_frame::Payload::Retire(ScreenHelperRetire {})),
-                                    };
-                                    let _ = write_frame(&mut stream, &retire).await;
-                                    return Err(ServeError::Stale(message));
+                                match hello_verdict(&ack, expected_version) {
+                                    HelloVerdict::Serve => {}
+                                    HelloVerdict::RetireAfterSession => {
+                                        logln!(
+                                            "[screen] helper {} holds a live session; it retires once that session ends, then the shipped {} takes over",
+                                            ack.helper_version,
+                                            expected_version.unwrap_or_default()
+                                        );
+                                        write_frame(&mut stream, &retire(false)).await.map_err(ServeError::Failed)?;
+                                    }
+                                    HelloVerdict::Replace(message) => {
+                                        let _ = write_frame(&mut stream, &retire(false)).await;
+                                        return Err(ServeError::Stale(message));
+                                    }
+                                    HelloVerdict::TearDown(message) => {
+                                        let _ = write_frame(&mut stream, &retire(true)).await;
+                                        return Err(ServeError::Stale(message));
+                                    }
                                 }
                                 let permissions = ack.permissions.unwrap_or_default();
                                 logln!(
@@ -803,10 +842,32 @@ mod tests {
         assert_eq!(served.await.unwrap(), Ok(()));
     }
 
-    /// A helper of another version is told to retire and the connection ends as stale, so the
-    /// worker replaces it instead of reconnecting to it forever.
+    #[test]
+    fn hello_verdict_keeps_a_live_session_on_a_version_mismatch_and_tears_down_on_protocol_mismatch() {
+        use coflux_protocol::wire::ScreenHelperHelloAck;
+        let ack = |version: &str, protocol: u32, ok: bool, session_active: bool| ScreenHelperHelloAck {
+            protocol_version: protocol,
+            helper_version: version.into(),
+            ok,
+            error: None,
+            permissions: None,
+            session_active,
+        };
+        let current = SCREEN_HELPER_PROTOCOL_VERSION;
+        assert_eq!(hello_verdict(&ack("v2.12.0", current, true, true), Some("v2.12.0")), HelloVerdict::Serve);
+        assert_eq!(hello_verdict(&ack("v2.11.0", current, true, false), None), HelloVerdict::Serve, "no expected version: nothing to compare");
+        // The decision under review: an older but compatible helper with a live session keeps serving it.
+        assert_eq!(hello_verdict(&ack("v2.11.0", current, true, true), Some("v2.12.0")), HelloVerdict::RetireAfterSession);
+        assert!(matches!(hello_verdict(&ack("v2.11.0", current, true, false), Some("v2.12.0")), HelloVerdict::Replace(_)));
+        // A protocol the worker cannot serve through is torn down at once, session or not.
+        assert!(matches!(hello_verdict(&ack("v2.12.0", current + 1, true, true), Some("v2.12.0")), HelloVerdict::TearDown(_)));
+        assert!(matches!(hello_verdict(&ack("v2.12.0", current, false, true), Some("v2.12.0")), HelloVerdict::TearDown(_)));
+    }
+
+    /// A helper of another version with a live session is told to retire but the connection keeps
+    /// serving that session: the bridge becomes ready and stays up until the helper goes away.
     #[tokio::test]
-    async fn a_helper_of_another_version_is_told_to_retire() {
+    async fn a_helper_of_another_version_with_a_live_session_retires_after_it() {
         let (worker_side, mut helper_side) = UnixStream::pair().unwrap();
         let (bridge, mut rx) = Bridge::new(Some(Arc::new(FakeOutlet::default())));
         let served = {
@@ -840,7 +901,62 @@ mod tests {
             assert!(n > 0);
             parser.push(&buf[..n], |record| frames.push(ScreenHelperFrame::decode(record).unwrap())).unwrap();
         }
-        assert!(matches!(frames[0].payload, Some(screen_helper_frame::Payload::Retire(_))));
+        assert!(matches!(
+            frames[0].payload,
+            Some(screen_helper_frame::Payload::Retire(ScreenHelperRetire { tear_down: false }))
+        ));
+        for _ in 0..100 {
+            if bridge.ready() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(bridge.ready(), "the connection keeps serving the live session");
+        drop(helper_side);
+        assert_eq!(served.await.unwrap(), Ok(()));
+    }
+
+    /// A helper of another version holding nothing is told to retire and the connection ends as
+    /// stale, so the worker replaces it instead of reconnecting to it forever.
+    #[tokio::test]
+    async fn a_helper_of_another_version_is_told_to_retire() {
+        let (worker_side, mut helper_side) = UnixStream::pair().unwrap();
+        let (bridge, mut rx) = Bridge::new(Some(Arc::new(FakeOutlet::default())));
+        let served = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.serve(worker_side, &mut rx, "builtin", Some("v2.12.0")).await })
+        };
+        let mut parser = RecordParser::new();
+        let mut buf = [0u8; 4096];
+        let mut frames = Vec::new();
+        while frames.is_empty() {
+            let n = helper_side.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            parser.push(&buf[..n], |record| frames.push(ScreenHelperFrame::decode(record).unwrap())).unwrap();
+        }
+        let ack = ScreenHelperFrame {
+            payload: Some(screen_helper_frame::Payload::HelloAck(
+                coflux_protocol::wire::ScreenHelperHelloAck {
+                    protocol_version: SCREEN_HELPER_PROTOCOL_VERSION,
+                    helper_version: "v2.11.0".into(),
+                    ok: true,
+                    error: None,
+                    permissions: None,
+                    session_active: false,
+                },
+            )),
+        };
+        helper_side.write_all(&write_record(&ack.encode_to_vec()).unwrap()).await.unwrap();
+        frames.clear();
+        while frames.is_empty() {
+            let n = helper_side.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            parser.push(&buf[..n], |record| frames.push(ScreenHelperFrame::decode(record).unwrap())).unwrap();
+        }
+        assert!(matches!(
+            frames[0].payload,
+            Some(screen_helper_frame::Payload::Retire(ScreenHelperRetire { tear_down: false }))
+        ));
         assert!(matches!(served.await.unwrap(), Err(ServeError::Stale(_))));
         assert!(!bridge.ready());
     }

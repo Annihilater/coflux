@@ -70,9 +70,13 @@ physical `KeyboardEvent.code` and are mapped to macOS virtual key codes on the r
 - Takeover: a user-initiated open (a new 屏幕 tab, 「打开屏幕」, 「重新接管」) takes the session over;
   automatic reconnects (restore after restart, lane reopen, resume) never do, and a taken-over tab
   stays detached until 「重新接管」.
-- A helper of another version or protocol answering the socket (left by a previous desktop build)
-  is told to retire (`ScreenHelperRetire`): it stops listening at once and exits when it holds no
-  session; the worker then starts the shipped binary.
+- A helper of another version answering the socket (left by a previous desktop build) is told to
+  retire (`ScreenHelperRetire`): it stops listening at once; if it holds a live session the worker
+  keeps serving that session over the existing connection and the helper exits when it ends
+  (close or grace), after which the worker's reconnect starts the shipped binary; holding none, it
+  exits now. A helper the worker cannot serve through (protocol, refused hello) gets
+  `tear_down`: it ends its session immediately (display removed, arrangement restored) and exits.
+  Two helpers never hold virtual displays at the same time.
 - Cursor shapes come from `NSCursor.currentSystem`; when unreadable the helper falls back to
   cursor-in-video.
 - Not measured: a Mac with no physical display at all; decode throughput at 2880×1800@60.
