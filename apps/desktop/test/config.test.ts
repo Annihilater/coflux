@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
-import { CLAUDE_PLUGIN_ENV, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "../src/main/daemon-paths";
+import { CLAUDE_PLUGIN_ENV, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE, SCREEN_HELPER_BINARY, SCREEN_HELPER_ENV } from "../src/main/daemon-paths";
 
 // 发布配置（electron-builder.yml）与发布 workflow 能被解析且守住 plan 103 的硬约束。
 const desktopRoot = resolve(import.meta.dirname, "..");
@@ -230,4 +230,38 @@ test("统一发布：桌面仅受调用、release-signing 环境、缺 secret �
 test("ci.yml 带 desktop 质量门", () => {
   const ci = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
   assert.match(ci, /pnpm -C apps\/desktop typecheck && pnpm -C apps\/desktop test && pnpm -C apps\/desktop build/);
+});
+
+// The remote screen helper (plan 20260929-remote-desktop) ships with the desktop app only: built
+// by the daemon job of the desktop release, staged/signed/verified with the other binaries, checked
+// on a macOS CI job, and never added to the daemon release tarballs or the worker upgrade set.
+test("coflux-screen: desktop-bundled helper, built from native/screen, absent from daemon tarballs", () => {
+  assert.equal(SCREEN_HELPER_BINARY, "coflux-screen");
+  assert.ok(DAEMON_BINARIES.includes(SCREEN_HELPER_BINARY));
+  assert.ok(existsSync(resolve(repoRoot, "native/screen/Package.swift")));
+  assert.ok(existsSync(resolve(repoRoot, "scripts/build-screen-helper.mjs")));
+
+  const workflow = parse(readFileSync(resolve(repoRoot, ".github/workflows/desktop-release.yml"), "utf8")) as Workflow;
+  const build = workflow.jobs.daemon.steps.find((step) => step.run?.includes("build-screen-helper"));
+  assert.ok(build?.run, "the daemon job must build the Swift helper");
+  assert.match(build.run, /--test/);
+  assert.match(build.run, /target\/aarch64-apple-darwin\/release/);
+
+  const ci = parse(readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8")) as Workflow;
+  const macJob = Object.values(ci.jobs).find((job) => job.steps.some((step) => step.run?.includes("build-screen-helper")));
+  assert.ok(macJob, "CI needs a macOS job checking the helper");
+  assert.equal((macJob as unknown as { "runs-on": string })["runs-on"], "macos-latest");
+
+  // Daemon release tarballs and the signing loop stay the five daemon binaries.
+  const release = readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8");
+  assert.ok(!release.includes(SCREEN_HELPER_BINARY), "release.yml must not gain the helper");
+
+  // The worker learns the helper's path and version from the supervisor's environment.
+  const runtime = readFileSync(resolve(desktopRoot, "src/main/desktop-runtime.ts"), "utf8");
+  assert.match(runtime, /\[SCREEN_HELPER_ENV\]: join\(directory, SCREEN_HELPER_BINARY\)/);
+  assert.match(runtime, /\[SCREEN_HELPER_VERSION_ENV\]/);
+  assert.equal(SCREEN_HELPER_ENV, "COFLUX_SCREEN_HELPER");
+  // Same spelling as the worker (crates/worker/src/screen.rs HELPER_ENV).
+  const worker = readFileSync(resolve(repoRoot, "crates/worker/src/screen.rs"), "utf8");
+  assert.match(worker, new RegExp(`HELPER_ENV: &str = "${SCREEN_HELPER_ENV}"`));
 });

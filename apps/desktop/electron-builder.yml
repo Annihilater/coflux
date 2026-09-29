@@ -58,6 +58,7 @@ mac:
     - Contents/Resources/daemon/coflux-worker
     - Contents/Resources/daemon/coflux
     - Contents/Resources/daemon/coflux-ptyd
+    - Contents/Resources/daemon/coflux-screen
   # arm64 首发；universal 只作为开关保留：需要时把 arch 改成 [universal]（见 Maintenance notes）
   target:
     - target: dmg

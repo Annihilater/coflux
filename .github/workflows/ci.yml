@@ -202,3 +202,18 @@ jobs:
         env:
           COFLUX_TEST_CONCURRENCY: "2"
         run: pnpm -C tests test
+
+  # The remote screen helper (plan 20260929-remote-desktop) is Swift against macOS frameworks:
+  # it can only be built and unit-tested on a macOS runner. Warnings in native/screen fail it.
+  screen-helper:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Build and test coflux-screen
+        run: node scripts/build-screen-helper.mjs target/screen-ci --test
