@@ -11,8 +11,34 @@ import type { DesktopNotification } from "../shared/desktop-bridge";
 export function showWorkspaceNotification(notification: DesktopNotification, onClick: (notification: DesktopNotification) => void): void {
   if (!Notification.isSupported()) return;
   const native = new Notification({ title: notification.title, body: notification.body });
-  native.on("click", () => onClick(notification));
+  native.on("click", () => {
+    retained.delete(native);
+    onClick(notification);
+  });
+  native.on("close", () => retained.delete(native));
+  retain(native);
   native.show();
+}
+
+/**
+ * Shown notifications stay strongly referenced until the user acts on them. Collecting the JS
+ * wrapper only detaches the native delegate: macOS keeps the notification clickable and still
+ * activates the app, but the `click` event never reaches us — the app comes forward and lands
+ * nowhere. `close` is not guaranteed (on macOS it rarely fires for a banner that slides into
+ * Notification Center), so the set is capped; an evicted notification only brings the app forward.
+ * The cap is generous on purpose: every eviction is a dead click.
+ */
+const RETAINED_MAX = 256;
+const retained = new Set<Notification>();
+
+function retain(native: Notification): void {
+  retained.add(native);
+  // A Set iterates in insertion order, so the first entry is the oldest.
+  while (retained.size > RETAINED_MAX) {
+    const oldest = retained.values().next().value;
+    if (!oldest) break;
+    retained.delete(oldest);
+  }
 }
 
 /**
