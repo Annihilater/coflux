@@ -65,6 +65,18 @@ export const MAX_DEVICE_FRAME_BYTES = 30 * 1024 * 1024;
 /** 中心 checkpoint 只保存有界 terminal state，不承载完整 Device frame 上限。 */
 export const MAX_SESSION_CHECKPOINT_BYTES = 512 * 1024;
 
+/** Remote screen (plan 20260929-remote-desktop): the capability name a device advertises on
+ * DaemonInfo.capabilities when its worker reached the `coflux-screen` helper. Clients offer the
+ * 「屏幕」 tab only for devices carrying it. Same spelling as `SCREEN_CAPABILITY` in the worker. */
+export const SCREEN_CAPABILITY = "screen_v1";
+/** Version of the worker ⟷ coflux-screen hello (ScreenHelperHello.protocol_version). */
+export const SCREEN_HELPER_PROTOCOL_VERSION = 1;
+/** Largest ScreenVideoFrame.data in one message; larger frames are chunked, `last` on the final one. */
+export const SCREEN_VIDEO_CHUNK_BYTES = 256 * 1024;
+/** Initial video credit a client grants, in bytes, by transport path (see device.proto). */
+export const SCREEN_VIDEO_CREDIT_RELAY_BYTES = 2 * 1024 * 1024;
+export const SCREEN_VIDEO_CREDIT_DIRECT_BYTES = 8 * 1024 * 1024;
+
 
 /**
  * 信封 oneof 载荷的"构造态"类型（供发送方构造消息用）。

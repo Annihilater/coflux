@@ -4393,6 +4393,18 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::AnnotationsMutate(_)
         | device_envelope::Payload::AnnotationImageRead(_)
         | device_envelope::Payload::AnnotationHandOff(_) => Some(DeviceScope::SessionControl),
+        // Remote screen (plan 20260929-remote-desktop): RPC, like the loopback tunnel — RPC already
+        // allows `exec` of anything on the device, so seeing and driving its screen widens nothing.
+        device_envelope::Payload::ScreenSessionOpen(_)
+        | device_envelope::Payload::ScreenSessionClose(_)
+        | device_envelope::Payload::ScreenSessionResize(_)
+        | device_envelope::Payload::ScreenSessionPause(_)
+        | device_envelope::Payload::ScreenSessionResume(_)
+        | device_envelope::Payload::ScreenVideoAttach(_)
+        | device_envelope::Payload::ScreenVideoCredit(_)
+        | device_envelope::Payload::ScreenKeyframeRequest(_)
+        | device_envelope::Payload::ScreenInput(_)
+        | device_envelope::Payload::ScreenClipboardSet(_) => Some(DeviceScope::Rpc),
         _ => None,
     }
 }
@@ -4430,6 +4442,15 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::AnnotationsMutated(_)
         | device_envelope::Payload::AnnotationImageData(_)
         | device_envelope::Payload::AnnotationHandOffResult(_) => Some(DeviceScope::SessionControl),
+        device_envelope::Payload::ScreenSessionOpened(_)
+        | device_envelope::Payload::ScreenSessionState(_)
+        | device_envelope::Payload::ScreenSessionClosed(_)
+        | device_envelope::Payload::ScreenSessionDetached(_)
+        | device_envelope::Payload::ScreenSessionEnded(_)
+        | device_envelope::Payload::ScreenVideoAttached(_)
+        | device_envelope::Payload::ScreenVideoFrame(_)
+        | device_envelope::Payload::ScreenCursor(_)
+        | device_envelope::Payload::ScreenClipboardChanged(_) => Some(DeviceScope::Rpc),
         _ => None,
     }
 }

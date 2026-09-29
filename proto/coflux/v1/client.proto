@@ -122,6 +122,27 @@ message TerminalCreate {
   string path = 2;
 }
 
+// Ensure the device's canonical directory workspace exists without creating a task (plan
+// 20260929-remote-desktop): a screen tab needs a workspace to live in, but no shell. Same idempotent
+// reuse rule as TerminalCreate — at most one directory workspace per device, the earliest wins —
+// and `path` is the same daemon-resolved HOME absolute path. Answered by DirectoryWorkspaceEnsured
+// to the requesting connection only; a newly created workspace is also broadcast as WorkspaceCreated.
+message DirectoryWorkspaceEnsure {
+  string request_id = 1;
+  string daemon_id = 2;
+  string path = 3;
+}
+
+// Answer to DirectoryWorkspaceEnsure. ok: workspace_id names the device's directory workspace,
+// whether it already existed or was just created. Otherwise error says why (daemon offline, not
+// this account, empty path).
+message DirectoryWorkspaceEnsured {
+  string request_id = 1;
+  bool ok = 2;
+  string workspace_id = 3;
+  string error = 4;
+}
+
 message TaskStart {
   string task_id = 1;
   uint32 cols = 2;
@@ -197,6 +218,7 @@ message ClientToServer {
     DeviceTailcatControl device_tailcat_control = 45;
     DeviceTailcatFailed device_tailcat_failed = 46;
     DeviceJoinKeyCreate device_join_key_create = 47;
+    DirectoryWorkspaceEnsure directory_workspace_ensure = 48;
   }
 }
 
@@ -394,6 +416,7 @@ message ServerToClient {
     DeviceJoinKeyCreated device_join_key_created = 44;
     SecretRequestsUpdated secret_requests_updated = 45;
     AnnotationsSummaryUpdated annotations_summary_updated = 46;
+    DirectoryWorkspaceEnsured directory_workspace_ensured = 47;
   }
 }
 

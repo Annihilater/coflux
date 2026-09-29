@@ -424,6 +424,48 @@ public struct Coflux_V1_TerminalCreate: Sendable {
   public init() {}
 }
 
+/// Ensure the device's canonical directory workspace exists without creating a task (plan
+/// 20260929-remote-desktop): a screen tab needs a workspace to live in, but no shell. Same idempotent
+/// reuse rule as TerminalCreate — at most one directory workspace per device, the earliest wins —
+/// and `path` is the same daemon-resolved HOME absolute path. Answered by DirectoryWorkspaceEnsured
+/// to the requesting connection only; a newly created workspace is also broadcast as WorkspaceCreated.
+public struct Coflux_V1_DirectoryWorkspaceEnsure: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var daemonID: String = String()
+
+  public var path: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Answer to DirectoryWorkspaceEnsure. ok: workspace_id names the device's directory workspace,
+/// whether it already existed or was just created. Otherwise error says why (daemon offline, not
+/// this account, empty path).
+public struct Coflux_V1_DirectoryWorkspaceEnsured: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var workspaceID: String = String()
+
+  public var error: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public struct Coflux_V1_TaskStart: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -762,6 +804,14 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .deviceJoinKeyCreate(newValue)}
   }
 
+  public var directoryWorkspaceEnsure: Coflux_V1_DirectoryWorkspaceEnsure {
+    get {
+      if case .directoryWorkspaceEnsure(let v)? = payload {return v}
+      return Coflux_V1_DirectoryWorkspaceEnsure()
+    }
+    set {payload = .directoryWorkspaceEnsure(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -797,6 +847,7 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case deviceTailcatControl(Coflux_V1_DeviceTailcatControl)
     case deviceTailcatFailed(Coflux_V1_DeviceTailcatFailed)
     case deviceJoinKeyCreate(Coflux_V1_DeviceJoinKeyCreate)
+    case directoryWorkspaceEnsure(Coflux_V1_DirectoryWorkspaceEnsure)
 
   }
 
@@ -1605,6 +1656,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .annotationsSummaryUpdated(newValue)}
   }
 
+  public var directoryWorkspaceEnsured: Coflux_V1_DirectoryWorkspaceEnsured {
+    get {
+      if case .directoryWorkspaceEnsured(let v)? = payload {return v}
+      return Coflux_V1_DirectoryWorkspaceEnsured()
+    }
+    set {payload = .directoryWorkspaceEnsured(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1641,6 +1700,7 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case deviceJoinKeyCreated(Coflux_V1_DeviceJoinKeyCreated)
     case secretRequestsUpdated(Coflux_V1_SecretRequestsUpdated)
     case annotationsSummaryUpdated(Coflux_V1_AnnotationsSummaryUpdated)
+    case directoryWorkspaceEnsured(Coflux_V1_DirectoryWorkspaceEnsured)
 
   }
 
@@ -2428,6 +2488,91 @@ extension Coflux_V1_TerminalCreate: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
+extension Coflux_V1_DirectoryWorkspaceEnsure: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DirectoryWorkspaceEnsure"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}daemon_id\0\u{1}path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 2)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DirectoryWorkspaceEnsure, rhs: Coflux_V1_DirectoryWorkspaceEnsure) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DirectoryWorkspaceEnsured: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DirectoryWorkspaceEnsured"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{3}workspace_id\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 3)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DirectoryWorkspaceEnsured, rhs: Coflux_V1_DirectoryWorkspaceEnsured) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_TaskStart: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskStart"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}cols\0\u{1}rows\0")
@@ -2600,7 +2745,7 @@ extension Coflux_V1_OAuthAuthorizeDecide: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{3}directory_workspace_ensure\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3024,6 +3169,19 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .deviceJoinKeyCreate(v)
         }
       }()
+      case 48: try {
+        var v: Coflux_V1_DirectoryWorkspaceEnsure?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .directoryWorkspaceEnsure(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .directoryWorkspaceEnsure(v)
+        }
+      }()
       default: break
       }
     }
@@ -3162,6 +3320,10 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .deviceJoinKeyCreate?: try {
       guard case .deviceJoinKeyCreate(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 47)
+    }()
+    case .directoryWorkspaceEnsure?: try {
+      guard case .directoryWorkspaceEnsure(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 48)
     }()
     case nil: break
     }
@@ -4035,7 +4197,7 @@ extension Coflux_V1_TaskReadResult: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{3}directory_workspace_ensured\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4472,6 +4634,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .annotationsSummaryUpdated(v)
         }
       }()
+      case 47: try {
+        var v: Coflux_V1_DirectoryWorkspaceEnsured?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .directoryWorkspaceEnsured(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .directoryWorkspaceEnsured(v)
+        }
+      }()
       default: break
       }
     }
@@ -4614,6 +4789,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .annotationsSummaryUpdated?: try {
       guard case .annotationsSummaryUpdated(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 46)
+    }()
+    case .directoryWorkspaceEnsured?: try {
+      guard case .directoryWorkspaceEnsured(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 47)
     }()
     case nil: break
     }

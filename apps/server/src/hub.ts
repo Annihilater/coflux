@@ -192,6 +192,12 @@ interface DaemonInfoData {
    * 离线设备（来自 devices 表）无此信息——版本不入库，纯在线连接内存态，空串即"未知"。 */
   workerVersion: string;
   supervisorVersion: string;
+  /** The capability names the online connection declared (plan 20260929-remote-desktop carries them
+   * to clients so a device-side feature such as the remote screen is offered only where its helper
+   * answered). Required, not optional, so that every hand-written DaemonInfo literal must decide it:
+   * the client replaces its copy of the device wholesale on daemonUpdated, and one emission that
+   * omitted it would make the feature vanish until the next handshake. Empty for offline rows. */
+  capabilities: readonly string[];
 }
 
 /** agent presence 条目（plan 073）：不用生成的 SessionAgentRef 消息类型（无需 $typeName）——
@@ -886,7 +892,7 @@ export class Hub {
     for (const dev of await this.store.listDevices(accountId)) {
       if (seen.has(dev.id)) continue;
       seen.add(dev.id);
-      list.push({ daemonId: dev.id, name: dev.name, host: dev.host, platform: dev.platform, online: false, workerVersion: "", supervisorVersion: "" });
+      list.push(offlineDaemonInfo(dev));
     }
     return list;
   }
@@ -937,6 +943,7 @@ export class Hub {
         host: device.host,
         platform: device.platform,
         online: true,
+        capabilities: [...new Set(capabilities)],
       };
       const daemon: DaemonConn = { ws: conn.ws, info, accountId: device.accountId, arch, capabilities: new Set(capabilities) };
       const prev = this.daemons.get(info.daemonId);
@@ -2336,7 +2343,7 @@ export class Hub {
         }
         const registered = await this.registerDaemonConn(
           conn,
-          { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion },
+          { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: true, workerVersion: value.workerVersion, supervisorVersion: value.supervisorVersion, capabilities: value.capabilities ?? [] },
           device.accountId,
           value.arch,
           { case: "daemonAuthed", value: { daemonId: device.id, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
@@ -2915,7 +2922,7 @@ export class Hub {
       const device = await this.store.getDevice(daemonId);
       if (this.shuttingDown) return;
       if (device && !device.revoked) {
-        this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: { daemonId, name: device.name, host: device.host, platform: device.platform, online: false, workerVersion: "", supervisorVersion: "" } } });
+        this.broadcast(accountId, { case: "daemonUpdated", value: { daemon: offlineDaemonInfo(device) } });
       } else {
         this.broadcast(accountId, { case: "daemonRemoved", value: { daemonId } });
       }
@@ -3320,13 +3327,13 @@ export class Hub {
           if (!trimmedName) return;
           const updated = await this.store.updateDeviceName(device.id, trimmedName);
           if (!updated || deviceEffectGuard.cancelled) return;
-          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: { daemonId: updated.id, name: updated.name, host: updated.host, platform: updated.platform, online: this.isDaemonOnline(updated.id), workerVersion: "", supervisorVersion: "" } } });
-          // 若设备当前在线，更新内存并即时下发
+          // The live connection's info (versions, capabilities) must not be blanked by a rename:
+          // the client replaces the device wholesale on daemonUpdated.
           const d = this.daemons.get(updated.id);
-          if (d) {
-            d.info.name = trimmedName;
-            this.sendDaemon(d, { case: "daemonSetName", value: { name: trimmedName } });
-          }
+          if (d) d.info.name = trimmedName;
+          this.broadcast(updated.accountId, { case: "daemonUpdated", value: { daemon: d ? { ...d.info } : offlineDaemonInfo(updated) } });
+          // 若设备当前在线，即时下发
+          if (d) this.sendDaemon(d, { case: "daemonSetName", value: { name: trimmedName } });
         });
         break;
       }
@@ -4024,7 +4031,7 @@ export class Hub {
     if (!accountId) return { ok: false, reason: "rejected" };
     const registered = await this.registerDaemonConn(
       conn,
-      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion },
+      { daemonId, name: info.name, host: info.host, platform: info.platform, online: true, workerVersion: info.workerVersion, supervisorVersion: info.supervisorVersion, capabilities: info.capabilities },
       accountId,
       info.arch,
       { case: "daemonEnrolled", value: { daemonId, deviceToken, controlProtocolVersion: CONTROL_PROTOCOL_VERSION } },
@@ -4974,6 +4981,11 @@ function validControlId(value: string): boolean {
     const code = char.charCodeAt(0);
     return code < 32 || code === 127;
   });
+}
+
+/** A DaemonInfo for a device row with no live connection: no versions, no capabilities. */
+function offlineDaemonInfo(device: { id: DaemonId; name: string; host: string; platform: string }): DaemonInfoData {
+  return { daemonId: device.id, name: device.name, host: device.host, platform: device.platform, online: false, workerVersion: "", supervisorVersion: "", capabilities: [] };
 }
 
 /** 握手宣告的能力名（plan 091）：有界、无控制字符；名单外的名字原样保存（前向兼容，门禁只看已知名）。

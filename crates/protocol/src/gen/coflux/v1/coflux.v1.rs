@@ -17,6 +17,13 @@ pub struct DaemonInfo {
     pub worker_version: ::prost::alloc::string::String,
     #[prost(string, tag="7")]
     pub supervisor_version: ::prost::alloc::string::String,
+    /// Capability names the online daemon declared at authentication (DaemonAuth.capabilities), as
+    /// the server holds them for the connection; empty for an offline device and for old servers.
+    /// Clients gate device-side features on a name (for example `screen_v1`, the remote screen helper
+    /// of plan 20260929-remote-desktop), never on a version. The server fills it on every DaemonInfo
+    /// it emits, so a client may replace its copy of the device wholesale on each daemonUpdated.
+    #[prost(string, repeated, tag="8")]
+    pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Project {
@@ -1796,6 +1803,431 @@ pub struct DeviceAnnotationHandOffResult {
     #[prost(bool, tag="4")]
     pub held: bool,
 }
+/// TCC state of the helper's process tree on the remote Mac. Without accessibility the picture is
+/// read-only (input is ignored); without screen_recording there is no picture.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenPermissions {
+    #[prost(bool, tag="1")]
+    pub screen_recording: bool,
+    #[prost(bool, tag="2")]
+    pub accessibility: bool,
+}
+/// The virtual display as applied on the remote: points × scale = pixels. Pointer coordinates in
+/// ScreenInput are in these points; video frames are in these pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenDisplayGeometry {
+    #[prost(uint32, tag="1")]
+    pub width_points: u32,
+    #[prost(uint32, tag="2")]
+    pub height_points: u32,
+    /// 1 or 2 (HiDPI).
+    #[prost(uint32, tag="3")]
+    pub scale: u32,
+    #[prost(uint32, tag="4")]
+    pub width_pixels: u32,
+    #[prost(uint32, tag="5")]
+    pub height_pixels: u32,
+}
+/// The full state of a session: carried in ScreenSessionOpened and, on every change, in
+/// ScreenSessionState. `error` is diagnostic text for the last failure, if any.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionStatus {
+    #[prost(enumeration="ScreenSessionPhase", tag="1")]
+    pub phase: i32,
+    #[prost(message, optional, tag="2")]
+    pub permissions: ::core::option::Option<ScreenPermissions>,
+    #[prost(bool, tag="3")]
+    pub locked: bool,
+    #[prost(message, optional, tag="4")]
+    pub display: ::core::option::Option<ScreenDisplayGeometry>,
+    #[prost(string, optional, tag="5")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// client→worker (RPC), CONTROL lane: open or reattach a session.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionOpen {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Client-chosen, stable for the life of the tab across reconnects and app restarts, so that a
+    /// reconnect reattaches to the same remote session and virtual display.
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub client_instance_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="4")]
+    pub transport_generation: u64,
+    /// Preempt the current holder.
+    #[prost(bool, tag="5")]
+    pub force: bool,
+    /// The size of the tab in points and the local scale; the remote virtual display follows them.
+    #[prost(uint32, tag="6")]
+    pub width_points: u32,
+    #[prost(uint32, tag="7")]
+    pub height_points: u32,
+    #[prost(uint32, tag="8")]
+    pub scale: u32,
+    /// The client's decoders, most preferred first.
+    #[prost(enumeration="ScreenVideoCodec", repeated, tag="9")]
+    pub codecs: ::prost::alloc::vec::Vec<i32>,
+}
+/// worker→client (RPC), CONTROL lane. On ok the session is held by this channel with holder_epoch
+/// and every later control request must carry that epoch. Codes on failure: "held" (another client
+/// holds it and force was not set), "unsupported_codec", "no_helper" (the helper could not be
+/// started or reached), "no_display" (the virtual display could not be created), "invalid".
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionOpened {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag="5")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(uint64, tag="6")]
+    pub holder_epoch: u64,
+    #[prost(enumeration="ScreenVideoCodec", tag="7")]
+    pub codec: i32,
+    #[prost(message, optional, tag="8")]
+    pub status: ::core::option::Option<ScreenSessionStatus>,
+}
+/// worker→client (RPC), CONTROL lane: the session's state changed (permissions, lock, display
+/// geometry, phase).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionState {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub status: ::core::option::Option<ScreenSessionStatus>,
+}
+/// client→worker (RPC), CONTROL lane: end the session (the tab was closed). The virtual display is
+/// removed and the remote's previous display arrangement restored.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionClose {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub holder_epoch: u64,
+}
+/// worker→client (RPC), CONTROL lane.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionClosed {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// client→worker (RPC), CONTROL lane: the tab changed size; the virtual display follows. resize_seq
+/// starts at 1 and is monotonic per holder; a smaller seq is stale and ignored. The new geometry is
+/// reported back in ScreenSessionState and the next frame is a keyframe at the new size.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionResize {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(uint64, tag="3")]
+    pub resize_seq: u64,
+    #[prost(uint32, tag="4")]
+    pub width_points: u32,
+    #[prost(uint32, tag="5")]
+    pub height_points: u32,
+    #[prost(uint32, tag="6")]
+    pub scale: u32,
+}
+/// client→worker (RPC), CONTROL lane: stop capturing (background tab). The virtual display, the
+/// mirror and the power assertions stay so remote windows are not reshuffled.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionPause {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+}
+/// client→worker (RPC), CONTROL lane: capture again; the next frame is a keyframe.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionResume {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+}
+/// worker→client (RPC), CONTROL lane: another client took the session over (「已被其它客户端接管」).
+/// The virtual display now belongs to the new holder; this channel's epoch is dead.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionDetached {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(string, optional, tag="3")]
+    pub reason: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// worker→client (RPC), CONTROL lane: the helper ended the session on its own: the orphan grace
+/// expired, the helper is stopping, or the session was closed from another channel. Terminal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenSessionEnded {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub reason: ::prost::alloc::string::String,
+}
+/// client→worker (RPC), VIDEO lane: bind this channel as the session's video sink and grant the
+/// initial credit. Replaces any previous video lane of the session; the next frame is a keyframe.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenVideoAttach {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(uint64, tag="3")]
+    pub credit_bytes: u64,
+}
+/// worker→client (RPC), VIDEO lane.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenVideoAttached {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// client→worker (RPC), VIDEO lane: return credit for frame bytes handed to the decoder.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenVideoCredit {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub bytes: u64,
+}
+/// client→worker (RPC), VIDEO lane: the decoder needs a keyframe (after a decode error, a reconnect
+/// or a discarded frame).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenKeyframeRequest {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+}
+/// worker→client (RPC), VIDEO lane: one encoded frame, or one chunk of it. width/height are the
+/// coded size and are set on every chunk. pts_us is the capture time in microseconds on the
+/// remote's monotonic clock, for pacing only.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenVideoFrame {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub frame_seq: u64,
+    #[prost(bool, tag="3")]
+    pub keyframe: bool,
+    #[prost(uint64, tag="4")]
+    pub pts_us: u64,
+    #[prost(uint32, tag="5")]
+    pub width_pixels: u32,
+    #[prost(uint32, tag="6")]
+    pub height_pixels: u32,
+    #[prost(enumeration="ScreenVideoCodec", tag="7")]
+    pub codec: i32,
+    #[prost(bytes="vec", tag="8")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag="9")]
+    pub last: bool,
+}
+/// A key by physical position: `code` is the DOM KeyboardEvent.code ("KeyA", "MetaLeft", "Digit1",
+/// "ArrowUp"…), mapped to a macOS virtual key code on the remote, so neither side's layout or input
+/// method interferes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenKeyEvent {
+    #[prost(string, tag="1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub down: bool,
+    #[prost(uint32, tag="3")]
+    pub modifiers: u32,
+}
+/// Pointer in display points, origin top-left of the virtual display. button: 0 left, 1 right,
+/// 2 middle, 3+ other. click_count is macOS's click count (1 single, 2 double…).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ScreenPointerEvent {
+    #[prost(enumeration="ScreenPointerAction", tag="1")]
+    pub action: i32,
+    #[prost(double, tag="2")]
+    pub x: f64,
+    #[prost(double, tag="3")]
+    pub y: f64,
+    #[prost(uint32, tag="4")]
+    pub button: u32,
+    #[prost(uint32, tag="5")]
+    pub modifiers: u32,
+    #[prost(uint32, tag="6")]
+    pub click_count: u32,
+}
+/// Scroll at a position, deltas in points (precise = trackpad pixel deltas) or lines.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ScreenScrollEvent {
+    #[prost(double, tag="1")]
+    pub x: f64,
+    #[prost(double, tag="2")]
+    pub y: f64,
+    #[prost(double, tag="3")]
+    pub delta_x: f64,
+    #[prost(double, tag="4")]
+    pub delta_y: f64,
+    #[prost(uint32, tag="5")]
+    pub modifiers: u32,
+    #[prost(bool, tag="6")]
+    pub precise: bool,
+}
+/// client→worker (RPC), CONTROL lane. Ignored without accessibility on the remote.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScreenInput {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(oneof="screen_input::Event", tags="3, 4, 5")]
+    pub event: ::core::option::Option<screen_input::Event>,
+}
+/// Nested message and enum types in `ScreenInput`.
+pub mod screen_input {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Event {
+        #[prost(message, tag="3")]
+        Key(super::ScreenKeyEvent),
+        #[prost(message, tag="4")]
+        Pointer(super::ScreenPointerEvent),
+        #[prost(message, tag="5")]
+        Scroll(super::ScreenScrollEvent),
+    }
+}
+/// The remote cursor image (PNG, sized in points at the remote scale) and its hotspot.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScreenCursorShape {
+    #[prost(bytes="vec", tag="1")]
+    pub png: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="2")]
+    pub width_points: u32,
+    #[prost(uint32, tag="3")]
+    pub height_points: u32,
+    #[prost(double, tag="4")]
+    pub hotspot_x: f64,
+    #[prost(double, tag="5")]
+    pub hotspot_y: f64,
+}
+/// worker→client (RPC), CONTROL lane: the remote cursor moved or changed; `shape` is present only
+/// when it changed. x/y are display points. The client draws it locally so pointer feel does not
+/// wait for video.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScreenCursor {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(double, tag="2")]
+    pub x: f64,
+    #[prost(double, tag="3")]
+    pub y: f64,
+    #[prost(bool, tag="4")]
+    pub visible: bool,
+    #[prost(message, optional, tag="5")]
+    pub shape: ::core::option::Option<ScreenCursorShape>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenClipboardContent {
+    #[prost(oneof="screen_clipboard_content::Content", tags="1, 2")]
+    pub content: ::core::option::Option<screen_clipboard_content::Content>,
+}
+/// Nested message and enum types in `ScreenClipboardContent`.
+pub mod screen_clipboard_content {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Content {
+        #[prost(string, tag="1")]
+        Text(::prost::alloc::string::String),
+        #[prost(bytes, tag="2")]
+        Png(::prost::alloc::vec::Vec<u8>),
+    }
+}
+/// client→worker (RPC), CONTROL lane: the local clipboard changed; put it on the remote pasteboard.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenClipboardSet {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub holder_epoch: u64,
+    #[prost(message, optional, tag="3")]
+    pub content: ::core::option::Option<ScreenClipboardContent>,
+}
+/// worker→client (RPC), CONTROL lane: the remote pasteboard changed.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenClipboardChanged {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub content: ::core::option::Option<ScreenClipboardContent>,
+}
+// ----- worker ⟷ coflux-screen (Unix socket under $COFLUX_HOME, mode 0600) -----
+//
+// Each record is `length:u32 BE || ScreenHelperFrame`. The worker opens the socket, sends hello
+// first and expects hello_ack; both sides upgrade independently (the helper with the desktop
+// app, the worker hot), so a version mismatch is reported in the ack and the worker then does not
+// advertise `screen_v1`. After the hello the worker forwards every screen payload it receives on a
+// device channel as `envelope` (channel_id set to the lane it came from), and the helper answers
+// with `envelope`s whose channel_id names the lane to deliver to. `channel_closed` tells the
+// helper a lane went away without ending the session: the helper releases that lane's hold and
+// starts the orphan grace when no lane holds the session.
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenHelperHello {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    #[prost(string, tag="2")]
+    pub worker_version: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenHelperHelloAck {
+    #[prost(uint32, tag="1")]
+    pub protocol_version: u32,
+    #[prost(string, tag="2")]
+    pub helper_version: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub ok: bool,
+    #[prost(string, optional, tag="4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag="5")]
+    pub permissions: ::core::option::Option<ScreenPermissions>,
+    /// A session survives from before this worker connection (a worker restart).
+    #[prost(bool, tag="6")]
+    pub session_active: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScreenHelperChannelClosed {
+    #[prost(string, tag="1")]
+    pub channel_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScreenHelperFrame {
+    #[prost(oneof="screen_helper_frame::Payload", tags="1, 2, 3, 4")]
+    pub payload: ::core::option::Option<screen_helper_frame::Payload>,
+}
+/// Nested message and enum types in `ScreenHelperFrame`.
+pub mod screen_helper_frame {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        Hello(super::ScreenHelperHello),
+        #[prost(message, tag="2")]
+        HelloAck(super::ScreenHelperHelloAck),
+        #[prost(message, tag="3")]
+        ChannelClosed(super::ScreenHelperChannelClosed),
+        #[prost(message, tag="4")]
+        Envelope(super::DeviceEnvelope),
+    }
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceEnvelope {
     #[prost(uint32, tag="1")]
@@ -1804,7 +2236,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -1939,6 +2371,44 @@ pub mod device_envelope {
         AnnotationHandOff(super::DeviceAnnotationHandOff),
         #[prost(message, tag="117")]
         AnnotationHandOffResult(super::DeviceAnnotationHandOffResult),
+        #[prost(message, tag="120")]
+        ScreenSessionOpen(super::ScreenSessionOpen),
+        #[prost(message, tag="121")]
+        ScreenSessionOpened(super::ScreenSessionOpened),
+        #[prost(message, tag="122")]
+        ScreenSessionState(super::ScreenSessionState),
+        #[prost(message, tag="123")]
+        ScreenSessionClose(super::ScreenSessionClose),
+        #[prost(message, tag="124")]
+        ScreenSessionClosed(super::ScreenSessionClosed),
+        #[prost(message, tag="125")]
+        ScreenSessionResize(super::ScreenSessionResize),
+        #[prost(message, tag="126")]
+        ScreenSessionPause(super::ScreenSessionPause),
+        #[prost(message, tag="127")]
+        ScreenSessionResume(super::ScreenSessionResume),
+        #[prost(message, tag="128")]
+        ScreenSessionDetached(super::ScreenSessionDetached),
+        #[prost(message, tag="129")]
+        ScreenSessionEnded(super::ScreenSessionEnded),
+        #[prost(message, tag="130")]
+        ScreenVideoAttach(super::ScreenVideoAttach),
+        #[prost(message, tag="131")]
+        ScreenVideoAttached(super::ScreenVideoAttached),
+        #[prost(message, tag="132")]
+        ScreenVideoCredit(super::ScreenVideoCredit),
+        #[prost(message, tag="133")]
+        ScreenKeyframeRequest(super::ScreenKeyframeRequest),
+        #[prost(message, tag="134")]
+        ScreenVideoFrame(super::ScreenVideoFrame),
+        #[prost(message, tag="135")]
+        ScreenInput(super::ScreenInput),
+        #[prost(message, tag="136")]
+        ScreenCursor(super::ScreenCursor),
+        #[prost(message, tag="137")]
+        ScreenClipboardSet(super::ScreenClipboardSet),
+        #[prost(message, tag="138")]
+        ScreenClipboardChanged(super::ScreenClipboardChanged),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -2414,6 +2884,197 @@ impl AnnotationImageKind {
         }
     }
 }
+// ===== Remote screen (plan 20260929-remote-desktop) =====
+//
+// A desktop views and drives another of the account's Macs from a 「屏幕」 tab. The controlled
+// side is `coflux-screen`, a helper shipped inside Coflux Desktop and started on demand by the
+// worker as a detached process; the worker only gates scope and bridges frames between device
+// channels and the helper over a Unix socket (ScreenHelperFrame below). The helper owns the
+// session, its virtual display, the holder epoch and the 10-minute orphan grace, so a worker
+// restart or hot upgrade neither ends the session nor removes the display.
+//
+// Authority: every client-initiated payload below requires DEVICE_SCOPE_RPC and every
+// worker-initiated one is delivered only under it. A device advertises `screen_v1`
+// (DaemonInfo.capabilities) only when its worker found the helper and the helper answered its
+// hello; clients offer the tab only for such devices.
+//
+// Lanes: one session uses two device channels of the same client, both RPC scope. The CONTROL lane
+// carries open/close/resize/pause/resume, input, cursor, clipboard and state. The VIDEO lane is
+// bound to the session with ScreenVideoAttach and then carries only ScreenVideoFrame downstream and
+// ScreenVideoCredit / ScreenKeyframeRequest upstream, so input never queues behind video.
+//
+// Video flow control is credit-based, counted in BYTES of ScreenVideoFrame.data, drop-at-source:
+//    - the client grants credit in ScreenVideoAttach.credit_bytes and ScreenVideoCredit.bytes;
+//    - the helper never has more frame bytes in flight than it has credit; a captured frame that
+//      does not fit is dropped (never queued) and the next frame delivered is a keyframe;
+//    - the client returns the bytes of every frame it received once handed to its decoder, whether
+//      or not it decoded it;
+//    - one message carries at most 256 KiB of data (SCREEN_VIDEO_CHUNK_BYTES); a larger frame is
+//      split into messages sharing frame_seq, `last` set on the final one;
+//    - a client starts with 2 MiB of credit on a relayed path and 8 MiB on a direct one.
+// The worker keeps at most 64 records of a screen channel queued to the transport helper (a
+// quarter of the helper's shared 256-record queue, the loopback tunnel's budget) and the credit
+// bounds what is queued in the channel's own sink.
+//
+// Holder: the helper keeps at most one session per device, with a holder_epoch starting at 1. A
+// ScreenSessionOpen while another client holds the session is refused with code "held" unless
+// `force` is set (「重新接管」), in which case the previous holder receives ScreenSessionDetached.
+// Reopening with the same client_instance_id reattaches without changing the holder.
+//
+// Video is H.264 (High profile, no B-frames) in Annex B byte-stream form with SPS/PPS in band on
+// every keyframe, so a decoder configures from the stream alone. The codec is negotiated so HEVC
+// can be added later.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that, arriving on
+// a screen lane, to their in-flight open and report that the daemon needs updating.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScreenVideoCodec {
+    Unspecified = 0,
+    H264 = 1,
+    Hevc = 2,
+}
+impl ScreenVideoCodec {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCREEN_VIDEO_CODEC_UNSPECIFIED",
+            Self::H264 => "SCREEN_VIDEO_CODEC_H264",
+            Self::Hevc => "SCREEN_VIDEO_CODEC_HEVC",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCREEN_VIDEO_CODEC_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCREEN_VIDEO_CODEC_H264" => Some(Self::H264),
+            "SCREEN_VIDEO_CODEC_HEVC" => Some(Self::Hevc),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScreenSessionPhase {
+    Unspecified = 0,
+    /// Waking displays, creating the virtual display, configuring mirroring.
+    Starting = 1,
+    /// Capture is running; frames flow as credit allows.
+    Streaming = 2,
+    /// The holder paused the stream (background tab); the virtual display stays.
+    Paused = 3,
+    /// Screen Recording is not granted on the remote: no picture until it is.
+    NoPermission = 4,
+    /// The remote login session is locked: no picture, remote unlock is unsupported.
+    Locked = 5,
+}
+impl ScreenSessionPhase {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCREEN_SESSION_PHASE_UNSPECIFIED",
+            Self::Starting => "SCREEN_SESSION_PHASE_STARTING",
+            Self::Streaming => "SCREEN_SESSION_PHASE_STREAMING",
+            Self::Paused => "SCREEN_SESSION_PHASE_PAUSED",
+            Self::NoPermission => "SCREEN_SESSION_PHASE_NO_PERMISSION",
+            Self::Locked => "SCREEN_SESSION_PHASE_LOCKED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCREEN_SESSION_PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCREEN_SESSION_PHASE_STARTING" => Some(Self::Starting),
+            "SCREEN_SESSION_PHASE_STREAMING" => Some(Self::Streaming),
+            "SCREEN_SESSION_PHASE_PAUSED" => Some(Self::Paused),
+            "SCREEN_SESSION_PHASE_NO_PERMISSION" => Some(Self::NoPermission),
+            "SCREEN_SESSION_PHASE_LOCKED" => Some(Self::Locked),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScreenPointerAction {
+    Unspecified = 0,
+    Move = 1,
+    Down = 2,
+    Up = 3,
+}
+impl ScreenPointerAction {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCREEN_POINTER_ACTION_UNSPECIFIED",
+            Self::Move => "SCREEN_POINTER_ACTION_MOVE",
+            Self::Down => "SCREEN_POINTER_ACTION_DOWN",
+            Self::Up => "SCREEN_POINTER_ACTION_UP",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCREEN_POINTER_ACTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCREEN_POINTER_ACTION_MOVE" => Some(Self::Move),
+            "SCREEN_POINTER_ACTION_DOWN" => Some(Self::Down),
+            "SCREEN_POINTER_ACTION_UP" => Some(Self::Up),
+            _ => None,
+        }
+    }
+}
+/// Modifier bits of ScreenKeyEvent / ScreenPointerEvent / ScreenScrollEvent.modifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScreenModifier {
+    Unspecified = 0,
+    Shift = 1,
+    Control = 2,
+    Option = 4,
+    Command = 8,
+    CapsLock = 16,
+    Function = 32,
+}
+impl ScreenModifier {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCREEN_MODIFIER_UNSPECIFIED",
+            Self::Shift => "SCREEN_MODIFIER_SHIFT",
+            Self::Control => "SCREEN_MODIFIER_CONTROL",
+            Self::Option => "SCREEN_MODIFIER_OPTION",
+            Self::Command => "SCREEN_MODIFIER_COMMAND",
+            Self::CapsLock => "SCREEN_MODIFIER_CAPS_LOCK",
+            Self::Function => "SCREEN_MODIFIER_FUNCTION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCREEN_MODIFIER_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCREEN_MODIFIER_SHIFT" => Some(Self::Shift),
+            "SCREEN_MODIFIER_CONTROL" => Some(Self::Control),
+            "SCREEN_MODIFIER_OPTION" => Some(Self::Option),
+            "SCREEN_MODIFIER_COMMAND" => Some(Self::Command),
+            "SCREEN_MODIFIER_CAPS_LOCK" => Some(Self::CapsLock),
+            "SCREEN_MODIFIER_FUNCTION" => Some(Self::Function),
+            _ => None,
+        }
+    }
+}
 // ===== Client → Server 载荷 =====
 
 /// 登录：用户名+密码（local/password 模式首次）/ 会话 client_token（重连，两模式通用）。
@@ -2570,6 +3231,34 @@ pub struct TerminalCreate {
     #[prost(string, tag="2")]
     pub path: ::prost::alloc::string::String,
 }
+/// Ensure the device's canonical directory workspace exists without creating a task (plan
+/// 20260929-remote-desktop): a screen tab needs a workspace to live in, but no shell. Same idempotent
+/// reuse rule as TerminalCreate — at most one directory workspace per device, the earliest wins —
+/// and `path` is the same daemon-resolved HOME absolute path. Answered by DirectoryWorkspaceEnsured
+/// to the requesting connection only; a newly created workspace is also broadcast as WorkspaceCreated.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DirectoryWorkspaceEnsure {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub path: ::prost::alloc::string::String,
+}
+/// Answer to DirectoryWorkspaceEnsure. ok: workspace_id names the device's directory workspace,
+/// whether it already existed or was just created. Otherwise error says why (daemon offline, not
+/// this account, empty path).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DirectoryWorkspaceEnsured {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TaskStart {
     #[prost(string, tag="1")]
@@ -2612,7 +3301,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -2683,6 +3372,8 @@ pub mod client_to_server {
         DeviceTailcatFailed(super::DeviceTailcatFailed),
         #[prost(message, tag="47")]
         DeviceJoinKeyCreate(super::DeviceJoinKeyCreate),
+        #[prost(message, tag="48")]
+        DirectoryWorkspaceEnsure(super::DirectoryWorkspaceEnsure),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -2889,7 +3580,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -2962,6 +3653,8 @@ pub mod server_to_client {
         SecretRequestsUpdated(super::SecretRequestsUpdated),
         #[prost(message, tag="46")]
         AnnotationsSummaryUpdated(super::AnnotationsSummaryUpdated),
+        #[prost(message, tag="47")]
+        DirectoryWorkspaceEnsured(super::DirectoryWorkspaceEnsured),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).

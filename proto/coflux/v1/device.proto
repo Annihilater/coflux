@@ -1143,6 +1143,375 @@ message DeviceAnnotationHandOffResult {
   bool held = 4;
 }
 
+// ===== Remote screen (plan 20260929-remote-desktop) =====
+//
+// A desktop views and drives another of the account's Macs from a 「屏幕」 tab. The controlled
+// side is `coflux-screen`, a helper shipped inside Coflux Desktop and started on demand by the
+// worker as a detached process; the worker only gates scope and bridges frames between device
+// channels and the helper over a Unix socket (ScreenHelperFrame below). The helper owns the
+// session, its virtual display, the holder epoch and the 10-minute orphan grace, so a worker
+// restart or hot upgrade neither ends the session nor removes the display.
+//
+// Authority: every client-initiated payload below requires DEVICE_SCOPE_RPC and every
+// worker-initiated one is delivered only under it. A device advertises `screen_v1`
+// (DaemonInfo.capabilities) only when its worker found the helper and the helper answered its
+// hello; clients offer the tab only for such devices.
+//
+// Lanes: one session uses two device channels of the same client, both RPC scope. The CONTROL lane
+// carries open/close/resize/pause/resume, input, cursor, clipboard and state. The VIDEO lane is
+// bound to the session with ScreenVideoAttach and then carries only ScreenVideoFrame downstream and
+// ScreenVideoCredit / ScreenKeyframeRequest upstream, so input never queues behind video.
+//
+// Video flow control is credit-based, counted in BYTES of ScreenVideoFrame.data, drop-at-source:
+//   - the client grants credit in ScreenVideoAttach.credit_bytes and ScreenVideoCredit.bytes;
+//   - the helper never has more frame bytes in flight than it has credit; a captured frame that
+//     does not fit is dropped (never queued) and the next frame delivered is a keyframe;
+//   - the client returns the bytes of every frame it received once handed to its decoder, whether
+//     or not it decoded it;
+//   - one message carries at most 256 KiB of data (SCREEN_VIDEO_CHUNK_BYTES); a larger frame is
+//     split into messages sharing frame_seq, `last` set on the final one;
+//   - a client starts with 2 MiB of credit on a relayed path and 8 MiB on a direct one.
+// The worker keeps at most 64 records of a screen channel queued to the transport helper (a
+// quarter of the helper's shared 256-record queue, the loopback tunnel's budget) and the credit
+// bounds what is queued in the channel's own sink.
+//
+// Holder: the helper keeps at most one session per device, with a holder_epoch starting at 1. A
+// ScreenSessionOpen while another client holds the session is refused with code "held" unless
+// `force` is set (「重新接管」), in which case the previous holder receives ScreenSessionDetached.
+// Reopening with the same client_instance_id reattaches without changing the holder.
+//
+// Video is H.264 (High profile, no B-frames) in Annex B byte-stream form with SPS/PPS in band on
+// every keyframe, so a decoder configures from the stream alone. The codec is negotiated so HEVC
+// can be added later.
+//
+// A worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients attribute exactly that, arriving on
+// a screen lane, to their in-flight open and report that the daemon needs updating.
+
+enum ScreenVideoCodec {
+  SCREEN_VIDEO_CODEC_UNSPECIFIED = 0;
+  SCREEN_VIDEO_CODEC_H264 = 1;
+  SCREEN_VIDEO_CODEC_HEVC = 2;
+}
+
+enum ScreenSessionPhase {
+  SCREEN_SESSION_PHASE_UNSPECIFIED = 0;
+  // Waking displays, creating the virtual display, configuring mirroring.
+  SCREEN_SESSION_PHASE_STARTING = 1;
+  // Capture is running; frames flow as credit allows.
+  SCREEN_SESSION_PHASE_STREAMING = 2;
+  // The holder paused the stream (background tab); the virtual display stays.
+  SCREEN_SESSION_PHASE_PAUSED = 3;
+  // Screen Recording is not granted on the remote: no picture until it is.
+  SCREEN_SESSION_PHASE_NO_PERMISSION = 4;
+  // The remote login session is locked: no picture, remote unlock is unsupported.
+  SCREEN_SESSION_PHASE_LOCKED = 5;
+}
+
+// TCC state of the helper's process tree on the remote Mac. Without accessibility the picture is
+// read-only (input is ignored); without screen_recording there is no picture.
+message ScreenPermissions {
+  bool screen_recording = 1;
+  bool accessibility = 2;
+}
+
+// The virtual display as applied on the remote: points × scale = pixels. Pointer coordinates in
+// ScreenInput are in these points; video frames are in these pixels.
+message ScreenDisplayGeometry {
+  uint32 width_points = 1;
+  uint32 height_points = 2;
+  // 1 or 2 (HiDPI).
+  uint32 scale = 3;
+  uint32 width_pixels = 4;
+  uint32 height_pixels = 5;
+}
+
+// The full state of a session: carried in ScreenSessionOpened and, on every change, in
+// ScreenSessionState. `error` is diagnostic text for the last failure, if any.
+message ScreenSessionStatus {
+  ScreenSessionPhase phase = 1;
+  ScreenPermissions permissions = 2;
+  bool locked = 3;
+  ScreenDisplayGeometry display = 4;
+  optional string error = 5;
+}
+
+// client→worker (RPC), CONTROL lane: open or reattach a session.
+message ScreenSessionOpen {
+  string request_id = 1;
+  // Client-chosen, stable for the life of the tab across reconnects and app restarts, so that a
+  // reconnect reattaches to the same remote session and virtual display.
+  string session_id = 2;
+  string client_instance_id = 3;
+  uint64 transport_generation = 4;
+  // Preempt the current holder.
+  bool force = 5;
+  // The size of the tab in points and the local scale; the remote virtual display follows them.
+  uint32 width_points = 6;
+  uint32 height_points = 7;
+  uint32 scale = 8;
+  // The client's decoders, most preferred first.
+  repeated ScreenVideoCodec codecs = 9;
+}
+
+// worker→client (RPC), CONTROL lane. On ok the session is held by this channel with holder_epoch
+// and every later control request must carry that epoch. Codes on failure: "held" (another client
+// holds it and force was not set), "unsupported_codec", "no_helper" (the helper could not be
+// started or reached), "no_display" (the virtual display could not be created), "invalid".
+message ScreenSessionOpened {
+  string request_id = 1;
+  string session_id = 2;
+  bool ok = 3;
+  optional string error = 4;
+  string code = 5;
+  uint64 holder_epoch = 6;
+  ScreenVideoCodec codec = 7;
+  ScreenSessionStatus status = 8;
+}
+
+// worker→client (RPC), CONTROL lane: the session's state changed (permissions, lock, display
+// geometry, phase).
+message ScreenSessionState {
+  string session_id = 1;
+  ScreenSessionStatus status = 2;
+}
+
+// client→worker (RPC), CONTROL lane: end the session (the tab was closed). The virtual display is
+// removed and the remote's previous display arrangement restored.
+message ScreenSessionClose {
+  string request_id = 1;
+  string session_id = 2;
+  uint64 holder_epoch = 3;
+}
+
+// worker→client (RPC), CONTROL lane.
+message ScreenSessionClosed {
+  string request_id = 1;
+  string session_id = 2;
+  bool ok = 3;
+  optional string error = 4;
+}
+
+// client→worker (RPC), CONTROL lane: the tab changed size; the virtual display follows. resize_seq
+// starts at 1 and is monotonic per holder; a smaller seq is stale and ignored. The new geometry is
+// reported back in ScreenSessionState and the next frame is a keyframe at the new size.
+message ScreenSessionResize {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  uint64 resize_seq = 3;
+  uint32 width_points = 4;
+  uint32 height_points = 5;
+  uint32 scale = 6;
+}
+
+// client→worker (RPC), CONTROL lane: stop capturing (background tab). The virtual display, the
+// mirror and the power assertions stay so remote windows are not reshuffled.
+message ScreenSessionPause {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+}
+
+// client→worker (RPC), CONTROL lane: capture again; the next frame is a keyframe.
+message ScreenSessionResume {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+}
+
+// worker→client (RPC), CONTROL lane: another client took the session over (「已被其它客户端接管」).
+// The virtual display now belongs to the new holder; this channel's epoch is dead.
+message ScreenSessionDetached {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  optional string reason = 3;
+}
+
+// worker→client (RPC), CONTROL lane: the helper ended the session on its own: the orphan grace
+// expired, the helper is stopping, or the session was closed from another channel. Terminal.
+message ScreenSessionEnded {
+  string session_id = 1;
+  string reason = 2;
+}
+
+// client→worker (RPC), VIDEO lane: bind this channel as the session's video sink and grant the
+// initial credit. Replaces any previous video lane of the session; the next frame is a keyframe.
+message ScreenVideoAttach {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  uint64 credit_bytes = 3;
+}
+
+// worker→client (RPC), VIDEO lane.
+message ScreenVideoAttached {
+  string session_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+// client→worker (RPC), VIDEO lane: return credit for frame bytes handed to the decoder.
+message ScreenVideoCredit {
+  string session_id = 1;
+  uint64 bytes = 2;
+}
+
+// client→worker (RPC), VIDEO lane: the decoder needs a keyframe (after a decode error, a reconnect
+// or a discarded frame).
+message ScreenKeyframeRequest {
+  string session_id = 1;
+}
+
+// worker→client (RPC), VIDEO lane: one encoded frame, or one chunk of it. width/height are the
+// coded size and are set on every chunk. pts_us is the capture time in microseconds on the
+// remote's monotonic clock, for pacing only.
+message ScreenVideoFrame {
+  string session_id = 1;
+  uint64 frame_seq = 2;
+  bool keyframe = 3;
+  uint64 pts_us = 4;
+  uint32 width_pixels = 5;
+  uint32 height_pixels = 6;
+  ScreenVideoCodec codec = 7;
+  bytes data = 8;
+  bool last = 9;
+}
+
+enum ScreenPointerAction {
+  SCREEN_POINTER_ACTION_UNSPECIFIED = 0;
+  SCREEN_POINTER_ACTION_MOVE = 1;
+  SCREEN_POINTER_ACTION_DOWN = 2;
+  SCREEN_POINTER_ACTION_UP = 3;
+}
+
+// Modifier bits of ScreenKeyEvent / ScreenPointerEvent / ScreenScrollEvent.modifiers.
+enum ScreenModifier {
+  SCREEN_MODIFIER_UNSPECIFIED = 0;
+  SCREEN_MODIFIER_SHIFT = 1;
+  SCREEN_MODIFIER_CONTROL = 2;
+  SCREEN_MODIFIER_OPTION = 4;
+  SCREEN_MODIFIER_COMMAND = 8;
+  SCREEN_MODIFIER_CAPS_LOCK = 16;
+  SCREEN_MODIFIER_FUNCTION = 32;
+}
+
+// A key by physical position: `code` is the DOM KeyboardEvent.code ("KeyA", "MetaLeft", "Digit1",
+// "ArrowUp"…), mapped to a macOS virtual key code on the remote, so neither side's layout or input
+// method interferes.
+message ScreenKeyEvent {
+  string code = 1;
+  bool down = 2;
+  uint32 modifiers = 3;
+}
+
+// Pointer in display points, origin top-left of the virtual display. button: 0 left, 1 right,
+// 2 middle, 3+ other. click_count is macOS's click count (1 single, 2 double…).
+message ScreenPointerEvent {
+  ScreenPointerAction action = 1;
+  double x = 2;
+  double y = 3;
+  uint32 button = 4;
+  uint32 modifiers = 5;
+  uint32 click_count = 6;
+}
+
+// Scroll at a position, deltas in points (precise = trackpad pixel deltas) or lines.
+message ScreenScrollEvent {
+  double x = 1;
+  double y = 2;
+  double delta_x = 3;
+  double delta_y = 4;
+  uint32 modifiers = 5;
+  bool precise = 6;
+}
+
+// client→worker (RPC), CONTROL lane. Ignored without accessibility on the remote.
+message ScreenInput {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  oneof event {
+    ScreenKeyEvent key = 3;
+    ScreenPointerEvent pointer = 4;
+    ScreenScrollEvent scroll = 5;
+  }
+}
+
+// The remote cursor image (PNG, sized in points at the remote scale) and its hotspot.
+message ScreenCursorShape {
+  bytes png = 1;
+  uint32 width_points = 2;
+  uint32 height_points = 3;
+  double hotspot_x = 4;
+  double hotspot_y = 5;
+}
+
+// worker→client (RPC), CONTROL lane: the remote cursor moved or changed; `shape` is present only
+// when it changed. x/y are display points. The client draws it locally so pointer feel does not
+// wait for video.
+message ScreenCursor {
+  string session_id = 1;
+  double x = 2;
+  double y = 3;
+  bool visible = 4;
+  ScreenCursorShape shape = 5;
+}
+
+message ScreenClipboardContent {
+  oneof content {
+    string text = 1;
+    bytes png = 2;
+  }
+}
+
+// client→worker (RPC), CONTROL lane: the local clipboard changed; put it on the remote pasteboard.
+message ScreenClipboardSet {
+  string session_id = 1;
+  uint64 holder_epoch = 2;
+  ScreenClipboardContent content = 3;
+}
+
+// worker→client (RPC), CONTROL lane: the remote pasteboard changed.
+message ScreenClipboardChanged {
+  string session_id = 1;
+  ScreenClipboardContent content = 2;
+}
+
+// ----- worker ⟷ coflux-screen (Unix socket under $COFLUX_HOME, mode 0600) -----
+//
+// Each record is `length:u32 BE || ScreenHelperFrame`. The worker opens the socket, sends hello
+// first and expects hello_ack; both sides upgrade independently (the helper with the desktop
+// app, the worker hot), so a version mismatch is reported in the ack and the worker then does not
+// advertise `screen_v1`. After the hello the worker forwards every screen payload it receives on a
+// device channel as `envelope` (channel_id set to the lane it came from), and the helper answers
+// with `envelope`s whose channel_id names the lane to deliver to. `channel_closed` tells the
+// helper a lane went away without ending the session: the helper releases that lane's hold and
+// starts the orphan grace when no lane holds the session.
+
+message ScreenHelperHello {
+  uint32 protocol_version = 1;
+  string worker_version = 2;
+}
+
+message ScreenHelperHelloAck {
+  uint32 protocol_version = 1;
+  string helper_version = 2;
+  bool ok = 3;
+  optional string error = 4;
+  ScreenPermissions permissions = 5;
+  // A session survives from before this worker connection (a worker restart).
+  bool session_active = 6;
+}
+
+message ScreenHelperChannelClosed {
+  string channel_id = 1;
+}
+
+message ScreenHelperFrame {
+  oneof payload {
+    ScreenHelperHello hello = 1;
+    ScreenHelperHelloAck hello_ack = 2;
+    ScreenHelperChannelClosed channel_closed = 3;
+    DeviceEnvelope envelope = 4;
+  }
+}
+
 message DeviceEnvelope {
   uint32 protocol_version = 1;
   // 已认证后的 inner channel_id 必须与 loopback/relay/UDS 外层 channel 相同；LocalGatewayHello
@@ -1213,5 +1582,24 @@ message DeviceEnvelope {
     DeviceAnnotationImageData annotation_image_data = 115;
     DeviceAnnotationHandOff annotation_hand_off = 116;
     DeviceAnnotationHandOffResult annotation_hand_off_result = 117;
+    ScreenSessionOpen screen_session_open = 120;
+    ScreenSessionOpened screen_session_opened = 121;
+    ScreenSessionState screen_session_state = 122;
+    ScreenSessionClose screen_session_close = 123;
+    ScreenSessionClosed screen_session_closed = 124;
+    ScreenSessionResize screen_session_resize = 125;
+    ScreenSessionPause screen_session_pause = 126;
+    ScreenSessionResume screen_session_resume = 127;
+    ScreenSessionDetached screen_session_detached = 128;
+    ScreenSessionEnded screen_session_ended = 129;
+    ScreenVideoAttach screen_video_attach = 130;
+    ScreenVideoAttached screen_video_attached = 131;
+    ScreenVideoCredit screen_video_credit = 132;
+    ScreenKeyframeRequest screen_keyframe_request = 133;
+    ScreenVideoFrame screen_video_frame = 134;
+    ScreenInput screen_input = 135;
+    ScreenCursor screen_cursor = 136;
+    ScreenClipboardSet screen_clipboard_set = 137;
+    ScreenClipboardChanged screen_clipboard_changed = 138;
   }
 }

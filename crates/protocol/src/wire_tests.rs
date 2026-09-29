@@ -650,3 +650,69 @@ fn server_initiated_exec_round_trips_inside_the_agent_request_oneofs() {
     assert!(outcome.stderr.contains("No such file"));
     assert_eq!(outcome.cwd, "/home/coflux/logs");
 }
+
+/// Remote screen (plan 20260929-remote-desktop): a video frame chunk round-trips inside a
+/// DeviceEnvelope, and the worker ⟷ helper ScreenHelperFrame carries that same envelope verbatim
+/// with the channel id the worker tagged it with.
+#[test]
+fn screen_payloads_round_trip_through_device_and_helper_envelopes() {
+    use crate::wire::{
+        screen_helper_frame, screen_input, ScreenHelperFrame, ScreenHelperHello, ScreenInput,
+        ScreenKeyEvent, ScreenVideoCodec, ScreenVideoFrame,
+    };
+    let frame = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "video-lane".into(),
+        payload: Some(device_envelope::Payload::ScreenVideoFrame(ScreenVideoFrame {
+            session_id: "scr-1".into(),
+            frame_seq: u64::MAX - 1,
+            keyframe: true,
+            pts_us: 1 << 40,
+            width_pixels: 2880,
+            height_pixels: 1800,
+            codec: ScreenVideoCodec::H264 as i32,
+            data: vec![0, 0, 0, 1, 0x67, 0xff],
+            last: false,
+        })),
+    };
+    let helper = ScreenHelperFrame {
+        payload: Some(screen_helper_frame::Payload::Envelope(frame.clone())),
+    };
+    let back = ScreenHelperFrame::decode(helper.encode_to_vec().as_slice()).unwrap();
+    let Some(screen_helper_frame::Payload::Envelope(env)) = back.payload else {
+        panic!("helper frame must dispatch to the envelope branch");
+    };
+    assert_eq!(env, frame);
+    let Some(device_envelope::Payload::ScreenVideoFrame(video)) = env.payload else {
+        panic!("envelope must dispatch to the video frame branch");
+    };
+    assert_eq!(video.frame_seq, u64::MAX - 1);
+    assert_eq!(video.pts_us, 1 << 40);
+    assert_eq!(video.codec(), ScreenVideoCodec::H264);
+    assert!(!video.last);
+
+    let hello = ScreenHelperFrame {
+        payload: Some(screen_helper_frame::Payload::Hello(ScreenHelperHello {
+            protocol_version: crate::SCREEN_HELPER_PROTOCOL_VERSION,
+            worker_version: "builtin".into(),
+        })),
+    };
+    let back = ScreenHelperFrame::decode(hello.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(back, hello);
+
+    let input = DeviceEnvelope {
+        protocol_version: DEVICE_PROTOCOL_VERSION,
+        channel_id: "control-lane".into(),
+        payload: Some(device_envelope::Payload::ScreenInput(ScreenInput {
+            session_id: "scr-1".into(),
+            holder_epoch: 3,
+            event: Some(screen_input::Event::Key(ScreenKeyEvent {
+                code: "MetaLeft".into(),
+                down: true,
+                modifiers: 8,
+            })),
+        })),
+    };
+    let back = decode_device_envelope(&encode_device_envelope(&input)).unwrap();
+    assert_eq!(back, input);
+}
