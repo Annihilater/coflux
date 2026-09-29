@@ -20,7 +20,9 @@ pre-migration deployment only; it is not a command to recreate those services.
    and upstream STUN/UDP requirements. Do not reuse custom relay query-token
    paths or signing-key configuration. Pin the same Tailscale revision as
    `transport/tailcat/go.mod`; stock DERP is operated independently of product
-   release artifacts.
+   release artifacts. derper binds STUN to the IP of its `-a` flag, so a derper
+   behind a reverse proxy on loopback cannot serve STUN; run upstream `stund`
+   beside it instead, and point `STUNPort` only at a STUN server coflux owns.
 3. Set `COFLUX_DERP_REGIONS` on the center to 1–8 upstream region descriptors,
    containing unique positive `RegionID` values and matching node IDs/hostnames.
    Both ends use the worker-selected region; helper replacement rotates regions.
@@ -98,6 +100,8 @@ Daemons run on users' machines, not as part of these server roles. prod-bj also 
 `api`/`app`/`m` originally had **no dedicated records**, relying on the wildcard. Plan 089 created explicit DNS-only records on 2026-09-04; explicit records override wildcards. The wildcard stayed proxied, providing rollback: delete those three records and the wildcard takes over.
 
 **DERP admission outage, 2026-09-17 — read this before moving the centre.** prod-bj's `coflux-derp` runs stock `derper` with `-verify-client-url-fail-open=false`: it asks the centre about every client key and relays for nobody when it cannot ask. That call used to travel through `coflux-derp-admission-tunnel.service`, an SSH tunnel whose target host and port were written into the unit file *on prod-bj*. When prod-jp changed IP the tunnel died, admission failed closed, and every remote device in the account went dark for hours — while the control plane stayed healthy, `coflux device exec` kept working, and clients showed only 「正在探测」 forever. The single visible symptom was in prod-bj's own log: `rejected: Post "http://127.0.0.1:8793/verify": connection refused`. The tunnel is now disabled and masked out of the boot sequence; `-verify-client-url` points at `https://derp:<token>@api.coflux.dev/derp-verify`, held in `/etc/coflux-derp/admission.env` (0600) because a systemd unit is world-readable. Diagnose future relay silence with `journalctl -u coflux-derp | grep rejected` first.
+
+**STUN is `coflux-stun.service` on UDP 3479 (since 2026-09-29).** Every Tailcat node learns its public UDP endpoint by STUN against the region's `STUNPort`; without an answer it advertises only interface addresses, and every pair not on one LAN silently stays on DERP relay — nothing errors, the sidebar just shows 「中继连接」. `coflux-derp` runs `-stun=false` because it listens on `-a 127.0.0.1:8444` behind Caddy, and derper binds STUN to that address. `coflux-stun.service` runs `/opt/coflux-derp/stund -stun :3479 -http 127.0.0.1:3480` (upstream `tailscale.com/cmd/stund`, built from the pinned revision like `derper`; the debug port must stay on loopback — stund's default is `:3479` on every interface). **UDP 3478 on this host belongs to the owner's personal `derper.service` (a Tailscale tailnet DERP on 8443) and must never reappear in `COFLUX_DERP_REGIONS`**: until 2026-09-29 coflux advertised it, so stopping that unrelated service would have dropped every coflux direct path without a signal. Diagnose from any machine with `stunc 49.232.53.23 3479` (build `tailscale.com/cmd/stunc` in `transport/tailcat`; a plain RFC 5389 probe is ignored by Tailscale's STUN server), and on prod-bj with `curl -s 127.0.0.1:3480/debug/varz | grep stun_requests`, whose `success` count grows as coflux devices reconnect.
 
 The mainland machine, prod-bj, hosts only the relay server role and uses the registered domain `yourantiandi.com`. `coflux.dev` has no mainland ICP registration and does not point to mainland IPs.
 
