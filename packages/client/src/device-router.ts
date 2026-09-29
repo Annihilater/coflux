@@ -78,6 +78,11 @@ const HEARTBEAT_MAX_MISSES = 2;
  * 20260929-browser-annotations). Only ever derived from the worker's own request-id-less
  * `empty_payload` reply, never from a timeout: a timeout means unreachable or slow. */
 export const ANNOTATIONS_UNSUPPORTED = "annotations_unsupported";
+/** The error code of an annotation request whose frame could not fit in one Device frame; refused
+ * before sending, because a frame `sendOn` cannot send tears the whole session lane down. */
+export const ANNOTATION_FRAME_TOO_LARGE = "annotation_frame_too_large";
+/** Room left in a Device frame for the channel id the frame is re-encoded with. */
+const ANNOTATION_FRAME_MARGIN_BYTES = 4096;
 /** A save carries images (up to a few MiB each) and may cross a relay. */
 const ANNOTATION_WRITE_TIMEOUT_MS = 60_000;
 
@@ -2322,6 +2327,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   ): Promise<RuntimeDevicePayload> {
     const route = routeFor(daemonId);
     if (annotationsUnsupportedNow(route)) throw annotationsUnsupportedError();
+    const frameBytes = encodeDeviceEnvelope(create(DeviceEnvelopeSchema, { protocolVersion: DEVICE_PROTOCOL_VERSION, channelId: "", payload })).byteLength;
+    if (frameBytes + ANNOTATION_FRAME_MARGIN_BYTES > MAX_DEVICE_FRAME_BYTES) {
+      throw new DeviceRouteError("批注内容太大，超过了单次传输上限", ANNOTATION_FRAME_TOO_LARGE);
+    }
     route.transientDemand += 1;
     try {
       return await request(daemonId, DeviceScope.SESSION_CONTROL, payload, timeoutMs);

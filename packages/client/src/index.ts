@@ -1,5 +1,7 @@
 export type { AuthCredential, ClientKind, ConnectionStatus } from "./connection";
 export {
+  ANNOTATION_UPLOAD_TOO_LARGE,
+  MAX_ANNOTATION_UPLOAD_BYTES,
   createCofluxClient,
   isDirWorkspace,
   workspaceActivity,

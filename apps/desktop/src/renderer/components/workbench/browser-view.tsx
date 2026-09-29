@@ -31,7 +31,7 @@ import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuDivider, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { useToast } from "@astryxdesign/core/Toast";
-import type { AnnotationFailure, CofluxClient } from "@coflux/client";
+import { ANNOTATION_UPLOAD_TOO_LARGE, MAX_ANNOTATION_UPLOAD_BYTES, type AnnotationFailure, type CofluxClient } from "@coflux/client";
 import { AnnotationImageKind, AnnotationPutSchema, create, type Annotation } from "@coflux/protocol";
 
 import { BROWSER_DEVTOOLS_PARTITION } from "../../../shared/browser-partitions";
@@ -263,6 +263,11 @@ function BrowserView({
   const [annotating, setAnnotating] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<AnnotationDraft | null>(null);
+  /** The draft as last rendered, for the async attach path's size budget. */
+  const draftRef = useRef<AnnotationDraft | null>(null);
+  useEffect(() => {
+    draftRef.current = draft;
+  });
   const [anchorBox, setAnchorBox] = useState<{ rect: DesktopAnnotatorBox | null; viewport: DesktopAnnotatorViewport } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [missing, setMissing] = useState<{ url: string; ids: ReadonlySet<string> }>({ url: "", ids: new Set() });
@@ -379,7 +384,17 @@ function BrowserView({
       showToast({ body: "无法读取这张图片", type: "error" });
       return;
     }
-    setDraft((current) => (current ? { ...current, images: [...current.images, ...prepared], error: null } : current));
+    // One save is one Device frame: keep the new images of a draft within the upload budget, refusing
+    // the image that would cross it (the store refuses an oversized save again before sending).
+    let used = (draftRef.current?.images ?? []).reduce((total, image) => total + image.data.byteLength, 0);
+    const accepted = prepared.filter((image) => {
+      if (used + image.data.byteLength > MAX_ANNOTATION_UPLOAD_BYTES) return false;
+      used += image.data.byteLength;
+      return true;
+    });
+    if (accepted.length < prepared.length) showToast({ body: `${ANNOTATION_UPLOAD_TOO_LARGE}（这张没有附加）`, type: "error" });
+    if (accepted.length === 0) return;
+    setDraft((current) => (current ? { ...current, images: [...current.images, ...accepted], error: null } : current));
   }
 
   async function saveDraft() {

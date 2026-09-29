@@ -109,9 +109,19 @@ export type AnnotationChange =
  * ending in CR as a paste. The worker's path uses the same value. */
 const HAND_OFF_ENTER_DELAY_MS = 150;
 
+/** Upper bound on the image bytes one annotation save carries (plan 20260929-browser-annotations).
+ * A save is one Device frame (MAX_DEVICE_FRAME_BYTES = 30 MiB); the rest is headroom for the comment,
+ * element context, envelope and transport overhead. A frame that cannot be sent would otherwise
+ * tear the whole session lane down, so an oversized save is refused before it is sent. */
+export const MAX_ANNOTATION_UPLOAD_BYTES = 24 * 1024 * 1024;
+
+/** The readable refusal for a save over the budget, shared with the desktop's attach check. */
+export const ANNOTATION_UPLOAD_TOO_LARGE = "图片总大小超过 24 MB，删掉几张参考图后再保存";
+
 function annotationFailure(error: unknown): AnnotationFailure {
   const message = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: unknown } | null)?.code;
+  if (code === ANNOTATION_FRAME_TOO_LARGE) return { ok: false, reason: "refused", error: ANNOTATION_UPLOAD_TOO_LARGE };
   return { ok: false, reason: code === ANNOTATIONS_UNSUPPORTED ? "unsupported" : "unreachable", error: message };
 }
 
@@ -170,6 +180,7 @@ export function workspaceProgress(
 
 import { createConnection, type AuthCredential, type ClientKind, type ConnectionStatus, type ServerPayload } from "./connection";
 import {
+  ANNOTATION_FRAME_TOO_LARGE,
   ANNOTATIONS_UNSUPPORTED,
   createDeviceRouter,
   type DeviceInputState,
@@ -1386,6 +1397,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
   async function changeAnnotations(workspaceId: string, change: AnnotationChange): Promise<AnnotationMutateResult> {
     const daemonId = annotationDaemon(workspaceId);
     if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
+    if (change.kind === "put") {
+      const imageBytes = change.put.addImages.reduce((total, image) => total + image.data.byteLength, 0);
+      if (imageBytes > MAX_ANNOTATION_UPLOAD_BYTES) return { ok: false, reason: "refused", error: ANNOTATION_UPLOAD_TOO_LARGE };
+    }
     const action: DeviceAnnotationsMutate["action"] =
       change.kind === "put"
         ? { case: "put", value: change.put }
