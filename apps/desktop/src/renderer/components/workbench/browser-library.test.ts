@@ -16,9 +16,6 @@ import {
 
 const NOW = 1_800_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
-/** Two fields older versions wrote into the same version-1 record; kept out of the source as literals. */
-const RETIRED_LIST_FIELD = ["book", "marks"].join("");
-const RETIRED_TOGGLE_FIELD = `${RETIRED_LIST_FIELD}BarVisible`;
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -115,10 +112,10 @@ test("a version-1 record with fields written by older versions keeps its history
   const stale = JSON.stringify({
     version: 1,
     history,
-    [RETIRED_LIST_FIELD]: [{ url: "https://c.com/", title: "C", addedAt: NOW }],
-    [RETIRED_TOGGLE_FIELD]: true,
+    // Fields older versions wrote next to the history.
+    bookmarks: [{ url: "https://c.com/", title: "C", addedAt: NOW }],
+    bookmarksBarVisible: true,
   });
-  assert.deepEqual(Object.keys(JSON.parse(stale)).sort(), [RETIRED_LIST_FIELD, RETIRED_TOGGLE_FIELD, "history", "version"].sort());
   const storage = memoryStorage({ lib: stale });
   const library = readLibrary({ storage, key: "lib" });
   assert.deepEqual(library, { history });
@@ -134,9 +131,7 @@ test("a version-1 record with fields written by older versions keeps its history
       ["http://localhost:3000/", 2],
     ],
   );
-  const reserialized = JSON.parse(serializeLibrary(library));
-  assert.deepEqual(Object.keys(reserialized).sort(), ["history", "version"]);
-  assert.equal(RETIRED_LIST_FIELD in reserialized || RETIRED_TOGGLE_FIELD in reserialized, false);
+  assert.deepEqual(Object.keys(JSON.parse(serializeLibrary(library))).sort(), ["history", "version"]);
 });
 
 test("suggestions rank URL-prefix over host-label over title-word over substring matches, frequent and recent pages higher", () => {
