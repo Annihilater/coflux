@@ -4,7 +4,7 @@
   <p><strong>Your terminals. Every machine. One workspace.</strong></p>
   <p>A terminal workspace for you and your coding agents.<br>Run locally, reach your other devices, and take over whenever you need to.</p>
   <p>
-    <a href="https://github.com/myWsq/coflux/releases/latest">Download for macOS</a> ·
+    <a href="https://dl.coflux.dev/desktop/coflux-arm64.dmg">Download for macOS</a> ·
     <a href="#quick-start">Quick start</a> ·
     <a href="docs/architecture.md">Architecture</a> ·
     <a href="https://github.com/myWsq/coflux/issues">Report an issue</a>
@@ -37,7 +37,7 @@ Coding agents use the same capabilities through `coflux`: create a workspace, op
 
 **Requires macOS 26 or later on Apple Silicon.**
 
-1. [Download the latest release](https://github.com/myWsq/coflux/releases/latest), open the DMG, and move **Coflux** to Applications.
+1. [Download the latest release](https://dl.coflux.dev/desktop/coflux-arm64.dmg), open the DMG, and move **Coflux** to Applications.
 2. Open the app and sign in. Your Mac is connected automatically.
 3. Import a local Git repository, create a workspace, and open a terminal. Run your usual shell tools or start `claude` or `codex`.
 

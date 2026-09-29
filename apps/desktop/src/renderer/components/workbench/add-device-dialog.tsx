@@ -18,7 +18,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { DialogFooterActions } from "@/components/dialog-footer";
 import {
   advanceBaselineTracker,
-  desktopDownloadUrl,
+  DESKTOP_DOWNLOAD_URL,
   headlessAgentPrompt,
   joinKeyMinutesLeft,
   manualInstallCommand,
@@ -27,7 +27,7 @@ import {
   startBaselineTracker,
   type BaselineTracker,
 } from "@/components/workbench/add-device-view";
-import { desktop, SERVER_URL } from "@/config";
+import { SERVER_URL } from "@/config";
 import type { DesktopDaemonState } from "@/desktop-bridge";
 
 import { daemonServerUrl } from "../../../shared/daemon-urls";
@@ -203,7 +203,7 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
                       variant="primary"
                       size="sm"
                       icon={<Download className="size-4" aria-hidden />}
-                      onClick={() => window.open(desktopDownloadUrl(desktop.version), "_blank", "noopener")}
+                      onClick={() => window.open(DESKTOP_DOWNLOAD_URL, "_blank", "noopener")}
                     />
                   </HStack>
                   <Text type="supporting">需要 Apple 芯片、macOS 26 或更高版本；Intel Mac 请用 Headless。</Text>

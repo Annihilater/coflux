@@ -1,7 +1,7 @@
 # electron-builder 26.x（锁 26：27 会改 mac.universal / mac.sign 的配置结构，升级时迁配置）。
 # 正式发版由 .github/workflows/desktop-release.yml 驱动：签名身份来自 CSC_LINK/CSC_KEY_PASSWORD，
-# 公证凭据来自 APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER/APPLE_TEAM_ID，updater 源 URL 经
-# --config.publish.url 在打包时写入 app-update.yml。本机 `pnpm pack`/`pnpm dist` 用同一份配置。
+# 公证凭据来自 APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER/APPLE_TEAM_ID. The updater feed URL is
+# the `publish` block at the bottom, written into app-update.yml at pack time. 本机 `pnpm pack`/`pnpm dist` 用同一份配置。
 appId: dev.coflux.desktop
 # 与 package.json 的 productName 保持一致：运行时 app.name / userData 目录（~/Library/Application Support/Coflux）
 # 取的是 package.json 那份（缺失会退到 name "@coflux/desktop"），这里只决定 .app 文件名。
@@ -81,10 +81,13 @@ dmg:
   sign: false
   writeUpdateInfo: false
 
-# updater 源：仓库 desktop-updates 分支上的 latest-mac.yml（generic provider 读 <url>/latest-mac.yml），由
-# desktop-release.yml 在 GitHub Release 上传安装包后把清单改写成绝对下载地址推上去；安装包本身在 GitHub Release。
-# 不用 electron-updater 的 github provider：它看仓库 releases/latest，而 daemon 的 v* 与桌面的 desktop-v* 混在一个仓库里。
+# Update feed: `desktop/latest-mac.yml` on the R2 download mirror (the generic provider reads
+# <url>/latest-mac.yml). The release workflow's pointer job writes it only after the GitHub Release
+# succeeds, with absolute zip URLs under https://dl.coflux.dev/releases/<tag>/ (plan
+# 20260930-r2-download-mirror). Builds from before the mirror keep reading the repository's
+# `desktop-updates` branch, which the workflow still pushes with the same R2 zip URLs.
+# Not the github provider: it follows the repository's releases/latest.
 publish:
   provider: generic
-  url: https://raw.githubusercontent.com/myWsq/coflux/desktop-updates
+  url: https://dl.coflux.dev/desktop
   channel: latest

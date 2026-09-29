@@ -28,9 +28,15 @@ import { executorRuntime, plistXml, ptydPlistXml, ptydSystemdUnit, systemdUnit }
 const DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
 
 const REPO = "myWsq/coflux";
-const RELEASE_API_BASE = (process.env.COFLUX_RELEASE_API_BASE || "https://api.github.com").replace(/\/+$/, "");
-const RELEASE_DOWNLOAD_BASE = (
-  process.env.COFLUX_RELEASE_DOWNLOAD_BASE || `https://github.com/${REPO}/releases/download`
+// Release downloads route by version, never by failure (plan 20260930-r2-download-mirror): the mirror
+// (R2 at dl.coflux.dev) holds only the latest stable release and its `latest.json` pointer; every other
+// version, and every prerelease, comes from the GitHub Releases archive. No mirror-then-GitHub fallback:
+// a mirror outage must stay visible.
+const RELEASE_MIRROR_BASE = (
+  process.env.COFLUX_RELEASE_DOWNLOAD_BASE || "https://dl.coflux.dev/releases"
+).replace(/\/+$/, "");
+const RELEASE_ARCHIVE_BASE = (
+  process.env.COFLUX_RELEASE_ARCHIVE_BASE || `https://github.com/${REPO}/releases/download`
 ).replace(/\/+$/, "");
 const MAX_RELEASE_METADATA_BYTES = 1024 * 1024;
 const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
@@ -258,16 +264,18 @@ function persistCliReleaseFloor(version) {
   }
 }
 
-// 取最新 release tag（含 prerelease；GitHub 的 /releases/latest 跳转不含 prerelease，故走 API）。
-async function resolveLatestTag() {
+// The latest stable tag named by the mirror's `latest.json`, or null when it cannot be read or is invalid.
+async function readMirrorLatestTag() {
   try {
     const body = await fetchBounded(
-      `${RELEASE_API_BASE}/repos/${REPO}/releases?per_page=1`,
+      `${RELEASE_MIRROR_BASE}/latest.json`,
       MAX_RELEASE_METADATA_BYTES,
-      "GitHub release 元数据",
+      "release 下载镜像 latest.json",
     );
-    const arr = JSON.parse(body.toString("utf8"));
-    return Array.isArray(arr) && typeof arr[0]?.tag_name === "string" ? arr[0].tag_name : null;
+    const tag = JSON.parse(body.toString("utf8"))?.version;
+    if (typeof tag !== "string") return null;
+    assertReleaseVersion(tag);
+    return tag;
   } catch {
     return null;
   }
@@ -322,13 +330,23 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
   }
   const target = rustTarget();
   let releaseVersion;
+  let releaseBase;
   if (!version || version === "latest") {
-    const tag = await resolveLatestTag();
-    if (!tag) die("无法取得最新 release 的精确版本，拒绝无版本身份的下载");
+    const tag = await readMirrorLatestTag();
+    if (!tag) {
+      die(
+        `无法从下载镜像读取最新版本（${RELEASE_MIRROR_BASE}/latest.json），拒绝无版本身份的下载。\n` +
+        "  用 --version vX.Y.Z 指定版本即可从 GitHub Releases 安装。",
+      );
+    }
     releaseVersion = tag;
+    releaseBase = RELEASE_MIRROR_BASE;
     console.log(`最新版本: ${releaseVersion}`);
   } else {
     releaseVersion = version;
+    // Only the tag the mirror's pointer names lives on the mirror; any other version (older, newer or a
+    // prerelease), and any version asked for while the pointer is unreadable, comes from the archive.
+    releaseBase = (await readMirrorLatestTag()) === releaseVersion ? RELEASE_MIRROR_BASE : RELEASE_ARCHIVE_BASE;
   }
   try {
     assertReleaseVersion(releaseVersion);
@@ -348,7 +366,8 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     die(error instanceof Error ? error.message : String(error));
   }
 
-  const base = `${RELEASE_DOWNLOAD_BASE}/${releaseVersion}`;
+  const base = `${releaseBase}/${releaseVersion}`;
+  console.log(`下载源: ${base}`);
   const stageDir = fs.mkdtempSync(join(BIN_DIR, ".coflux-release-install-"));
   let failure;
   try {

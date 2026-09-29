@@ -4,15 +4,17 @@ import type { DesktopDaemonState } from "@/desktop-bridge";
 
 /**
  * 添加设备 dialog (plan 20260923-add-device-dialog, join keys since plan 20260924-device-join-keys):
- * the React-free parts — the agent prompt, the manual command, the key countdown, the pinned download
+ * the React-free parts — the agent prompt, the manual command, the key countdown, the download
  * URL, the new-device diff and the this-Mac row condition. Kept pure so they run under node --test
  * like daemon-view.ts.
  */
 
-/** The arm64 dmg of exactly this app's version (release tag is always `v<product version>`). */
-export function desktopDownloadUrl(version: string): string {
-  return `https://github.com/myWsq/coflux/releases/download/v${version}/coflux-${version}-arm64.dmg`;
-}
+/**
+ * The latest stable arm64 dmg, under its version-less alias on the R2 download mirror (plan
+ * 20260930-r2-download-mirror). Not pinned to this app's version: the mirror keeps only the latest
+ * release, and a newer app on the other Mac updates itself anyway.
+ */
+export const DESKTOP_DOWNLOAD_URL = "https://dl.coflux.dev/desktop/coflux-arm64.dmg";
 
 /** Manual headless install, for people who would rather type it themselves. The one-time join key is
  * part of the command: running it joins the account, nothing is pasted back. */

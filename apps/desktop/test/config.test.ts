@@ -60,8 +60,9 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
 
   assert.equal(config.publish.provider, "generic");
   assert.equal(config.publish.channel, "latest");
-  // 更新源是仓库 desktop-updates 分支上的清单（release workflow 推），安装包在 GitHub Release
-  assert.equal(config.publish.url, "https://raw.githubusercontent.com/myWsq/coflux/desktop-updates");
+  // The feed is desktop/latest-mac.yml on the R2 download mirror, written by the release workflow's
+  // pointer job (plan 20260930-r2-download-mirror); pre-mirror installs keep the desktop-updates branch.
+  assert.equal(config.publish.url, "https://dl.coflux.dev/desktop");
 });
 
 test("electron-builder.yml：内置 daemon 三件经 extraResources 进 Resources/daemon、mac.binaries 显式签名（plan 113）", () => {
@@ -121,13 +122,15 @@ test("内置 coflux 插件目录随 daemon 资源目录进包、不进 mac.binar
 type Workflow = {
   on: { push: { tags: string[] } };
   permissions: { contents: string };
+  env?: Record<string, string>;
   jobs: Record<
     string,
     {
       needs?: string | string[];
+      if?: string;
       environment?: string;
       permissions?: { contents?: string };
-      steps: { name?: string; env?: Record<string, string>; run?: string; uses?: string; with?: Record<string, string> }[];
+      steps: { name?: string; id?: string; if?: string; env?: Record<string, string>; run?: string; uses?: string; with?: Record<string, string> }[];
     }
   >;
 };
@@ -177,7 +180,7 @@ test("统一发布：桌面仅受调用、release-signing 环境、缺 secret �
   assert.equal(workflow.jobs.release, undefined);
   const unified = parse(readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8")) as Workflow;
   assert.deepEqual(unified.on.push.tags, ["v*"]);
-  assert.deepEqual(unified.jobs.release.needs, ["metadata", "sign", "desktop"]);
+  assert.deepEqual(unified.jobs.release.needs, ["metadata", "sign", "desktop", "mirror-upload"]);
   assert.equal(workflow.permissions.contents, "read");
 
   const build = workflow.jobs.build;
@@ -211,20 +214,92 @@ test("统一发布：桌面仅受调用、release-signing 环境、缺 secret �
   assert.ok(keychainIndex >= 0 && keychainIndex < packIndex, "证书导入 keychain 必须在打包之前");
   assert.equal(pack.env?.APPLE_API_KEY_ID, "${{ secrets.NOTARY_KEY_ID }}");
   assert.equal(pack.env?.APPLE_API_ISSUER, "${{ secrets.NOTARY_ISSUER_ID }}");
-  assert.ok(!build.steps.some((step) => step.name?.includes("R2")), "R2 上传已撤，不该再有");
+  assert.ok(
+    !build.steps.some((step) => step.name?.includes("R2")),
+    "the reusable desktop build never uploads; the R2 mirror upload is release.yml's mirror-upload job",
+  );
 
   // 所有产物先统一发布，稳定桌面清单随后推进。
   const release = unified.jobs.release;
   assert.equal(release.permissions?.contents, "write");
   const publish = release.steps.find(step => step.uses?.startsWith("softprops/action-gh-release@"));
-  assert.match(publish?.with?.files ?? "", /signed-release\/artifacts/);
-  assert.match(publish?.with?.files ?? "", /desktop-assets\/\*\.blockmap/);
+  // The asset globs live once, in the workflow env, shared with the mirror upload.
+  assert.equal(publish?.with?.files, "${{ env.RELEASE_FILES }}");
+  assert.match(unified.env?.RELEASE_FILES ?? "", /signed-release\/artifacts/);
+  assert.match(unified.env?.RELEASE_FILES ?? "", /desktop-assets\/\*\.blockmap/);
   const feed = unified.jobs["desktop-updates"];
   assert.deepEqual(feed.needs, ["metadata", "release"]);
   const push = feed.steps.find(step => step.run?.includes("git push"));
   assert.match(push?.run ?? "", /desktop-update-feed\.mjs/);
   assert.match(push?.env?.GH_TOKEN ?? "", /github\.token/);
 
+});
+
+// The R2 download mirror at dl.coflux.dev (plan 20260930-r2-download-mirror): versioned objects before
+// the GitHub Release, pointers and pruning after it, stable tags only, and the credentials only where needed.
+test("release.yml: mirror upload before release, pointers after it, stable only, never overwriting a published tag", () => {
+  const unified = parse(readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8")) as Workflow;
+  const needs = (job: { needs?: string | string[] }) => [job.needs ?? []].flat();
+  const stableOnly = "${{ needs.metadata.outputs.prerelease == 'false' }}";
+  const r2Env = {
+    R2_ACCESS_KEY_ID: "${{ secrets.R2_ACCESS_KEY_ID }}",
+    R2_SECRET_ACCESS_KEY: "${{ secrets.R2_SECRET_ACCESS_KEY }}",
+    R2_ENDPOINT: "${{ vars.R2_ENDPOINT }}",
+    R2_BUCKET: "${{ vars.R2_BUCKET }}",
+  };
+
+  const upload = unified.jobs["mirror-upload"];
+  assert.ok(upload, "missing the mirror-upload job");
+  for (const job of ["sign", "desktop"]) assert.ok(needs(upload).includes(job), `mirror-upload must need ${job}`);
+  assert.ok(needs(unified.jobs.release).includes("mirror-upload"), "the GitHub Release waits for the mirror upload");
+  // A job-level `if` would skip it for prereleases, and a skipped dependency skips `release`.
+  assert.equal(upload.if, undefined, "mirror-upload must always run");
+  assert.equal(upload.environment, "release-signing");
+  assert.notEqual(upload.permissions?.contents, "write");
+  for (const step of upload.steps) {
+    if (step.name?.startsWith("Prereleases are not mirrored")) continue;
+    assert.equal(step.if, stableOnly, `every mirror-upload step is a no-op for a prerelease: ${step.name ?? step.uses}`);
+  }
+  const gate = upload.steps.find((step) => step.run?.includes("gh release view"));
+  assert.ok(gate?.id, "the published-tag overwrite gate must exist and expose its answer");
+  assert.match(gate.run ?? "", /release not found/);
+  const put = upload.steps.find((step) => step.run?.includes("release-mirror.mjs upload"));
+  assert.ok(put?.run, "missing the upload step");
+  assert.ok(upload.steps.indexOf(gate) < upload.steps.indexOf(put), "the gate runs before any object is touched");
+  assert.equal(put.env?.RELEASE_EXISTS, `\${{ steps.${gate.id}.outputs.exists }}`);
+  assert.match(put.run, /\$RELEASE_FILES/, "the upload set derives from the GitHub Release globs");
+  assert.match(unified.env?.RELEASE_FILES ?? "", /desktop-assets\/\*\.dmg/);
+  for (const [name, value] of Object.entries(r2Env)) assert.equal(put.env?.[name], value);
+
+  const pointers = unified.jobs["mirror-pointers"];
+  assert.ok(pointers, "missing the mirror-pointers job");
+  assert.ok(needs(pointers).includes("release"), "pointers move only after the GitHub Release succeeded");
+  assert.match(pointers.if ?? "", /prerelease == 'false'/);
+  assert.equal(pointers.environment, "release-signing");
+  assert.notEqual(pointers.permissions?.contents, "write");
+  const point = pointers.steps.find((step) => step.run?.includes("release-mirror.mjs point"));
+  assert.ok(point?.run, "missing the pointer step");
+  for (const [name, value] of Object.entries(r2Env)) assert.equal(point.env?.[name], value);
+
+  // Missing R2 values fail both jobs explicitly.
+  for (const job of [upload, pointers]) {
+    const check = job.steps.find((step) => step.name?.includes("must be complete"));
+    assert.ok(check?.run);
+    for (const [name, value] of Object.entries(r2Env)) {
+      assert.equal(check.env?.[name], value);
+      assert.match(check.run, new RegExp(`\\b${name}\\b`));
+    }
+  }
+
+  // The credentials stay out of the signing job and the contents:write jobs.
+  for (const job of ["sign", "release", "desktop-updates"]) {
+    assert.doesNotMatch(JSON.stringify(unified.jobs[job]), /R2_/, `${job} must not see R2 credentials`);
+  }
+  // Installed apps keep reading the desktop-updates branch.
+  assert.ok(unified.jobs["desktop-updates"], "desktop-updates must keep being pushed");
+
+  const ci = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  assert.match(ci, /scripts\/release-mirror\.test\.mjs/, "CI runs the pointer/prune unit tests");
 });
 
 test("ci.yml 带 desktop 质量门", () => {

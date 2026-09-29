@@ -2,7 +2,7 @@
 
 Desktop, CLI, and runtime components share one product version. The runtime consists of `coflux-supervisor` (which owns terminals), `coflux-worker`, and its paired Go `coflux-transport` companion. Worker/helper pairs support hot upgrades. The companion is required and bundled for all targets. Tailcat is the default remote networking stack; custom relay and WebRTC are retired. Desktop hosts the runtime directly; on headless devices, `cofluxd` manages the system service, while `coflux` handles business operations.
 
-A release builds runtime and desktop from one tag, signs and notarizes them, publishes a complete GitHub Release, advances the desktop update feed, and publishes npm packages at the same version. The Release includes `manifest.json`, which the server uses to dispatch worker upgrades and cofluxd uses to verify installation artifacts.
+A release builds runtime and desktop from one tag, signs and notarizes them, mirrors a stable release to the R2 download mirror at `dl.coflux.dev`, publishes a complete GitHub Release, advances the desktop update feeds and the mirror's pointers, and publishes npm packages at the same version. The Release includes `manifest.json`, which the server uses to dispatch worker upgrades and cofluxd uses to verify installation artifacts. See [R2 download mirror](#r2-download-mirror-dlcofluxdev) for what is downloaded from where.
 
 ## One-time setup: signing keys
 
@@ -94,13 +94,15 @@ A `v*` tag triggers `.github/workflows/release.yml`:
 2. **Sign and generate manifests** with `scripts/release-sign.mjs` and `WORKER_SIGNING_KEY`. The signing job has only `contents:read`, separate from the final GitHub Release job with `contents:write`. Each `coflux-worker-<target>` receives a legacy raw-binary signature and worker release-statement signature; each `coflux-supervisor-<target>` receives a supervisor release-statement signature. The exact worker transcript is `"coflux-worker-release-v1\0" || BE32(len(version)) || version || BE32(len(target)) || target || sha256(raw 32B) || size(BE64)`. The supervisor substitutes domain `"coflux-supervisor-release-v1\0"`, the native CLI uses `"coflux-cli-release-v1\0"`, and the companion uses `"coflux-transport-release-v1\0"`; other fields are identical. `version` and `target` use UTF-8. URLs are replaceable download locations, not release identity, and are unsigned. Stock DERP binaries are operated separately and do not appear in product manifests.
 3. **Generate English release notes** with `scripts/release-notes.mjs`. Before release, write and commit `docs/releases/X.Y.Z.md`, beginning with `# Coflux X.Y.Z` and explaining user benefits, installation, and upgrade implications. CI checks the matching version file, English text, and unfinished placeholders. Publication reads the file from the exact tag and appends a compare link; commit messages are no longer copied into the public changelog.
 4. **Build desktop** through `desktop-release.yml`, signing, notarizing, and checking artifacts at the same SHA.
-5. **Publish one unified Release**, only after runtime and desktop both succeed, containing:
+5. **Upload to the R2 mirror** (`mirror-upload`, stable tags only; a no-op for prereleases): the Release assets below minus the `.dmg` go to `releases/<tag>/` on R2 before the GitHub Release exists. See [R2 download mirror](#r2-download-mirror-dlcofluxdev).
+6. **Publish one unified Release**, only after runtime, desktop and the mirror upload all succeed, containing:
    - Desktop dmg/zip/blockmap and `latest-mac.yml`.
    - `coflux-worker-<target>` raw binaries plus `.sig` (legacy raw) and `.release.sig` (release statement).
    - `coflux-supervisor-<target>` and `coflux-cli-<target>` plus `.release.sig`, verified by cofluxd before installation.
    - `coflux-transport-<target>` plus `.release.sig`, and transport dependency notices.
    - `coflux-<tag>-<target>.tar.gz` with supervisor, worker, `coflux`, transport helper, and notices for manual installation.
-   - Schema 2 `manifest.json`: top-level `version`; per-target `worker` / `supervisor` / `cli` / `transport` entries with `url`, `target`, `sha256`, `size`, and `releaseSignature`; workers also include legacy `signature`. Also `SHA256SUMS`.
+   - Schema 2 `manifest.json`: top-level `version`; per-target `worker` / `supervisor` / `cli` / `transport` entries with `url`, `target`, `sha256`, `size`, and `releaseSignature`; workers also include legacy `signature`. Also `SHA256SUMS`. For a stable tag every `url` is `https://dl.coflux.dev/releases/<tag>/<asset>`; a prerelease keeps GitHub Release URLs.
+7. **Advance the feeds and pointers** (stable tags only): `desktop-updates` pushes the branch feed, then `mirror-pointers` writes the mirror's pointers and prunes older releases from R2.
 
 > **P2 / TODO: npm old-run idempotency versus fail-closed behavior.** `npm-publish-guard.mjs` strictly validates registry `dist-tags.latest` and its corresponding version entries before checking whether the requested version already exists. If latest is missing/corrupt, an old run fails even when its exact version exists, rather than skipping idempotently. This is intentional fail-closed behavior: the guard lacks reliable context proving it is only an old-release replay. Moving the exact-existing check ahead of latest validation could silently accept a new CLI release when registry state is invalid. Diagnose/repair npm latest manually first; relax this only after adding verifiable rerun context and corresponding negative tests.
 
@@ -113,13 +115,67 @@ Re-run `npm-publish` after a transient failure. Understand its two properties fi
 - The gate reuses `ci.yml` **from the default branch** with `checkout_ref` pinned to the release commit. The workflow definition and the code under test therefore come from different trees, and a step that depends on code newer than the release commit breaks the gate for every older tag. Steps like this must degrade when the checked-out tree lacks what they call, as the protocol breaking check does.
 - **GitHub re-runs a workflow with the workflow files captured for the original run.** Repairing `ci.yml` on main does not change a re-run of an existing `npm-publish` run. The repair only reaches a **new** run, and the sole trigger for one is a successful `release` run.
 
-So a gate failure caused by workflow/code mismatch cannot be recovered by re-running, and re-running the `release` workflow is not a remedy either: it rebuilds and re-signs artifacts already published under that tag, and the desktop update feed rejects content changes for a version it already carries. Record the gap and let the next release restore npm, as [1.2.0](releases/1.2.0-publication.md) did; a version-pinned `npm install -g cofluxd@X.Y.Z` line in that release's notes must be corrected, since the registry has no such version. Adding a standalone publication entry point is a deliberate change to the release authorization model, not a routine fix.
+So a gate failure caused by workflow/code mismatch cannot be recovered by re-running, and re-running the `release` workflow is not a remedy either: it rebuilds and re-signs artifacts already published under that tag, the mirror upload refuses to overwrite a tag whose GitHub Release exists, and the desktop update feed rejects content changes for a version it already carries. Record the gap and let the next release restore npm, as [1.2.0](releases/1.2.0-publication.md) did; a version-pinned `npm install -g cofluxd@X.Y.Z` line in that release's notes must be corrected, since the registry has no such version. Adding a standalone publication entry point is a deliberate change to the release authorization model, not a routine fix.
+
+## R2 download mirror (dl.coflux.dev)
+
+GitHub Release downloads crawl from mainland China (measured 18–53 KB/s from Beijing, against 1.4–2.9 MB/s from the Cloudflare edge), so the **latest stable release** is served from the Cloudflare R2 bucket `coflux-releases` (location hint APAC) on its custom domain `https://dl.coflux.dev` (plan 20260930-r2-download-mirror). GitHub Releases are still published exactly as before and remain the permanent record: every older release and every prerelease is fetched from GitHub.
+
+**Layout.** Installed clients hard-code parts of it (`scripts/release-mirror-layout.mjs` is the single definition):
+
+| Object | Content | Cache-Control |
+| --- | --- | --- |
+| `releases/<tag>/<asset>` | The tag's GitHub Release assets under their exact names, except the versioned `.dmg` | long, `immutable` |
+| `releases/latest.json` | `{"version":"<tag>"}`, the latest stable tag | 60 s |
+| `desktop/latest-mac.yml` | The electron-updater feed of new builds, zip URLs under `releases/<tag>/` | 60 s |
+| `desktop/coflux-arm64.dmg` | The latest stable DMG under a version-less name, uploaded fresh (never a server-side copy, which would keep the versioned object's metadata) | 300 s |
+
+The add-device page's download button and the README link point at the DMG alias. Stable manifests carry `https://dl.coflux.dev/releases/<tag>/<asset>` URLs; `scripts/release-sign.mjs` keeps GitHub URLs for prereleases.
+
+**Retention: latest stable only** (about 0.6 GB; R2's free tier is 10 GB-month with free egress). `mirror-pointers` deletes every other `releases/<tag>/` prefix, but only after reading `releases/latest.json` back and confirming it names the new tag; it never deletes the prefix `latest.json` names. Prereleases are never uploaded. Superseded manifests (on GitHub and in any cache) therefore carry R2 URLs that 404; nothing reads them, because the server only reads the latest manifest and cofluxd builds URLs from its own base. If anything ever consumes a historical manifest's `entry.url`, rewrite it to GitHub first. Three one-shot windows around a prune are accepted and self-healing: a daemon on an even older worker may get one 404 for the pruned previous version before the server's next 10-minute poll (charged to that version's attempt quota), a desktop app mid-download of the previous zip retries at its next check, and a `cofluxd` run that read the old pointer a moment earlier succeeds on re-run.
+
+**Two phases in `release.yml`:**
+
+1. `mirror-upload` (needs `sign` and `desktop`; `release` needs it) puts `releases/<tag>/` **before** the GitHub Release exists: the server dispatches hot upgrades the moment it sees the Release, so the R2 URLs in its manifest must already resolve. The upload set is the Release's `files` globs (the workflow env `RELEASE_FILES`) minus the `.dmg`. The job always runs, because a skipped dependency would skip `release`; for a prerelease every step is a no-op.
+2. `mirror-pointers` (needs `release` and `desktop-updates`; stable tags only, the same gate as `desktop-updates`) writes the DMG alias, `desktop/latest-mac.yml` and `releases/latest.json`, then prunes. Before its first write it refuses a lower version than the current `latest.json`, a same-version `latest-mac.yml` whose content differs, and any read failure other than a plain 404. Waiting for `desktop-updates` means the branch feed has moved on before the previous zip disappears.
+
+Both jobs run `scripts/release-mirror.mjs` (unit-tested in `scripts/release-mirror.test.mjs`, run by CI) through the aws CLI against the R2 S3 endpoint.
+
+**Overwrite gate.** Before touching any object, `mirror-upload` asks whether the GitHub Release for the tag already exists (`gh release view`). If it does, the job refuses to write unless every object is byte-identical (compared through the sha256 each upload records in the object's metadata), and an identical set is a no-op. The server and `cofluxd --version` consume versioned objects without looking at pointers, so a "Re-run all jobs" after publication, which rebuilds and re-notarizes different bytes, must fail rather than swap bytes under a manifest the server has cached. Before the Release exists, a re-run may overwrite.
+
+**Failures.** A `mirror-upload` failure stops the run before the GitHub Release. A `mirror-pointers` failure fails the run, which blocks `npm-publish` (triggered by `workflow_run` on a successful `release`), exactly like a `desktop-updates` failure. Re-run the failed jobs only.
+
+**Credentials** live in the `release-signing` environment and are read only by the two mirror jobs; the `sign` job and the `contents: write` jobs never see them, and neither mirror job has `contents: write`. A missing value fails the job explicitly.
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `R2_ACCESS_KEY_ID` | secret | Access key ID of an R2 API token with Object Read & Write on `coflux-releases` |
+| `R2_SECRET_ACCESS_KEY` | secret | Secret access key of that token |
+| `R2_ENDPOINT` | variable | The account's S3 endpoint, `https://<account-id>.r2.cloudflarestorage.com` |
+| `R2_BUCKET` | variable | `coflux-releases` |
+
+```sh
+gh secret set R2_ACCESS_KEY_ID --env release-signing
+gh secret set R2_SECRET_ACCESS_KEY --env release-signing
+gh variable set R2_ENDPOINT --env release-signing --body "https://<account-id>.r2.cloudflarestorage.com"
+gh variable set R2_BUCKET --env release-signing --body coflux-releases
+```
+
+**Cloudflare side.** The bucket's `r2.dev` public URL is disabled (rate-limited, not for production); `dl.coflux.dev` is attached as the bucket's custom domain (minimum TLS 1.2). Cloudflare caches by file extension by default, which would leave extension-less binaries, `.sig`, `.json`, `.yml` and `.blockmap` uncached, so a zone Cache Rule (phase `http_request_cache_settings`, expression `http.host eq "dl.coflux.dev"`) makes every response cache-eligible with edge and browser TTLs taken from the origin `Cache-Control` that the upload sets. See [deployment.md](deployment.md#domains-and-routing).
+
+**How clients choose.**
+
+- **Worker/transport/ptyd hot upgrades**: the server still discovers releases by polling GitHub (prod-jp is outside China) and pushes the manifest's R2 URLs. Old supervisors benefit without an update.
+- **`cofluxd up` / `cofluxd update`** without `--version` read `https://dl.coflux.dev/releases/latest.json` and install that tag from the mirror; nothing calls `api.github.com`, and `latest` means latest stable. With `--version X`, cofluxd installs from the mirror only when the pointer names X, and otherwise (an older version, a prerelease, or an unreadable pointer) from GitHub Releases. There is no mirror-then-GitHub fallback on error: an R2 outage stays visible. `COFLUX_RELEASE_DOWNLOAD_BASE` overrides the mirror base and `COFLUX_RELEASE_ARCHIVE_BASE` the GitHub one.
+- **Desktop auto-update**: new builds read `desktop/latest-mac.yml`; older installs read the `desktop-updates` branch. Both feeds point at the R2 zip.
+
+**Manual fallback.** If the mirror is unreachable, `cofluxd update --version vX.Y.Z` always works: any version the pointer does not name, including every old one, is fetched from GitHub. If a prune went wrong, re-running `mirror-pointers` rewrites the pointers idempotently; a pruned version is always still on GitHub.
 
 ## Electron desktop releases
 
 `vX.Y.Z` is the only release tag; desktop, CLI, and runtime share the version and commit. `desktop-release.yml` accepts only `workflow_call`, handling build, Developer ID signing, notarization, stapling, and `codesign`/`stapler`/`spctl` verification, then uploading artifacts for the parent `release.yml` to publish.
 
-Advance `desktop-updates` only after the complete GitHub Release succeeds; npm follows through Trusted Publishing. These systems do not form an atomic transaction: retry the failed step, and never infer npm publication solely from GitHub Release success. Prereleases do not update the stable desktop feed or npm latest. The feed rejects version regression and content changes for an existing version.
+Advance the `desktop-updates` branch feed and the R2 mirror's pointers only after the complete GitHub Release succeeds; npm follows through Trusted Publishing. These systems do not form an atomic transaction: retry the failed job, and never infer npm publication solely from GitHub Release success. Prereleases do not update either stable desktop feed, the mirror, or npm latest. Both feeds reject version regression and content changes for an existing version.
 
 ### Bundled daemon: desktop releases include Rust components and the Go helper
 
@@ -139,7 +195,7 @@ The workflow also runs `scripts/build-transport.mjs` for the same target and ver
 
 1. **Reuse the six signing/notarization `release-signing` environment secrets** above. electron-builder reads the certificate from `CSC_LINK` / `CSC_KEY_PASSWORD` and notarization credentials from `APPLE_API_KEY` (path to a temporary `.p8`), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `APPLE_TEAM_ID`.
 2. The `release-signing` environment and tag rulesets allow only unified `v*` tags.
-3. **GitHub is the update source**, decided during wrap-up on 2026-09-11, replacing the initial R2 design without new secrets. Installers and blockmaps live in GitHub Releases. The release job rewrites `latest-mac.yml` with absolute Release download URLs and pushes it to the repository's `desktop-updates` branch. electron-updater uses the generic provider at `https://raw.githubusercontent.com/myWsq/coflux/desktop-updates/latest-mac.yml`, hardcoded in `apps/desktop/electron-builder.yml`. Keep the fixed generic feed; the unified Release contains all desktop/runtime artifacts. The release job uses `GITHUB_TOKEN` to create Releases and push the branch. `desktop-updates` contains only this file; do not edit it manually. raw.githubusercontent.com caching may delay update visibility by a few minutes.
+3. **The R2 download mirror is the update source** (plan 20260930-r2-download-mirror; GitHub Release downloads are too slow from mainland China). electron-updater uses the generic provider at `https://dl.coflux.dev/desktop`, hardcoded in `apps/desktop/electron-builder.yml`, and reads `desktop/latest-mac.yml`, which `mirror-pointers` writes with absolute zip URLs under `https://dl.coflux.dev/releases/<tag>/`. Apps built before the mirror have `https://raw.githubusercontent.com/myWsq/coflux/desktop-updates` baked into their `app-update.yml`, so the `desktop-updates` job **must keep pushing** `latest-mac.yml` to that branch; it carries the same R2 zip URLs. Retire the branch push only once essentially every install has passed the first R2-era release. `desktop-updates` contains only this file; do not edit it manually. raw.githubusercontent.com caching may delay update visibility by a few minutes. Differential updates fetch the old blockmap from electron-updater's cache first; with latest-only retention the URL fallback is always pruned, so an app without a cached blockmap downloads the full zip.
 
 Missing any signing/notarization secret causes an **explicit workflow failure**, never a silent skip.
 
@@ -183,7 +239,7 @@ published; candidate startup also requires a matching local helper handshake.
 See [Native Tailcat delivery and rollback](tailcat-transport.md#delivery-bootstrap-and-rollback).
 Bundling and upgrading the helper does not enable Tailcat or complete M4.
 
-1. The server polls GitHub `/releases/latest`, which excludes prereleases/drafts, and the release's schema 2 `manifest.json`. It caches only when the release tag, top-level manifest version, and every target entry's shape agree.
+1. The server polls GitHub `/releases/latest`, which excludes prereleases/drafts, and the release's schema 2 `manifest.json`. It caches only when the release tag, top-level manifest version, and every target entry's shape agree. Discovery stays on GitHub, but the artifact URLs it dispatches are the manifest's, which for a stable release point at the R2 download mirror (`dl.coflux.dev`); `mirror-upload` puts them there before the Release exists.
 2. Each online daemon is compared immediately at handshake when reporting `workerVersion` / `platform` / `arch`; a new release triggers another scan of all online daemons. The server still pushes on version inequality, sending `worker.upgrade{version,url,target,sha256,artifactSize,signature,releaseSignature,transport}` for paired releases. Each supervisor's persistent local state enforces actual version monotonicity.
 3. New supervisors require canonical strict SemVer with a `v` prefix and a matching local Rust target. Before any network request, they reject versions below or equal to the committed floor. They then download with bounds and check signed size, SHA-256, the legacy raw signature, and release-statement signature. Only after every check passes is the artifact atomically installed under `~/.coflux/workers/<version>/`. Any failure preserves the current worker.
 4. A candidate becomes healthy during observation only after taking over UDS, reconnecting to the center, and completing resync. Commit first atomically persists `worker.active`, then `worker.release-floor`. Floor-write failure prevents declaring commit and disables further remote upgrades for that process. A crash between the two writes is recovered by reconstructing/persisting the floor from the safely recovered active SemVer.
@@ -209,7 +265,7 @@ Check this before bringing a new central host online.
 
 ## First cofluxd installation and supervisor upgrades
 
-The supervisor cannot hot-upgrade because it owns PTYs. Use `cofluxd update` to download supervisor and bundled worker, then `cofluxd restart` after tasks finish; this should be rare. The npm package embeds the same ed25519 public key as the supervisor. Remote installation first requires the exact SemVer tag's schema 2 manifest, strict version/target/size/SHA-256 matching, and separate worker/supervisor release-statement verification; workers additionally require the legacy raw signature. Only after all supplied artifacts pass can one staging generation replace them. Releases before 1.1.0 may omit the native CLI; current releases include it. macOS local ad-hoc signing occurs only after verification. Old releases lacking supervisor entries fail closed without falling back to raw downloads.
+The supervisor cannot hot-upgrade because it owns PTYs. Use `cofluxd update` to download supervisor and bundled worker, then `cofluxd restart` after tasks finish; this should be rare. The npm package embeds the same ed25519 public key as the supervisor. Remote installation first requires the exact SemVer tag's schema 2 manifest, strict version/target/size/SHA-256 matching, and separate worker/supervisor release-statement verification; workers additionally require the legacy raw signature. Only after all supplied artifacts pass can one staging generation replace them. Releases before 1.1.0 may omit the native CLI; current releases include it. macOS local ad-hoc signing occurs only after verification. Old releases lacking supervisor entries fail closed without falling back to raw downloads. The latest stable release downloads from the R2 mirror and any other version from GitHub Releases; see [How clients choose](#r2-download-mirror-dlcofluxdev).
 
 `--bin-dir` remains an explicit local administrator choice for development/recovery, outside the remote trust chain. This remote installation chain applies from `cofluxd@0.12.0`; 0.11.x and earlier must upgrade the CLI first.
 

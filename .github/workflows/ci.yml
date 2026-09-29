@@ -139,6 +139,10 @@ jobs:
           if [ -f scripts/check-protocol-breaking.test.mjs ]; then
             unit_tests+=(scripts/check-protocol-breaking.test.mjs)
           fi
+          # R2 download mirror pointer/prune logic; absent from release commits before it existed.
+          if [ -f scripts/release-mirror.test.mjs ]; then
+            unit_tests+=(scripts/release-mirror.test.mjs)
+          fi
           node --test "${unit_tests[@]}"
 
       - run: pnpm install --frozen-lockfile
