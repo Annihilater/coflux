@@ -167,10 +167,11 @@ export type DesktopBrowserCertificate = {
 };
 
 /**
- * Browser annotations (plan 20260929-browser-annotations). The main process instruments a page
- * guest over CDP in an isolated world (hover highlight, hit-testing, rects, numbered pins); the
- * renderer owns the comment card, the attachments and the side panel. Coordinates are CSS pixels
- * of the page's viewport, which the renderer scales onto its webview.
+ * Browser annotations (plans 20260929-browser-annotations, 20260929-annotation-polish). The main
+ * process instruments a page guest over CDP in an isolated world (hover highlight, level traversal,
+ * shift-click selections, shift-drag regions, hit-testing, rects, pins and outlines); the renderer
+ * owns the cards, the attachments and the side panel. Coordinates are CSS pixels of the page's
+ * viewport, which the renderer scales onto its webview.
  */
 export type DesktopAnnotatorLocator = {
   selector: string;
@@ -181,14 +182,40 @@ export type DesktopAnnotatorLocator = {
   classes: string[];
 };
 
-/** An annotation shown on the page: a numbered pin (a check once resolved) on its element. */
-export type DesktopAnnotatorPin = DesktopAnnotatorLocator & { id: string; number: number; resolved: boolean };
+/** A dragged region, in CSS pixels relative to the top-left corner of the annotation's first element. */
+export type DesktopAnnotatorRegion = { x: number; y: number; width: number; height: number };
 
-/** What the page outlines and reports the rectangle of: the element just picked, or an annotation. */
+/**
+ * An annotation shown on the page: a numbered pin (a check once resolved) on its first element's
+ * top-right outer edge, or on its region's top-left corner. `targets[0]` is the anchor; the others
+ * are outlined only while the annotation is outlined.
+ */
+export type DesktopAnnotatorPin = {
+  id: string;
+  number: number;
+  resolved: boolean;
+  targets: DesktopAnnotatorLocator[];
+  region: DesktopAnnotatorRegion | null;
+};
+
+/** What the page reports the rectangle of: the elements just picked, or an annotation. */
 export type DesktopAnnotatorAnchor = { kind: "pick"; token: string } | { kind: "pin"; id: string; scroll: boolean } | null;
 
+/** The app theme's colours the page draws with; the page script has no palette of its own. */
+export type DesktopAnnotatorPalette = { accent: string; onAccent: string; success: string; onSuccess: string };
+
 /** The renderer's whole wish for one page guest; main re-applies it after every navigation. */
-export type DesktopAnnotatorState = { mode: boolean; pins: DesktopAnnotatorPin[]; anchor: DesktopAnnotatorAnchor };
+export type DesktopAnnotatorState = {
+  /** Annotate mode: hover, ↑↓ levels, click, shift-click, shift-drag. */
+  mode: boolean;
+  /** A card is open over the page: the page swallows pointer input and reports clicks as outside clicks. */
+  capture: boolean;
+  pins: DesktopAnnotatorPin[];
+  anchor: DesktopAnnotatorAnchor;
+  /** Annotations whose elements or region are outlined (the selected one, an open card's, the hovered panel row's). */
+  outlined: string[];
+  palette: DesktopAnnotatorPalette | null;
+};
 
 export type DesktopAnnotatorElement = DesktopAnnotatorLocator & {
   attributes: Record<string, string>;
@@ -204,17 +231,24 @@ export type DesktopAnnotatorSource = { framework: string; components: string[]; 
 export type DesktopAnnotatorBox = { x: number; y: number; width: number; height: number };
 export type DesktopAnnotatorViewport = { width: number; height: number };
 
-/** An element the user clicked in annotate mode. */
+/** One picked element and its framework source identity (null when the page exposes none or reading it failed). */
+export type DesktopAnnotatorPickTarget = { element: DesktopAnnotatorElement; source: DesktopAnnotatorSource | null };
+
+/**
+ * What the user picked in annotate mode: one clicked element, a shift-click selection, or a
+ * shift-dragged region (then `targets[0]` is the innermost element containing it and the others the
+ * top-level elements inside it).
+ */
 export type DesktopAnnotatorPick = {
   token: string;
   url: string;
   title: string;
+  /** The union of the elements, or the region, in the page's viewport. */
   rect: DesktopAnnotatorBox;
   viewport: DesktopAnnotatorViewport;
-  element: DesktopAnnotatorElement;
-  /** Null when the page exposes none or reading it failed. */
-  source: DesktopAnnotatorSource | null;
-  /** The element's screenshot as a `data:` URL; null when capturing failed. */
+  targets: DesktopAnnotatorPickTarget[];
+  region: DesktopAnnotatorRegion | null;
+  /** The screenshot of `rect` as a `data:` URL; null when capturing failed. */
   screenshot: string | null;
 };
 
@@ -226,7 +260,7 @@ export type DesktopBrowserEvent =
   /** The page took keyboard focus (a click into it): its group becomes the focused one. */
   | { kind: "focus"; guestId: number }
   /** A browser key pressed inside the page: ⌘L, ⌥⌘I. */
-  | { kind: "key"; guestId: number; action: "focus-address" | "toggle-devtools" }
+  | { kind: "key"; guestId: number; action: "focus-address" | "toggle-devtools" | "toggle-annotate" }
   /** `window.open` / `target=_blank`: open the URL as a new browser tab beside the opener. */
   | { kind: "popup"; guestId: number; url: string }
   /** The page's favicon, fetched through its own session and handed over as a `data:` URL. */
@@ -238,15 +272,17 @@ export type DesktopBrowserEvent =
   | { kind: "download"; filename: string; state: "completed" | "cancelled" | "interrupted" }
   /** A scope's `localhost` changed meaning (the local daemon registered after it was prepared); reaches every tab of that scope. */
   | { kind: "mode"; scope: DesktopBrowserScope; mode: DesktopBrowserMode }
-  /** Browser annotations: an element was picked in annotate mode. */
+  /** Browser annotations: elements or a region were picked in annotate mode. */
   | { kind: "annotator-pick"; guestId: number; pick: DesktopAnnotatorPick }
   /** Where the anchored element is now (it follows scrolling); null when it is gone or off the page. */
   | { kind: "annotator-anchor"; guestId: number; rect: DesktopAnnotatorBox | null; viewport: DesktopAnnotatorViewport }
   | { kind: "annotator-pin-click"; guestId: number; annotationId: string }
   /** Pins whose element the current page does not have (「元素未找到」). */
   | { kind: "annotator-pins"; guestId: number; url: string; missing: string[] }
-  /** Esc inside the page in annotate mode. */
-  | { kind: "annotator-exit"; guestId: number }
+  /** Esc inside the page in annotate mode or while a card is open. */
+  | { kind: "annotator-escape"; guestId: number }
+  /** A click on the page while a card is open (the page swallowed it). */
+  | { kind: "annotator-outside-click"; guestId: number }
   /** Whether the page can be instrumented right now. */
   | { kind: "annotator-status"; guestId: number; available: boolean };
 

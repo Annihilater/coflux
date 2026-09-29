@@ -8,8 +8,12 @@ import type { DesktopBridge } from "../shared/desktop-bridge";
 export type {
   DesktopAnnotatorBox,
   DesktopAnnotatorElement,
+  DesktopAnnotatorLocator,
+  DesktopAnnotatorPalette,
   DesktopAnnotatorPick,
+  DesktopAnnotatorPickTarget,
   DesktopAnnotatorPin,
+  DesktopAnnotatorRegion,
   DesktopAnnotatorSource,
   DesktopAnnotatorState,
   DesktopAnnotatorViewport,

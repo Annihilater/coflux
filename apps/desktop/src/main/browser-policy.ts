@@ -145,7 +145,7 @@ export type GuestKeyInput = { type: string; code: string; meta: boolean; control
 
 export type GuestKeyAction =
   | { kind: "command"; command: DesktopCommand }
-  | { kind: "browser"; action: "focus-address" | "toggle-devtools" }
+  | { kind: "browser"; action: "focus-address" | "toggle-devtools" | "toggle-annotate" }
   | { kind: "zoom"; direction: "in" | "out" | "reset" };
 
 const DIGITS: readonly DesktopDigit[] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
@@ -159,7 +159,7 @@ function digitOf(code: string): DesktopDigit | null {
 /**
  * Keys typed into a guest never reach the renderer's window listeners, so the app's page shortcuts —
  * the ones the native menu only displays (`registerAccelerator: false`, menu.ts) — are taken here and
- * forwarded; the browser's own keys (⌘L, ⌥⌘I, zoom) too. The modifier sets are exact, as in
+ * forwarded; the browser's own keys (⌘L, ⌥⌘I, ⌘⇧D, zoom) too. The modifier sets are exact, as in
  * use-global-shortcuts.ts. Everything else stays with the page: ⌘C/⌘V/⌘A/⌘F/⌘Z, typing, arrows,
  * Tab — and ⌘R, which the menu dispatches to the focused surface when the page leaves it unhandled.
  */
@@ -212,6 +212,8 @@ export function classifyGuestKey(input: GuestKeyInput): GuestKeyAction | null {
     if (isBackslash) return { kind: "command", command: "split-down" };
     // ⌘+ on a US layout is ⌘⇧=.
     if (code === "Equal") return { kind: "zoom", direction: "in" };
+    // Browser annotations' annotate mode (plan 20260929-annotation-polish), as in Cursor's Design Mode.
+    if (code === "KeyD") return { kind: "browser", action: "toggle-annotate" };
     return null;
   }
 

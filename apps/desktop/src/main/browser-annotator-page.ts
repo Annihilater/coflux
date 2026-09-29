@@ -1,23 +1,30 @@
+import { annotatorPinPosition } from "./browser-annotator-policy";
+
 /**
- * The page half of browser annotations (plan 20260929-browser-annotations): plain JavaScript the
+ * The page half of browser annotations (plans 20260929-browser-annotations,
+ * 20260929-annotation-polish): plain JavaScript the
  * main process injects over CDP into a named **isolated world** of a page guest
  * (`Page.addScriptToEvaluateOnNewDocument` with `worldName`, and into the current document when it
  * is first needed). Page scripts never see it: it shares the DOM, not the JavaScript globals. It
  * talks to main only through a `Runtime.addBinding` binding scoped to that world, and main calls
  * `__cofluxAnnotatorApi` in the same world.
  *
- * It does only what must happen inside the page — hover highlight, hit-testing, locating elements
- * again, rectangles and the numbered pins (drawn in a closed shadow root) — and acts in the
- * top-level frame only. The comment card, attachments and panel are renderer UI.
+ * It does only what must happen inside the page — the gestures (hover, ↑/↓ level traversal, click,
+ * shift-click selections finalised on shift release or blur, shift-drag regions on the live page),
+ * hit-testing, locating elements again, rectangles, and the pins and outlines (drawn in a closed
+ * shadow root, in the colours the renderer sends: it has no palette of its own) — and acts in the
+ * top-level frame only. While a card is open (`capture`) it swallows pointer input and reports
+ * clicks as outside clicks. The cards, attachments and panel are renderer UI.
  *
  * Written by hand for coflux (no third-party code). Kept free of template-literal syntax so it can
- * live in this raw string.
+ * live in this raw string; the pin placement is `annotatorPinPosition`'s own source, embedded.
  */
 
 export const ANNOTATOR_WORLD = "coflux-annotator";
 export const ANNOTATOR_BINDING = "__cofluxAnnotatorEmit";
 
-export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
+export const ANNOTATOR_PAGE_SCRIPT =
+  String.raw`(function () {
   "use strict";
   if (window.top !== window) return;
   if (globalThis.__cofluxAnnotatorApi) return;
@@ -27,14 +34,24 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   var STYLES = ["color", "background-color", "font-family", "font-size", "font-weight", "line-height", "letter-spacing", "text-align",
     "padding", "margin", "border", "border-radius", "box-shadow", "display", "gap", "width", "height", "opacity"];
   var TEST_ATTRIBUTES = ["data-testid", "data-test", "data-cy", "data-qa"];
+  var DRAG_THRESHOLD = 5;
+  var MAX_SELECTION = 24;
+  var MAX_REGION_ELEMENTS = 12;
+  var pinPosition = (` +
+  annotatorPinPosition.toString() +
+  String.raw`);
 
-  var state = { mode: false, pins: [], anchor: null };
-  var host = null, root = null, hoverBox = null, hoverLabel = null, anchorBox = null, pinLayer = null, cursorStyle = null;
+  var state = { mode: false, capture: false, pins: [], anchor: null, outlined: [], palette: null };
+  var host = null, root = null, hoverBox = null, hoverLabel = null, anchorBox = null, dragBox = null, outlineLayer = null, pinLayer = null, cursorStyle = null;
+  // token -> { elements: [...], region: null | { x, y, width, height } }; only the latest pick is kept.
   var picked = new Map();
   var nextToken = 1;
   var hidden = false;
+  // annotation id -> its first element; its other elements only while it is outlined.
   var located = new Map();
+  var extras = new Map();
   var pinNodes = new Map();
+  var outlineNodes = [];
   var lastAnchor = "";
   var lastMissing = "";
   var frame = 0;
@@ -42,6 +59,12 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   var relocateTimer = 0;
   // An annotation to scroll into view once its element is found (it may render after the page loads).
   var pendingScroll = null;
+  // Hover and level traversal: the element under the pointer, the one ↑/↓ chose, the path ↑ climbed.
+  var hoverBase = null, hoverEl = null, levels = [];
+  // A shift-click selection being built, and a shift-press that may become a drag.
+  var selection = [];
+  var press = null;
+  var suppressClick = false;
 
   function emit(message) {
     try {
@@ -57,6 +80,34 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   function rectOf(element) {
     var box = element.getBoundingClientRect();
     return { x: box.left, y: box.top, width: box.width, height: box.height };
+  }
+
+  function union(rects) {
+    var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (var i = 0; i < rects.length; i++) {
+      left = Math.min(left, rects[i].x);
+      top = Math.min(top, rects[i].y);
+      right = Math.max(right, rects[i].x + rects[i].width);
+      bottom = Math.max(bottom, rects[i].y + rects[i].height);
+    }
+    return rects.length ? { x: left, y: top, width: right - left, height: bottom - top } : null;
+  }
+
+  function regionRect(element, region) {
+    var base = rectOf(element);
+    return { x: base.x + region.x, y: base.y + region.y, width: region.width, height: region.height };
+  }
+
+  function contains(outer, inner) {
+    return outer.x <= inner.x + 1 && outer.y <= inner.y + 1 && outer.x + outer.width >= inner.x + inner.width - 1 && outer.y + outer.height >= inner.y + inner.height - 1;
+  }
+
+  function intersects(a, b) {
+    return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  }
+
+  function connected(element) {
+    return !!element && element.isConnected;
   }
 
   function clip(value, max) {
@@ -182,6 +233,7 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   }
 
   function locate(locator) {
+    if (!locator) return null;
     var candidates = [];
     var bySelector = [], byPath = [];
     function add(list, into) {
@@ -219,23 +271,42 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
       host.setAttribute("style", "all: initial !important; position: fixed !important; inset: 0 !important; pointer-events: none !important; z-index: 2147483647 !important; display: block !important;");
       root = host.attachShadow({ mode: "closed" });
       var style = document.createElement("style");
+      // Colours come from the renderer's theme (custom properties set by applyPalette); the system
+      // colours are only a fallback for the moment before the first state arrives.
       style.textContent = [
-        ".hover{position:fixed;display:none;box-sizing:border-box;border:2px solid #3b82f6;background:rgba(59,130,246,.10);border-radius:3px;pointer-events:none}",
-        ".label{position:fixed;display:none;font:500 11px/16px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;background:#3b82f6;padding:0 5px;border-radius:3px;pointer-events:none;white-space:nowrap}",
-        ".anchor{position:fixed;display:none;box-sizing:border-box;border:2px solid #f59e0b;border-radius:3px;pointer-events:none;box-shadow:0 0 0 4px rgba(245,158,11,.18)}",
-        ".pin{position:fixed;display:flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 5px;box-sizing:border-box;border-radius:10px;",
-        "font:600 11px/1 -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;background:#f59e0b;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:pointer;pointer-events:auto;transform:translate(-50%,-50%)}",
-        ".pin.resolved{background:#16a34a}",
+        ":host{--ca:Highlight;--con:HighlightText;--cs:Highlight;--cson:HighlightText}",
+        ".hover,.anchor,.outline,.drag{position:fixed;display:none;box-sizing:border-box;border-radius:3px;pointer-events:none}",
+        ".hover{border:1.5px solid var(--ca);background:color-mix(in srgb,var(--ca) 10%,transparent)}",
+        ".anchor{border:2px solid var(--ca);box-shadow:0 0 0 3px color-mix(in srgb,var(--ca) 22%,transparent)}",
+        ".outline{border:1.5px dashed var(--ca)}",
+        ".outline.sel{border-style:solid;background:color-mix(in srgb,var(--ca) 14%,transparent)}",
+        ".drag{border:1.5px dashed var(--ca);background:color-mix(in srgb,var(--ca) 10%,transparent)}",
+        ".label{position:fixed;display:none;font:500 12px/18px -apple-system,BlinkMacSystemFont,sans-serif;color:var(--con);background:var(--ca);padding:0 6px;border-radius:4px;pointer-events:none;white-space:nowrap}",
+        ".pin{position:fixed;display:flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;box-sizing:border-box;border-radius:9px;",
+        "font:600 11px/1 -apple-system,BlinkMacSystemFont,sans-serif;color:var(--con);background:var(--ca);border:1.5px solid var(--con);box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:pointer;pointer-events:auto}",
+        ".pin.resolved{color:var(--cson);background:var(--cs);border-color:var(--cson)}",
         ".pin:hover{filter:brightness(1.08)}"
       ].join("");
       root.appendChild(style);
+      outlineLayer = document.createElement("div"); root.appendChild(outlineLayer);
       hoverBox = document.createElement("div"); hoverBox.className = "hover"; root.appendChild(hoverBox);
-      hoverLabel = document.createElement("div"); hoverLabel.className = "label"; root.appendChild(hoverLabel);
       anchorBox = document.createElement("div"); anchorBox.className = "anchor"; root.appendChild(anchorBox);
+      dragBox = document.createElement("div"); dragBox.className = "drag"; root.appendChild(dragBox);
       pinLayer = document.createElement("div"); root.appendChild(pinLayer);
+      hoverLabel = document.createElement("div"); hoverLabel.className = "label"; root.appendChild(hoverLabel);
     }
     parent.appendChild(host);
     return true;
+  }
+
+  function applyPalette() {
+    if (!host) return;
+    var palette = state.palette;
+    var names = [["--ca", "accent"], ["--con", "onAccent"], ["--cs", "success"], ["--cson", "onSuccess"]];
+    for (var i = 0; i < names.length; i++) {
+      if (palette && palette[names[i][1]]) host.style.setProperty(names[i][0], palette[names[i][1]]);
+      else host.style.removeProperty(names[i][0]);
+    }
   }
 
   function place(node, rect) {
@@ -250,63 +321,238 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
     return !element || element === host || element === document.documentElement || (host && host.contains(element));
   }
 
+  function inHost(event) {
+    var path = event.composedPath ? event.composedPath() : [];
+    return !!host && path.indexOf(host) >= 0;
+  }
+
   function targetAt(x, y) {
     var element = document.elementFromPoint(x, y);
     return isOurs(element) ? null : element;
   }
 
-  function onPointerMove(event) {
-    if (!state.mode || hidden || !ensureUi()) return;
-    var target = targetAt(event.clientX, event.clientY);
-    if (!target) { hoverBox.style.display = "none"; hoverLabel.style.display = "none"; return; }
-    var rect = rectOf(target);
+  function active() {
+    return state.mode || state.capture;
+  }
+
+  function picking() {
+    return state.mode && !state.capture && !hidden;
+  }
+
+  // ---- hover and level traversal ----
+
+  function labelFor(element) {
+    var name = element.tagName.toLowerCase();
+    var classes = Array.prototype.filter.call(element.classList, stableClass);
+    if (classes.length) name += "." + classes[0];
+    var box = element.getBoundingClientRect();
+    return name + " \u00b7 " + Math.round(box.width) + "\u00d7" + Math.round(box.height);
+  }
+
+  function hideHover() {
+    if (hoverBox) hoverBox.style.display = "none";
+    if (hoverLabel) hoverLabel.style.display = "none";
+  }
+
+  function showHover() {
+    if (!picking() || press && press.dragging || !connected(hoverEl) || !ensureUi()) { hideHover(); return; }
+    var rect = rectOf(hoverEl);
     place(hoverBox, rect);
-    hoverLabel.textContent = target.tagName.toLowerCase() + (target.id ? "#" + target.id : "");
-    hoverLabel.style.left = rect.x + "px";
-    hoverLabel.style.top = Math.max(0, rect.y - 18) + "px";
-    hoverLabel.style.width = "auto";
-    hoverLabel.style.height = "auto";
+    hoverLabel.textContent = labelFor(hoverEl);
+    hoverLabel.style.left = Math.max(0, Math.min(rect.x, window.innerWidth - 40)) + "px";
+    hoverLabel.style.top = (rect.y >= 22 ? rect.y - 22 : Math.min(window.innerHeight - 20, rect.y + rect.height + 4)) + "px";
     hoverLabel.style.display = "block";
   }
 
+  function resetHover() {
+    hoverBase = null; hoverEl = null; levels = [];
+    hideHover();
+  }
+
+  // ---- gestures ----
+
+  function onPointerMove(event) {
+    if (!picking()) return;
+    if (press) {
+      if (!press.dragging && Math.abs(event.clientX - press.x) + Math.abs(event.clientY - press.y) > DRAG_THRESHOLD) press.dragging = true;
+      if (press.dragging) {
+        hideHover();
+        if (ensureUi()) place(dragBox, boxBetween(press.x, press.y, event.clientX, event.clientY));
+        return;
+      }
+    }
+    var target = targetAt(event.clientX, event.clientY);
+    // A new element under the pointer resets the level ↑ climbed; moving within it keeps it.
+    if (target !== hoverBase) { hoverBase = target; hoverEl = target; levels = []; }
+    showHover();
+  }
+
+  function boxBetween(x0, y0, x1, y1) {
+    return { x: Math.min(x0, x1), y: Math.min(y0, y1), width: Math.abs(x1 - x0), height: Math.abs(y1 - y0) };
+  }
+
+  function hideDrag() {
+    if (dragBox) dragBox.style.display = "none";
+  }
+
   function swallow(event) {
-    if (!state.mode) return;
-    var path = event.composedPath ? event.composedPath() : [];
-    if (host && path.indexOf(host) >= 0) return;
+    if (!active() || inHost(event)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+  }
+
+  function onPointerDown(event) {
+    if (!active() || inHost(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressClick = false;
+    press = picking() && event.button === 0 && event.shiftKey ? { x: event.clientX, y: event.clientY, dragging: false } : null;
+  }
+
+  function onPointerUp(event) {
+    if (!active() || inHost(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    var current = press;
+    press = null;
+    if (current && current.dragging) {
+      hideDrag();
+      // The click that follows a drag is part of it.
+      suppressClick = true;
+      pickRegion(boxBetween(current.x, current.y, event.clientX, event.clientY));
+    }
   }
 
   function onClick(event) {
-    if (!state.mode) return;
-    var path = event.composedPath ? event.composedPath() : [];
-    if (host && path.indexOf(host) >= 0) return;
+    if (!active() || inHost(event)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    var target = targetAt(event.clientX, event.clientY);
-    if (target) pick(target);
+    if (suppressClick) { suppressClick = false; return; }
+    if (state.capture) { emit({ type: "outside-click" }); return; }
+    if (!picking()) return;
+    var under = targetAt(event.clientX, event.clientY);
+    var target = under && under === hoverBase && connected(hoverEl) ? hoverEl : under;
+    if (!target) return;
+    if (event.shiftKey) { toggleSelection(target); return; }
+    selection = [];
+    pickElements([target], null);
+  }
+
+  function toggleSelection(element) {
+    var index = selection.indexOf(element);
+    if (index >= 0) selection.splice(index, 1);
+    else if (selection.length < MAX_SELECTION) selection.push(element);
+    schedule();
+  }
+
+  // A shift-click selection becomes one pick when shift is released — or when focus leaves, so a
+  // missed keyup cannot leave it pending.
+  function finishSelection() {
+    if (!selection.length) return;
+    var elements = selection.filter(connected);
+    selection = [];
+    if (elements.length && picking()) pickElements(elements, null);
+    else schedule();
   }
 
   function onKeyDown(event) {
-    if (!state.mode || event.key !== "Escape") return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    emit({ type: "exit" });
+    if (!active()) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!state.capture && (selection.length || press)) {
+        selection = []; press = null; hideDrag(); schedule();
+        return;
+      }
+      emit({ type: "escape" });
+      return;
+    }
+    // ↑ selects the parent of the hovered element, ↓ goes back down the path ↑ climbed. Only while
+    // there is a hover target: otherwise the arrows scroll the page as usual.
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && picking() && connected(hoverEl) && !event.metaKey && !event.altKey && !event.ctrlKey) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === "ArrowUp") {
+        var parent = hoverEl.parentElement;
+        if (parent && !isOurs(parent)) { levels.push(hoverEl); hoverEl = parent; }
+      } else if (levels.length) {
+        hoverEl = levels.pop();
+      }
+      showHover();
+    }
   }
 
-  function pick(element) {
+  function onKeyUp(event) {
+    if (event.key === "Shift") finishSelection();
+  }
+
+  function onBlur() {
+    press = null;
+    hideDrag();
+    finishSelection();
+  }
+
+  // ---- picks ----
+
+  function pickRect(entry) {
+    if (!connected(entry.elements[0])) return null;
+    if (entry.region) return regionRect(entry.elements[0], entry.region);
+    return union(entry.elements.filter(connected).map(rectOf));
+  }
+
+  // The region is anchored to the innermost element that fully contains it (so it follows scrolling
+  // and reflow); <body> as a last resort, which makes it a fixed document position.
+  function containerOf(box) {
+    var element = targetAt(box.x + box.width / 2, box.y + box.height / 2);
+    for (; element && element !== document.documentElement; element = element.parentElement) {
+      if (element === document.body || contains(rectOf(element), box)) return element;
+    }
+    return document.body;
+  }
+
+  // The outermost elements lying fully inside the region.
+  function elementsInside(container, box) {
+    var found = [];
+    var queue = Array.prototype.slice.call(container.children);
+    for (var visited = 0; queue.length && found.length < MAX_REGION_ELEMENTS && visited < 3000; visited++) {
+      var element = queue.shift();
+      if (isOurs(element)) continue;
+      var rect = rectOf(element);
+      if (rect.width < 1 && rect.height < 1) { Array.prototype.push.apply(queue, element.children); continue; }
+      if (contains(box, rect)) { found.push(element); continue; }
+      if (intersects(box, rect)) Array.prototype.push.apply(queue, element.children);
+    }
+    return found;
+  }
+
+  function pickRegion(box) {
+    if (box.width < 4 || box.height < 4) return;
+    var container = containerOf(box);
+    if (!container) return;
+    var base = rectOf(container);
+    var region = { x: box.x - base.x, y: box.y - base.y, width: box.width, height: box.height };
+    pickElements([container].concat(elementsInside(container, box)), region);
+  }
+
+  function pickElements(elements, region) {
     var token = "p" + nextToken++;
     picked.clear();
-    picked.set(token, element);
+    picked.set(token, { elements: elements, region: region });
     state.anchor = { kind: "pick", token: token };
-    // Hide the overlays for the frame the element's screenshot is taken from; main shows them again.
+    resetHover();
+    // Hide the overlays for the frame the screenshot is taken from; main shows them again.
     setHidden(true);
     // Main shows them again once it has the screenshot; never leave them hidden if it does not.
     setTimeout(function () { if (hidden) { setHidden(false); schedule(); } }, 4000);
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        if (!element.isConnected) { setHidden(false); return; }
-        emit({ type: "pick", token: token, url: location.href, title: document.title, rect: rectOf(element), viewport: viewport(), element: describe(element) });
+        var entry = picked.get(token);
+        var rect = entry ? pickRect(entry) : null;
+        if (!rect) { setHidden(false); schedule(); return; }
+        emit({
+          type: "pick", token: token, url: location.href, title: document.title, rect: rect, viewport: viewport(),
+          elements: entry.elements.map(describe), region: region
+        });
       });
     });
   }
@@ -314,14 +560,31 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   function setHidden(value) {
     hidden = value;
     if (host) host.style.setProperty("visibility", value ? "hidden" : "visible", "important");
-    if (value && hoverBox) { hoverBox.style.display = "none"; hoverLabel.style.display = "none"; }
+    if (value) { hideHover(); hideDrag(); }
   }
 
-  function anchorElement() {
+  // ---- annotations on the page ----
+
+  function pinById(id) {
+    for (var i = 0; i < state.pins.length; i++) if (state.pins[i].id === id) return state.pins[i];
+    return null;
+  }
+
+  function pinRect(pin) {
+    var element = located.get(pin.id);
+    if (!connected(element)) return null;
+    return pin.region ? regionRect(element, pin.region) : rectOf(element);
+  }
+
+  function anchorRect() {
     var anchor = state.anchor;
     if (!anchor) return null;
-    if (anchor.kind === "pick") return picked.get(anchor.token) || null;
-    return located.get(anchor.id) || null;
+    if (anchor.kind === "pick") {
+      var entry = picked.get(anchor.token);
+      return entry ? pickRect(entry) : null;
+    }
+    var pin = pinById(anchor.id);
+    return pin ? pinRect(pin) : null;
   }
 
   function relocate() {
@@ -330,13 +593,27 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
     for (var i = 0; i < state.pins.length; i++) {
       var pin = state.pins[i];
       alive.add(pin.id);
+      // Relocation keys off the first element only; a region follows it.
       var current = located.get(pin.id);
-      if (!current || !current.isConnected) {
-        current = locate(pin);
+      if (!connected(current)) {
+        current = locate(pin.targets[0]);
         if (current) located.set(pin.id, current); else located.delete(pin.id);
       }
       if (!current) missing.push(pin.id);
     }
+    // The other elements, only for the annotations being outlined.
+    var wanted = new Set();
+    for (var j = 0; j < state.outlined.length; j++) {
+      var outlined = pinById(state.outlined[j]);
+      if (!outlined || outlined.region || outlined.targets.length < 2) continue;
+      wanted.add(outlined.id);
+      var others = extras.get(outlined.id) || [];
+      for (var k = 1; k < outlined.targets.length; k++) {
+        if (!connected(others[k - 1])) others[k - 1] = locate(outlined.targets[k]);
+      }
+      extras.set(outlined.id, others);
+    }
+    extras.forEach(function (_, id) { if (!wanted.has(id)) extras.delete(id); });
     if (pendingScroll) {
       var target = located.get(pendingScroll);
       if (target) {
@@ -354,16 +631,16 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
 
   function renderPins() {
     if (!pinLayer) return;
+    var view = viewport();
     var wanted = new Set();
     for (var i = 0; i < state.pins.length; i++) {
       var pin = state.pins[i];
-      var element = located.get(pin.id);
+      var rect = pinRect(pin);
       var node = pinNodes.get(pin.id);
-      if (!element || !element.isConnected) { if (node) node.style.display = "none"; continue; }
+      if (!rect) { if (node) node.style.display = "none"; continue; }
       wanted.add(pin.id);
       if (!node) {
         node = document.createElement("div");
-        node.className = "pin";
         (function (id) {
           node.addEventListener("click", function (event) { event.preventDefault(); event.stopPropagation(); emit({ type: "pin-click", id: id }); });
           node.addEventListener("pointerdown", function (event) { event.stopPropagation(); });
@@ -374,25 +651,64 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
       }
       node.className = pin.resolved ? "pin resolved" : "pin";
       node.textContent = pin.resolved ? "\u2713" : String(pin.number);
-      var rect = rectOf(element);
-      node.style.left = rect.x + "px";
-      node.style.top = rect.y + "px";
-      var visible = rect.width + rect.height > 0 && rect.y + rect.height >= 0 && rect.y <= window.innerHeight;
+      var visible = rect.width + rect.height > 0 && rect.y + rect.height >= 0 && rect.y <= view.height && rect.x + rect.width >= 0 && rect.x <= view.width;
       node.style.display = visible ? "flex" : "none";
+      if (!visible) continue;
+      var position = pinPosition(rect, view, node.offsetWidth || 18, node.offsetHeight || 18, !!pin.region);
+      node.style.left = position.x + "px";
+      node.style.top = position.y + "px";
     }
     pinNodes.forEach(function (node, id) {
-      var keep = false;
-      for (var i = 0; i < state.pins.length; i++) if (state.pins[i].id === id) keep = true;
-      if (!keep) { node.remove(); pinNodes.delete(id); }
+      if (!pinById(id)) { node.remove(); pinNodes.delete(id); }
       else if (!wanted.has(id)) node.style.display = "none";
     });
   }
 
+  function renderOutlines() {
+    if (!outlineLayer) return;
+    var boxes = [];
+    function add(rect, kind) { if (rect && rect.width + rect.height > 0) boxes.push({ rect: rect, kind: kind }); }
+    // The shift-click selection being built.
+    for (var i = 0; i < selection.length; i++) if (connected(selection[i])) add(rectOf(selection[i]), "sel");
+    // The pick a card is open for: its other elements, or its region.
+    var anchor = state.anchor;
+    if (anchor && anchor.kind === "pick") {
+      var entry = picked.get(anchor.token);
+      if (entry && connected(entry.elements[0])) {
+        if (entry.region) add(regionRect(entry.elements[0], entry.region), "dashed");
+        else for (var j = 1; j < entry.elements.length; j++) if (connected(entry.elements[j])) add(rectOf(entry.elements[j]), "dashed");
+      }
+    }
+    // Outlined annotations: every element, or the region.
+    for (var k = 0; k < state.outlined.length; k++) {
+      var pin = pinById(state.outlined[k]);
+      var first = pin ? located.get(pin.id) : null;
+      if (!connected(first)) continue;
+      if (pin.region) { add(regionRect(first, pin.region), "dashed"); continue; }
+      add(rectOf(first), "dashed");
+      var others = extras.get(pin.id) || [];
+      for (var m = 0; m < others.length; m++) if (connected(others[m])) add(rectOf(others[m]), "dashed");
+    }
+    while (outlineNodes.length < boxes.length) {
+      var node = document.createElement("div");
+      outlineLayer.appendChild(node);
+      outlineNodes.push(node);
+    }
+    for (var n = 0; n < outlineNodes.length; n++) {
+      if (n >= boxes.length) { outlineNodes[n].style.display = "none"; continue; }
+      outlineNodes[n].className = boxes[n].kind === "sel" ? "outline sel" : "outline";
+      place(outlineNodes[n], boxes[n].rect);
+    }
+  }
+
   function renderAnchor() {
-    var element = anchorElement();
-    var rect = element && element.isConnected ? rectOf(element) : null;
+    var rect = anchorRect();
     if (anchorBox) {
-      if (rect && !hidden) place(anchorBox, rect); else anchorBox.style.display = "none";
+      // The solid box marks a new pick's first element; regions and stored annotations are dashed.
+      var anchor = state.anchor;
+      var entry = anchor && anchor.kind === "pick" ? picked.get(anchor.token) : null;
+      if (entry && !entry.region && connected(entry.elements[0]) && !hidden) place(anchorBox, rectOf(entry.elements[0]));
+      else anchorBox.style.display = "none";
     }
     var view = viewport();
     var key = rect ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height), view.width, view.height].join(",") : "none," + view.width + "," + view.height;
@@ -407,9 +723,11 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
     frame = 0;
     if (!needed()) { if (host && host.isConnected) host.remove(); return; }
     if (!ensureUi()) return;
+    applyPalette();
     renderPins();
+    renderOutlines();
     renderAnchor();
-    if (hidden) return;
+    showHover();
   }
 
   function schedule() {
@@ -428,7 +746,7 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   }
 
   function needed() {
-    return state.mode || state.pins.length > 0 || state.anchor !== null;
+    return state.mode || state.capture || state.pins.length > 0 || state.anchor !== null || selection.length > 0;
   }
 
   function watchDom() {
@@ -447,16 +765,24 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
   var api = {
     apply: function (next) {
       var previous = state.anchor;
-      state = { mode: !!next.mode, pins: Array.isArray(next.pins) ? next.pins : [], anchor: next.anchor || null };
+      state = {
+        mode: !!next.mode,
+        capture: !!next.capture,
+        pins: Array.isArray(next.pins) ? next.pins : [],
+        anchor: next.anchor || null,
+        outlined: Array.isArray(next.outlined) ? next.outlined : [],
+        palette: next.palette || null
+      };
+      // Only the latest pick is kept, and it is not dropped by a state sent before the renderer
+      // heard of it (main still reads its elements' source identity).
       if (state.anchor && state.anchor.kind === "pick" && !picked.has(state.anchor.token)) state.anchor = null;
-      if (!state.anchor || state.anchor.kind !== "pick") picked.clear();
-      if (cursorStyle) cursorStyle.disabled = !state.mode;
-      else if (state.mode && document.head) {
+      if (!state.mode || state.capture) { selection = []; press = null; hideDrag(); resetHover(); }
+      if (cursorStyle) cursorStyle.disabled = !state.mode || state.capture;
+      else if (state.mode && !state.capture && document.head) {
         cursorStyle = document.createElement("style");
         cursorStyle.textContent = "html, html * { cursor: crosshair !important; }";
         document.head.appendChild(cursorStyle);
       }
-      if (!state.mode && hoverBox) { hoverBox.style.display = "none"; hoverLabel.style.display = "none"; }
       var anchor = state.anchor;
       if (anchor && anchor.kind === "pin" && anchor.scroll && (!previous || previous.kind !== "pin" || previous.id !== anchor.id)) {
         pendingScroll = anchor.id;
@@ -474,21 +800,24 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
       schedule();
       return true;
     },
-    pickedElement: function (token) {
-      return picked.get(token) || null;
+    pickedElement: function (token, index) {
+      var entry = picked.get(token);
+      return entry ? entry.elements[index] || null : null;
     }
   };
   Object.defineProperty(globalThis, "__cofluxAnnotatorApi", { value: api, configurable: false, enumerable: false, writable: false });
 
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
-  window.addEventListener("pointerdown", swallow, true);
+  window.addEventListener("pointerdown", onPointerDown, true);
   window.addEventListener("mousedown", swallow, true);
-  window.addEventListener("pointerup", swallow, true);
+  window.addEventListener("pointerup", onPointerUp, true);
   window.addEventListener("mouseup", swallow, true);
   window.addEventListener("dblclick", swallow, true);
   window.addEventListener("contextmenu", swallow, true);
   window.addEventListener("click", onClick, true);
   window.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("keyup", onKeyUp, true);
+  window.addEventListener("blur", onBlur);
   window.addEventListener("scroll", schedule, { capture: true, passive: true });
   window.addEventListener("resize", schedule, { passive: true });
   setInterval(function () { if (needed()) schedule(); }, 500);
@@ -499,7 +828,7 @@ export const ANNOTATOR_PAGE_SCRIPT = String.raw`(function () {
 })();`;
 
 /**
- * Runs in the page's **main** world with `this` = the picked element (`Runtime.callFunctionOn`):
+ * Runs in the page's **main** world with `this` = one picked element (`Runtime.callFunctionOn`):
  * reads framework source identity from the page's own development data. React: the fiber on the
  * element, component names up the `return` chain and `_debugSource` (React ≤ 18 development builds;
  * React 19 has names only). Vue 3: `__vueParentComponent` and `type.__file`; Vue 2: `__vue__`.
