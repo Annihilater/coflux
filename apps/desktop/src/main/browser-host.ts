@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import {
@@ -46,6 +47,7 @@ import {
   isCertificateTrusted,
   isKeyDown,
   isSameScopeDaemon,
+  legacyPartitionDirectories,
   parseTrustedCertificates,
   sanitizeBrowserCommand,
   sanitizeCaptureRegion,
@@ -195,6 +197,35 @@ function portOfUrl(url: string): number | null {
   }
 }
 
+/**
+ * Deletes the on-disk data of the legacy per-workspace partitions (plan
+ * 20260929-browser-scope-partitions: no migration, every project and device starts empty). Only
+ * direct entries of `Partitions/` whose names `legacyPartitionDirectories` selects, never through a
+ * symlink, never anything else. Never rejects: a failure is logged and the leftover stays unused.
+ */
+async function removeLegacyPartitions(partitionsDir: string, log: (message: string, detail?: unknown) => void): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(partitionsDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("读取浏览器分区目录失败", String(error));
+    return;
+  }
+  const removed: string[] = [];
+  for (const name of legacyPartitionDirectories(names)) {
+    const path = join(partitionsDir, name);
+    try {
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+      await rm(path, { recursive: true, force: true });
+      removed.push(name);
+    } catch (error) {
+      log("删除旧的浏览器分区数据失败", { name, error: String(error) });
+    }
+  }
+  if (removed.length > 0) log("已删除旧的按工作区浏览器分区数据", { count: removed.length });
+}
+
 /** Whether the partition's requests go through its proxy (so loopback reaches the device). */
 function proxied(entry: ConfiguredPartition): boolean {
   return typeof entry.applied === "number";
@@ -213,6 +244,10 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   const downloadsInFlight = new Set<string>();
   let devtoolsSessionReady = false;
   let trusted: TrustedCertificates = readTrusted();
+  // Old per-workspace partitions go before any browser partition session exists: every
+  // `session.fromPartition` of a page partition awaits this first. Partitions hang off
+  // `sessionData` (not `userData`), read now, after main's userData overrides ran.
+  const legacyCleanup = removeLegacyPartitions(join(app.getPath("sessionData"), "Partitions"), options.log);
 
   function readTrusted(): TrustedCertificates {
     try {
@@ -423,6 +458,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   async function prepare(scope: DesktopBrowserScope, daemonId: string): Promise<DesktopBrowserPrepared> {
     const partition = browserPartitionFor(scope);
     if (!partition) throw new Error("浏览器分区标识无效");
+    await legacyCleanup;
     let entry = configured.get(partition);
     // A scope maps to exactly one device (a project never moves; a device scope is its own device).
     if (!isSameScopeDaemon(entry?.daemonId, daemonId)) throw new Error("这个浏览器分区属于另一台设备");
@@ -756,6 +792,7 @@ export function createBrowserHost(options: BrowserHostOptions): BrowserHost {
   async function clearData(scope: DesktopBrowserScope, target: DesktopBrowserClearTarget): Promise<boolean> {
     const partition = browserPartitionFor(scope);
     if (!partition) return false;
+    await legacyCleanup;
     const entry = configured.get(partition);
     const ses = entry?.session ?? session.fromPartition(partition);
     if (target === "cookies") {

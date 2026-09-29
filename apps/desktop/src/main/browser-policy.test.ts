@@ -20,6 +20,7 @@ import {
   isCertificateTrusted,
   isKeyDown,
   isSameScopeDaemon,
+  legacyPartitionDirectories,
   parseTrustedCertificates,
   sanitizeBrowserCommand,
   sanitizeCaptureRegion,
@@ -85,6 +86,26 @@ test("partitions are named per scope, only for safe ids, and round-trip to their
   assert.equal(browserScopeOfPartition(`${BROWSER_PROJECT_PARTITION_PREFIX}../x`), null);
   assert.equal(browserScopeOfPartition(`${LEGACY_BROWSER_PARTITION_PREFIX}${PROJECT_A}`), null);
   assert.equal(browserScopeOfPartition(BROWSER_DEVTOOLS_PARTITION), null);
+});
+
+test("startup cleanup selects only legacy per-workspace partition directories", () => {
+  // On-disk names: `persist:` stripped and lowercased, as Electron stores them under Partitions/.
+  const legacy1 = "coflux-browser-3b0e6c1a-9f2d-4c1e-8a7b-5d4e3f2a1b0c";
+  const legacy2 = "coflux-browser-ws-1";
+  const names = [
+    legacy1,
+    legacy2,
+    "coflux-web-project-6f1c2d3e-0000-4000-8000-00000000000a",
+    "coflux-web-device-9a8b7c6d-0000-4000-8000-000000000001",
+    "coflux-browser-devtools",
+    "coflux-browser-",
+    "coflux-browser-a%20b",
+    "coflux-browser",
+    "other-app",
+    "persist:coflux-browser-ws-1",
+  ];
+  assert.deepEqual(legacyPartitionDirectories(names), [legacy1, legacy2]);
+  assert.deepEqual(legacyPartitionDirectories([]), []);
 });
 
 test("a scope keeps the device of its first prepare", () => {
