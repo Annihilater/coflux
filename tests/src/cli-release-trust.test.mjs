@@ -62,19 +62,34 @@ function releaseFixture(withCli = false, withTransport = false) {
   return { target, publicKey, privateKey, artifacts, manifest };
 }
 
-async function serveRelease(fixture) {
-  const prefix = `/releases/download/${VERSION}`;
+// One local server plays both download sources: the R2 mirror under /mirror (its `latest.json` pointer
+// plus the release it names) and the GitHub Releases archive under /archive. Both carry the fixture's
+// release so a test can prove which one cofluxd chose; `requests` records every path asked for.
+// `pointer`: a tag for latest.json, "missing" for a 404, or "broken" for a 500.
+async function serveRelease(fixture, { pointer = VERSION } = {}) {
+  const requests = [];
+  const releaseRoutes = (prefix) => [
+    [`${prefix}/manifest.json`, Buffer.from(JSON.stringify(fixture.manifest))],
+    [`${prefix}/coflux-supervisor-${fixture.target}`, fixture.artifacts.supervisor],
+    [`${prefix}/coflux-worker-${fixture.target}`, fixture.artifacts.worker],
+    [`${prefix}/coflux-cli-${fixture.target}`, fixture.artifacts.cli],
+    [`${prefix}/coflux-transport-${fixture.target}`, fixture.artifacts.transport],
+    [`${prefix}/coflux-ptyd-${fixture.target}`, fixture.artifacts.ptyd],
+    [`${prefix}/coflux-transport-NOTICES-${fixture.target}.txt`, Buffer.from("test dependency notices")],
+  ];
+  const routes = new Map([
+    ...releaseRoutes(`/mirror/${VERSION}`),
+    ...releaseRoutes(`/archive/${VERSION}`),
+    ...(pointer === "missing" || pointer === "broken"
+      ? []
+      : [["/mirror/latest.json", Buffer.from(JSON.stringify({ version: pointer }))]]),
+  ]);
   const server = createServer((req, res) => {
-    const routes = new Map([
-      ["/repos/myWsq/coflux/releases?per_page=1", Buffer.from(JSON.stringify([{ tag_name: VERSION }]))],
-      [`${prefix}/manifest.json`, Buffer.from(JSON.stringify(fixture.manifest))],
-      [`${prefix}/coflux-supervisor-${fixture.target}`, fixture.artifacts.supervisor],
-      [`${prefix}/coflux-worker-${fixture.target}`, fixture.artifacts.worker],
-      [`${prefix}/coflux-cli-${fixture.target}`, fixture.artifacts.cli],
-      [`${prefix}/coflux-transport-${fixture.target}`, fixture.artifacts.transport],
-      [`${prefix}/coflux-ptyd-${fixture.target}`, fixture.artifacts.ptyd],
-      [`${prefix}/coflux-transport-NOTICES-${fixture.target}.txt`, Buffer.from("test dependency notices")],
-    ]);
+    requests.push(req.url);
+    if (pointer === "broken" && req.url === "/mirror/latest.json") {
+      res.writeHead(500).end();
+      return;
+    }
     const body = routes.get(req.url);
     if (!body) {
       res.writeHead(404).end();
@@ -93,8 +108,9 @@ async function serveRelease(fixture) {
   const address = server.address();
   const origin = `http://127.0.0.1:${address.port}`;
   return {
-    base: `${origin}/releases/download`,
-    apiBase: origin,
+    mirror: `${origin}/mirror`,
+    archive: `${origin}/archive`,
+    requests,
     close: () => new Promise((resolveClose) => server.close(resolveClose)),
   };
 }
@@ -116,8 +132,8 @@ async function runUpdate(home, fixture, endpoint, { latest = false, env = {} } =
     env: {
       ...process.env,
       COFLUX_HOME: home,
-      COFLUX_RELEASE_API_BASE: endpoint.apiBase,
-      COFLUX_RELEASE_DOWNLOAD_BASE: endpoint.base,
+      COFLUX_RELEASE_DOWNLOAD_BASE: endpoint.mirror,
+      COFLUX_RELEASE_ARCHIVE_BASE: endpoint.archive,
       // 与 supervisor 的测试/自带密钥部署入口一致；默认生产路径仍只读 npm 包内置公钥。
       COFLUX_WORKER_PUBKEY: rawPublicKeyHex(fixture.publicKey),
       ...env,
@@ -317,5 +333,68 @@ test("cofluxd installs four signed components and notices, rejecting a damaged c
         assert.equal(readFileSync(join(home, "bin/TRANSPORT-NOTICES.txt"), "utf8"), "test dependency notices");
       }
     } finally { await endpoint.close(); rmSync(home, { recursive: true, force: true }); }
+  }
+});
+
+// Routing (plan 20260930-r2-download-mirror): the mirror holds only the release its latest.json names;
+// everything else comes from the GitHub Releases archive, decided by version and never by failure.
+test("cofluxd routing: the pointer's tag installs from the mirror, with or without --version", async () => {
+  for (const latest of [true, false]) {
+    const fixture = releaseFixture();
+    const endpoint = await serveRelease(fixture);
+    const home = makeInstallHome();
+    try {
+      await runUpdate(home, fixture, endpoint, { latest });
+      assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION);
+      assert.equal(spawnSync(join(home, "bin", "coflux-supervisor")).status, 0);
+      assert.ok(endpoint.requests.includes("/mirror/latest.json"));
+      assert.ok(endpoint.requests.includes(`/mirror/${VERSION}/manifest.json`));
+      assert.ok(endpoint.requests.includes(`/mirror/${VERSION}/coflux-supervisor-${fixture.target}`));
+      assert.deepEqual(endpoint.requests.filter((path) => path.startsWith("/archive/")), [], "the archive is never touched");
+    } finally {
+      await endpoint.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("cofluxd routing: an explicit version the pointer does not name installs from the archive only", async () => {
+  // A newer latest (so VERSION is an older release), and an unreadable pointer (404 or 500).
+  for (const pointer of ["v9.9.0", "missing", "broken"]) {
+    const fixture = releaseFixture();
+    const endpoint = await serveRelease(fixture, { pointer });
+    const home = makeInstallHome();
+    try {
+      await runUpdate(home, fixture, endpoint);
+      assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION, pointer);
+      assert.ok(endpoint.requests.includes(`/archive/${VERSION}/manifest.json`), pointer);
+      assert.ok(endpoint.requests.includes(`/archive/${VERSION}/coflux-worker-${fixture.target}`), pointer);
+      assert.deepEqual(
+        endpoint.requests.filter((path) => path.startsWith(`/mirror/${VERSION}/`)),
+        [],
+        `the mirror's versioned objects are never touched (pointer: ${pointer})`,
+      );
+    } finally {
+      await endpoint.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("cofluxd routing: without --version an unreadable pointer fails with the --version hint and changes nothing", async () => {
+  for (const pointer of ["missing", "broken", "not-a-tag"]) {
+    const fixture = releaseFixture();
+    const endpoint = await serveRelease(fixture, { pointer });
+    const home = makeInstallHome();
+    try {
+      await assert.rejects(runUpdate(home, fixture, endpoint, { latest: true }), /--version vX\.Y\.Z/);
+      assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+      assert.equal(existsSync(join(home, "cofluxd.release-floor")), false);
+      assert.deepEqual(endpoint.requests, ["/mirror/latest.json"], `no silent fallback to any download (pointer: ${pointer})`);
+    } finally {
+      await endpoint.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
