@@ -77,10 +77,10 @@ function SecretRequestCard({
       <div className="flex items-start gap-2">
         <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">
-            Agent 请求输入 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{request.name}</code>
+          <div className="text-base font-medium">
+            Agent 请求输入 <code className="rounded bg-muted px-1 py-0.5 font-mono text-sm">{request.name}</code>
           </div>
-          <div className="mt-0.5 truncate text-xs text-muted-foreground">{source}</div>
+          <div className="mt-0.5 truncate text-sm text-muted-foreground">{source}</div>
         </div>
         <Button
           label="取消请求"
@@ -95,8 +95,8 @@ function SecretRequestCard({
       </div>
       {request.reason ? (
         <div className="mt-2 rounded-md border border-border bg-muted/40 px-2 py-1.5">
-          <div className="text-[11px] text-muted-foreground">Agent 说</div>
-          <div className="mt-0.5 whitespace-pre-wrap break-words text-sm">{request.reason}</div>
+          <div className="text-sm text-muted-foreground">Agent 说</div>
+          <div className="mt-0.5 whitespace-pre-wrap break-words text-base">{request.reason}</div>
         </div>
       ) : null}
       <div className="mt-2">
@@ -118,7 +118,7 @@ function SecretRequestCard({
           <Text type="supporting">{phase.error}，可以重试。</Text>
         </div>
       ) : null}
-      <div className="mt-1.5 text-[11px] text-muted-foreground">只交给 {deviceName || "该设备"}，Agent 看不到 · {deadline} 过期</div>
+      <div className="mt-1.5 text-sm text-muted-foreground">只交给 {deviceName || "该设备"}，Agent 看不到 · {deadline} 过期</div>
       <div className="mt-2 flex items-center justify-end gap-2">
         <Button
           label="拒绝"

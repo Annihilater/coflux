@@ -980,7 +980,7 @@ export function WorkspaceTerminal({
           ) : null}
 
           {activeTask && activeControlState === "detached" ? (
-            <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 border-b border-warning/20 bg-warning/10 px-4 py-2 text-xs text-warning backdrop-blur">
+            <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 border-b border-warning/20 bg-warning/10 px-4 py-2 text-sm text-warning backdrop-blur">
               <span className="flex min-w-0 items-center gap-2">
                 <Unplug className="size-3.5 shrink-0" />
                 <span className="truncate">此终端已被其它客户端接管，当前输入已锁定。</span>
@@ -991,7 +991,7 @@ export function WorkspaceTerminal({
 
           {/* 已退出终端（plan 097）：画面是回放的最后输出，重开 shell 是显式动作，不再一点 Tab 就悄悄起新会话。 */}
           {activeTask && activeTask.status === TaskStatus.EXITED && activeControlState === "stopped" ? (
-            <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-background/80 px-4 py-2 text-xs text-muted-foreground backdrop-blur">
+            <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-background/80 px-4 py-2 text-sm text-muted-foreground backdrop-blur">
               <span className="flex min-w-0 items-center gap-2">
                 <History className="size-3.5 shrink-0" />
                 <span className="truncate">
@@ -1125,7 +1125,7 @@ export function WorkspaceTerminal({
           >
             <FileDiff className="size-3 shrink-0 opacity-90" />
             <span>变更</span>
-            <span className="text-xs text-muted-foreground">Esc 返回终端</span>
+            <span className="text-sm text-muted-foreground">Esc 返回终端</span>
           </header>
           <div className="relative min-h-0 flex-1">
             <div className="absolute inset-0">

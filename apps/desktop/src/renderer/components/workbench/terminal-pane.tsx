@@ -1005,7 +1005,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             value={searchTerm}
             placeholder="查找"
             aria-label="在终端里查找"
-            className="w-44 bg-transparent px-1 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+            className="w-44 bg-transparent px-1 text-base text-foreground outline-none placeholder:text-muted-foreground"
             onChange={(event) => {
               setSearchTerm(event.target.value);
               runSearch(event.target.value, "next", true);
@@ -1021,7 +1021,7 @@ export function TerminalPane(props: TerminalPaneProps) {
               runSearch(searchTerm, event.shiftKey ? "previous" : "next");
             }}
           />
-          <span className="min-w-12 text-center text-[11px] tabular-nums text-muted-foreground">
+          <span className="min-w-12 text-center text-sm tabular-nums text-muted-foreground">
             {searchTerm.length === 0 ? "" : searchResults.count === 0 ? "无结果" : `${searchResults.index + 1}/${searchResults.count}`}
           </span>
           <button className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="上一个匹配" onClick={() => runSearch(searchTerm, "previous")}>
@@ -1037,7 +1037,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       ) : null}
       {linkHint ? (
         <div
-          className="pointer-events-none fixed z-30 rounded border border-border bg-background/95 px-1.5 py-0.5 text-[11px] text-muted-foreground shadow"
+          className="pointer-events-none fixed z-30 rounded border border-border bg-background/95 px-1.5 py-0.5 text-sm text-muted-foreground shadow"
           style={{ left: linkHint.x + 12, top: linkHint.y + 16 }}
         >
           {linkHint.label}

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Keep FILE compatibility strict except for the explicitly retired transport symbols.
+// Keep FILE compatibility strict except for the exact, reviewed deletions in proto/breaking-allowlist.json
+// (the retired transport symbols and the annotation fields replaced by targets/region).
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 const root = resolve(import.meta.dirname, "..");
-const exceptions = JSON.parse(readFileSync(resolve(root, "proto/tailcat-retirement-allowlist.json"), "utf8"));
+const exceptions = JSON.parse(readFileSync(resolve(root, "proto/breaking-allowlist.json"), "utf8"));
 const signature = ({ path, type, message }) => JSON.stringify([path, type, message]);
 const allowed = new Set(exceptions.map(signature));
 export function assertBreakingResult(result, permitRetirement) {

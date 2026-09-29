@@ -528,6 +528,12 @@ this machine, so they are there whether or not a desktop is open.
   the page exposed them, the element's selector, DOM path and key computed styles, and the paths of
   its images. It always names the workspace it resolved: an empty list in the wrong workspace means
   you moved (`coflux workspace`). Add `--json` for structured output.
+- One annotation is not always one element. When the user selected several elements together, it
+  lists each one with its own component chain and context under "Element 1 of n": the comment
+  applies to all of them, so change them consistently and resolve the annotation once. When the user
+  dragged a **region**, it gives the region's size and offset, the *container* (the innermost
+  element holding it — usually the component to edit) and the components inside the region; the
+  comment is about that area as a whole, and the screenshot shows exactly the region.
 - Find the code from the most specific lead: a source location first, then the component names,
   then text and selectors (`rg` for them). Treat the computed styles as the current state, not as
   the target: map colors, sizes and spacing onto the project's design system (its tokens, theme and

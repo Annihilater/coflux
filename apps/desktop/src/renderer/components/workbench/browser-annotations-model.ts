@@ -5,8 +5,8 @@ import type { Annotation } from "@coflux/protocol";
 import type { AnnotationChange, AnnotationMutateResult, CofluxClient } from "@coflux/client";
 
 /**
- * Browser annotations of each workspace as this renderer last loaded them (plan
- * 20260929-browser-annotations). One model per client, shared by every browser tab of a workspace.
+ * Browser annotations of each workspace as this renderer last loaded them (plans
+ * 20260929-browser-annotations, 20260929-annotation-polish). One model per client, shared by every browser tab of a workspace.
  * The content comes from the workspace device's worker over the Device channel and lives only in
  * memory here — which is also the read-only list shown while the device is offline.
  *
@@ -68,6 +68,11 @@ export function annotationsModelFor(client: CofluxClient): AnnotationsModel {
   async function change(workspaceId: string, next: AnnotationChange): Promise<AnnotationMutateResult> {
     const result = await client.changeAnnotations(workspaceId, next);
     if (result.ok) {
+      // Removed ones leave the list at once; the refetch below brings back what a restore restored.
+      if (result.removedIds.length > 0) {
+        const current = store.getState().workspaces[workspaceId]?.annotations;
+        if (current) patch(workspaceId, { annotations: current.filter((annotation) => !result.removedIds.includes(annotation.annotationId)) });
+      }
       await (inflight.get(workspaceId) ?? Promise.resolve());
       void refresh(workspaceId);
     } else if (result.reason !== "refused") {

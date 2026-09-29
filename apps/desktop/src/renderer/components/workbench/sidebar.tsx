@@ -137,7 +137,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
-            <span className="text-xs text-muted-foreground">项目</span>
+            <span className="text-sm text-muted-foreground">项目</span>
             <Tooltip content="导入项目">
               <button
                 className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -154,7 +154,7 @@ export function Sidebar(props: SidebarProps) {
               onClick={() => props.onImportProject()}
             >
               <span className="text-base font-medium text-foreground">还没有项目</span>
-              <span className="mt-1 text-xs leading-4 text-muted-foreground">导入在线设备上的 git 仓库开始使用</span>
+              <span className="mt-1 text-sm leading-4 text-muted-foreground">导入在线设备上的 git 仓库开始使用</span>
             </button>
           ) : null}
 
@@ -262,7 +262,7 @@ export function Sidebar(props: SidebarProps) {
                             </div>
                             <div className="flex flex-col gap-0.5">
                               {activity.status !== "idle" ? (
-                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                                   <ActivityIcon activity={activity} />
                                   <span className="truncate">{activityText}</span>
                                 </span>
@@ -271,28 +271,28 @@ export function Sidebar(props: SidebarProps) {
                                   「它在等你」，具体等什么得由 agent 自己说。不 truncate——留言就是
                                   要读的内容，worker 侧已按 200 字符钳过。 */}
                               {activity.status === "question" && activity.message ? (
-                                <span className="flex items-start gap-1.5 text-xs text-foreground">
+                                <span className="flex items-start gap-1.5 text-sm text-foreground">
                                   <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
                                   <span className="whitespace-pre-wrap break-words">{activity.message}</span>
                                 </span>
                               ) : null}
                               {/* 进度短评（plan 088）：agent 主动播报「干到哪了」，不 truncate 同 notify 理由。 */}
                               {progress ? (
-                                <span className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                                <span className="flex items-start gap-1.5 text-sm text-muted-foreground">
                                   <LoaderCircle className="mt-0.5 size-3 shrink-0 opacity-70" />
                                   <span className="whitespace-pre-wrap break-words">{progress}</span>
                                 </span>
                               ) : null}
-                              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                                 <Folder className="size-3 shrink-0 opacity-70" />
                                 <span className="truncate">{workspace.path}</span>
                               </span>
-                              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                                 <Monitor className="size-3 shrink-0 opacity-70" />
                                 <span className="truncate">{daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失"}</span>
                               </span>
                               {hasDiff ? (
-                                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                                   <FileDiff className="size-3 shrink-0 opacity-70" />
                                   <span className="truncate">{diffAgainstSelf ? "未提交改动" : `相对 ${project.defaultBranch} 的变更`} +{workspace.additions} −{workspace.deletions}</span>
                                 </span>
@@ -347,7 +347,7 @@ export function Sidebar(props: SidebarProps) {
                                     )}
                                   >
                                     {label ? (
-                                      <span className="max-w-24 truncate text-xs text-muted-foreground">
+                                      <span className="max-w-24 truncate text-sm text-muted-foreground">
                                         {label}
                                       </span>
                                     ) : null}
@@ -391,7 +391,7 @@ export function Sidebar(props: SidebarProps) {
                           <span className="flex min-w-0 flex-1 items-center gap-2 px-2">
                             <LoaderCircle className="size-3 shrink-0 animate-spin opacity-70" />
                             <span className="min-w-0 flex-1 truncate text-base">{pending.branch}</span>
-                            <span className="shrink-0 text-xs text-muted-foreground">创建中</span>
+                            <span className="shrink-0 text-sm text-muted-foreground">创建中</span>
                           </span>
                         </div>
                       ))}
@@ -406,7 +406,7 @@ export function Sidebar(props: SidebarProps) {
 
         <section className="max-h-[42%] shrink-0 overflow-y-auto border-t border-border px-2 py-2.5">
           <div className="mb-1.5 flex h-7 items-center px-2">
-            <span className="text-xs text-muted-foreground">设备</span>
+            <span className="text-sm text-muted-foreground">设备</span>
             <button
               className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               onClick={() => props.onAddDevice()}
@@ -494,7 +494,7 @@ export function Sidebar(props: SidebarProps) {
                   </div>
                   <div className="flex flex-col gap-0.5">
                     {tooltipRows.map((row) => (
-                      <span key={row.text} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <span key={row.text} className="flex items-center gap-1.5 text-sm text-muted-foreground">
                         <row.icon className="size-3 shrink-0 opacity-70" />
                         <span className="truncate">{row.text}</span>
                       </span>
@@ -542,7 +542,7 @@ export function Sidebar(props: SidebarProps) {
                         </span>
                         {orphans.length > 0 ? (
                           <span
-                            className="shrink-0 rounded bg-warning/10 px-1 text-2xs text-warning"
+                            className="shrink-0 rounded bg-warning/10 px-1 text-xs text-warning"
                             title={`本机存在 ${orphans.length} 个中心 catalog 未登记的存活 session：${orphans.map((item) => item.sessionId).join(", ")}`}
                           >
                             本地 {orphans.length}

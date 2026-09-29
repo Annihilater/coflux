@@ -1005,6 +1005,24 @@ message AnnotationSource {
   uint32 column = 5;
 }
 
+// One element an annotation points at (plan 20260929-annotation-polish): its page context and
+// its own framework source identity.
+message AnnotationTarget {
+  AnnotationElement element = 1;
+  AnnotationSource source = 2;
+}
+
+// A rectangle the user dragged on the live page, stored relative to the border box of the
+// annotation's target 0 (the innermost element containing it) so it follows scrolling and reflow.
+// When only <body> contains it, it is a fixed document position.
+message AnnotationRegion {
+  // CSS pixels from target 0's top-left corner when the region was drawn.
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+}
+
 message AnnotationImage {
   // Assigned by the worker.
   string image_id = 1;
@@ -1032,8 +1050,9 @@ message Annotation {
   string page_url = 4;
   string page_title = 5;
   string comment = 6;
-  AnnotationElement element = 7;
-  AnnotationSource source = 8;
+  // Replaced by `targets` and `region` (plan 20260929-annotation-polish); never reuse them.
+  reserved 7, 8;
+  reserved "element", "source";
   repeated AnnotationImage images = 9;
   // The agent's note from `coflux annotations resolve`.
   string resolution_note = 10;
@@ -1041,6 +1060,12 @@ message Annotation {
   double created_at = 12;
   double updated_at = 13;
   double resolved_at = 14;
+  // The elements the annotation points at, at least one. Target 0 is the anchor: the clicked
+  // element, the first of a shift-click selection, or the element containing `region`. For a
+  // region annotation the other targets are the top-level elements inside the region.
+  repeated AnnotationTarget targets = 15;
+  // Set when the user dragged a region instead of picking elements.
+  AnnotationRegion region = 16;
 }
 
 // An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
@@ -1050,16 +1075,23 @@ message AnnotationImageUpload {
   bytes data = 3;
 }
 
-// Create (empty annotation_id) or edit an annotation. On edit only the comment, the element
-// context, the source and the images change; status and numbering are the worker's.
+// Create (empty annotation_id) or edit an annotation. On edit only the comment, the targets, the
+// region and the images change; status and numbering are the worker's.
 message AnnotationPut {
   Annotation annotation = 1;
   repeated AnnotationImageUpload add_images = 2;
   repeated string remove_image_ids = 3;
 }
 
-// Confirm (or delete) annotations: their image files are deleted with them.
+// Confirm (or delete) annotations. They disappear at once; the worker keeps them (images
+// included) restorable for a short grace window, then purges them.
 message AnnotationDelete {
+  repeated string annotation_ids = 1;
+}
+
+// Undo a delete, confirm or clear-resolved within the grace window: the annotations come back
+// exactly as they were (id, number, status, images, follow-ups). Ids already purged are skipped.
+message AnnotationRestore {
   repeated string annotation_ids = 1;
 }
 
@@ -1096,6 +1128,7 @@ message DeviceAnnotationsMutate {
     AnnotationDelete delete = 4;
     AnnotationReopen reopen = 5;
     AnnotationClearResolved clear_resolved = 6;
+    AnnotationRestore restore = 7;
   }
 }
 
@@ -1106,6 +1139,8 @@ message DeviceAnnotationsMutated {
   string error = 3;
   uint32 revision = 4;
   Annotation annotation = 5;
+  // For a delete or clear-resolved: exactly the ids it removed, which one restore brings back.
+  repeated string removed_ids = 6;
 }
 
 // client→worker (SESSION_CONTROL): one image file of an annotation.

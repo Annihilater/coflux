@@ -55,30 +55,54 @@ fn workspace_label(result: &Value) -> String {
     }
 }
 
-fn render_element(element: &Value, out: &mut Vec<String>) {
+/// The element's opening tag with its id, classes and identifying attributes.
+fn opening_tag(element: &Value) -> Option<String> {
     let tag = text(element, "tag");
-    if !tag.is_empty() {
-        let mut opening = format!("<{tag}");
-        let id = text(element, "elementId");
-        if !id.is_empty() {
-            opening.push_str(&format!(" id=\"{id}\""));
-        }
-        let classes: Vec<&str> = element
-            .get("classes")
-            .and_then(Value::as_array)
-            .map(|list| list.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if !classes.is_empty() {
-            opening.push_str(&format!(" class=\"{}\"", classes.join(" ")));
-        }
-        if let Some(attributes) = element.get("attributes").and_then(Value::as_object) {
-            for (key, value) in attributes {
-                if let Some(value) = value.as_str() {
-                    opening.push_str(&format!(" {key}=\"{}\"", one_line(value)));
-                }
+    if tag.is_empty() {
+        return None;
+    }
+    let mut opening = format!("<{tag}");
+    let id = text(element, "elementId");
+    if !id.is_empty() {
+        opening.push_str(&format!(" id=\"{id}\""));
+    }
+    let classes: Vec<&str> = element
+        .get("classes")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !classes.is_empty() {
+        opening.push_str(&format!(" class=\"{}\"", classes.join(" ")));
+    }
+    if let Some(attributes) = element.get("attributes").and_then(Value::as_object) {
+        for (key, value) in attributes {
+            if let Some(value) = value.as_str() {
+                opening.push_str(&format!(" {key}=\"{}\"", one_line(value)));
             }
         }
-        opening.push('>');
+    }
+    opening.push('>');
+    Some(opening)
+}
+
+fn components(source: &Value) -> Vec<&str> {
+    source
+        .get("components")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn render_element(element: &Value, out: &mut Vec<String>) {
+    if let Some(opening) = opening_tag(element) {
         let excerpt = one_line(text(element, "text"));
         if excerpt.is_empty() {
             out.push(format!("- Element: {}", code(&opening)));
@@ -109,11 +133,7 @@ fn render_source(source: &Value, out: &mut Vec<String>) {
     if source.is_null() {
         return;
     }
-    let components: Vec<&str> = source
-        .get("components")
-        .and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    let components = components(source);
     let framework = text(source, "framework");
     if !components.is_empty() {
         let chain = components.join(" < ");
@@ -135,6 +155,88 @@ fn render_source(source: &Value, out: &mut Vec<String>) {
             }
         }
         out.push(format!("- Source: {}", code(&location)));
+    }
+}
+
+fn render_target(target: &Value, out: &mut Vec<String>) {
+    render_source(target.get("source").unwrap_or(&Value::Null), out);
+    render_element(target.get("element").unwrap_or(&Value::Null), out);
+}
+
+/// One line naming an element inside a region: its component chain, then its tag and selector.
+fn inner_element_line(target: &Value) -> String {
+    let source = target.get("source").unwrap_or(&Value::Null);
+    let element = target.get("element").unwrap_or(&Value::Null);
+    let mut parts = Vec::new();
+    let chain = components(source);
+    if !chain.is_empty() {
+        parts.push(chain.join(" < "));
+    }
+    if let Some(opening) = opening_tag(element) {
+        parts.push(code(&opening));
+    }
+    let selector = text(element, "selector");
+    if !selector.is_empty() {
+        parts.push(format!("selector {}", code(selector)));
+    }
+    let file = text(source, "file");
+    if !file.is_empty() {
+        let line = number(source, "line");
+        let location = if line > 0 { format!("{file}:{line}") } else { file.to_string() };
+        parts.push(format!("source {}", code(&location)));
+    }
+    format!("- {}", parts.join(" · "))
+}
+
+/// The elements an annotation points at: one element, several (a shift-click selection), or a
+/// region with the element containing it (`targets[0]`) and the elements inside it.
+fn render_targets(annotation: &Value, out: &mut Vec<String>) {
+    let targets = annotation
+        .get("targets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let region = annotation.get("region").filter(|region| region.is_object());
+    if let Some(region) = region {
+        let value = |key: &str| region.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+        out.push(format!(
+            "- Region: the user dragged a {}×{} px area on the page, {} px right and {} px down from the top-left corner of the container below. The comment is about that area.",
+            format_number(value("width")),
+            format_number(value("height")),
+            format_number(value("x")),
+            format_number(value("y")),
+        ));
+        if let Some(container) = targets.first() {
+            out.push(String::new());
+            out.push("### Container (the innermost element holding the region)".into());
+            out.push(String::new());
+            render_target(container, out);
+        }
+        if targets.len() > 1 {
+            out.push(String::new());
+            out.push("### Inside the region".into());
+            out.push(String::new());
+            for target in &targets[1..] {
+                out.push(inner_element_line(target));
+            }
+        }
+        return;
+    }
+    if targets.len() > 1 {
+        out.push(format!(
+            "- Elements: {} (the user selected them together; the comment applies to all of them)",
+            targets.len()
+        ));
+        for (index, target) in targets.iter().enumerate() {
+            out.push(String::new());
+            out.push(format!("### Element {} of {}", index + 1, targets.len()));
+            out.push(String::new());
+            render_target(target, out);
+        }
+        return;
+    }
+    if let Some(target) = targets.first() {
+        render_target(target, out);
     }
 }
 
@@ -174,8 +276,6 @@ pub fn render_annotation(annotation: &Value) -> String {
             out.push(format!("- Page: {url} (\"{title}\")"));
         }
     }
-    render_source(annotation.get("source").unwrap_or(&Value::Null), &mut out);
-    render_element(annotation.get("element").unwrap_or(&Value::Null), &mut out);
     if let Some(images) = annotation.get("images").and_then(Value::as_array) {
         for image in images {
             let label = if text(image, "kind") == "screenshot" {
@@ -186,6 +286,7 @@ pub fn render_annotation(annotation: &Value) -> String {
             out.push(format!("- {label}: {}", text(image, "path")));
         }
     }
+    render_targets(annotation, &mut out);
     out.join("\n")
 }
 
@@ -209,7 +310,7 @@ pub fn render_list(result: &Value) -> String {
         format!("# Browser annotations · workspace {workspace}"),
         String::new(),
         format!(
-            "{} pending. The user marked these elements in Coflux's built-in browser. For each one: find the code (component names and source locations are the best leads; the selector and DOM path describe the element in the page), make the change, then run `coflux annotations resolve <id> --note \"<what you changed>\"`. Map raw values such as colors, sizes and spacing to the project's design system (its tokens and components) instead of hard-coding them. Images are files on this machine: read them to see the current state and the user's references.",
+            "{} pending. The user marked these elements in Coflux's built-in browser; one annotation can cover several elements selected together, or a dragged region with the elements inside it. For each one: find the code (component names and source locations are the best leads; the selector and DOM path describe the element in the page), make the change, then run `coflux annotations resolve <id> --note \"<what you changed>\"`. Map raw values such as colors, sizes and spacing to the project's design system (its tokens and components) instead of hard-coding them. Images are files on this machine: read them to see the current state and the user's references.",
             annotations.len()
         ),
     ];
@@ -313,9 +414,12 @@ mod tests {
                 "id": "ann-0011", "number": 2, "status": "pending",
                 "comment": "Make it blue",
                 "page": { "url": "http://localhost:3000/", "title": "Home" },
-                "element": { "tag": "button", "elementId": "save", "classes": ["btn"], "attributes": {},
-                    "styles": { "color": "rgb(0, 0, 0)" }, "selector": "#save", "domPath": "html > body > button", "text": "Save" },
-                "source": { "framework": "react", "components": ["SaveButton", "Toolbar"], "file": "src/Save.tsx", "line": 12, "column": 3 },
+                "targets": [{
+                    "element": { "tag": "button", "elementId": "save", "classes": ["btn"], "attributes": {},
+                        "styles": { "color": "rgb(0, 0, 0)" }, "selector": "#save", "domPath": "html > body > button", "text": "Save" },
+                    "source": { "framework": "react", "components": ["SaveButton", "Toolbar"], "file": "src/Save.tsx", "line": 12, "column": 3 }
+                }],
+                "region": null,
                 "images": [{ "kind": "screenshot", "path": "/h/annotations/w/ann-0011/img-1.png" }, { "kind": "reference", "path": "/h/r.jpg" }],
                 "followUps": [{ "comment": "still black", "previousNote": "set color", "createdAt": 1.0 }]
             }]
@@ -337,6 +441,57 @@ mod tests {
             "The user reopened it: \"still black\"",
             "coflux annotations resolve <id>",
             "design system",
+        ] {
+            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_multi_element_annotation_describes_every_element() {
+        let annotation = json!({
+            "id": "ann-2", "number": 5, "comment": "Align these",
+            "targets": [
+                { "element": { "tag": "button", "selector": ".a" }, "source": { "framework": "react", "components": ["Button", "Header"] } },
+                { "element": { "tag": "div", "classes": ["card"], "selector": ".b" }, "source": { "components": ["Card"], "file": "src/Card.tsx", "line": 4 } },
+                { "element": { "tag": "nav", "selector": "nav" }, "source": null }
+            ],
+            "region": null
+        });
+        let rendered = render_annotation(&annotation);
+        for phrase in [
+            "- Elements: 3 (the user selected them together; the comment applies to all of them)",
+            "### Element 1 of 3",
+            "Components (innermost first, react): Button < Header",
+            "### Element 2 of 3",
+            "Source: `src/Card.tsx:4`",
+            "### Element 3 of 3",
+            "Selector: `nav`",
+        ] {
+            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_region_annotation_describes_the_region_its_container_and_what_is_inside() {
+        let annotation = json!({
+            "id": "ann-3", "number": 6, "comment": "Too crowded",
+            "targets": [
+                { "element": { "tag": "header", "selector": "header" }, "source": { "components": ["Header", "App"] } },
+                { "element": { "tag": "img", "selector": "#logo" }, "source": { "components": ["Logo"] } },
+                { "element": { "tag": "a", "selector": "a.home" }, "source": null }
+            ],
+            "region": { "x": 12.0, "y": 4.5, "width": 320.0, "height": 80.0 },
+            "images": [{ "kind": "screenshot", "path": "/h/region.png" }]
+        });
+        let rendered = render_annotation(&annotation);
+        for phrase in [
+            "- Region: the user dragged a 320×80 px area on the page, 12 px right and 4.5 px down",
+            "### Container (the innermost element holding the region)",
+            "Components (innermost first): Header < App",
+            "### Inside the region",
+            "- Logo · `<img>` · selector `#logo`",
+            "- `<a>` · selector `a.home`",
+            "Screenshot of the current state: /h/region.png",
         ] {
             assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
         }

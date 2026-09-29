@@ -1,25 +1,60 @@
-import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Bot, Check, ChevronDown, CircleCheck, Copy, ImagePlus, LoaderCircle, MapPinOff, Pencil, RotateCcw, Trash2, Unplug, WifiOff, X } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+  type TextareaHTMLAttributes,
+} from "react";
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Ellipsis,
+  LoaderCircle,
+  MapPinOff,
+  Paperclip,
+  Pencil,
+  RotateCcw,
+  SquareDashedMousePointer,
+  Trash2,
+  Unplug,
+  WifiOff,
+  X,
+} from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { AnnotationImageKind, type Annotation, type AnnotationImage } from "@coflux/protocol";
 
-import { groupByPage, isResolved, pageKey, type AgentTerminal } from "@/components/workbench/browser-annotations";
+import { annotationMeta, cardPlacement, groupByPage, isResolved, pageKey, type AgentTerminal, type CardBox } from "@/components/workbench/browser-annotations";
 import type { WorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
 import { displayUrl } from "@/components/workbench/browser-address";
-import type { DesktopAnnotatorPick } from "@/desktop-bridge";
+import type { DesktopAnnotatorPalette, DesktopAnnotatorPick } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
 
 /**
- * Browser annotations UI (plan 20260929-browser-annotations): the comment card anchored to the
- * picked element, and the side panel listing the workspace's annotations. Both are renderer UI
- * drawn over / beside the `<webview>`; the page itself only shows highlights and pins.
+ * Browser annotations UI (plans 20260929-browser-annotations, 20260929-annotation-polish): the
+ * toolbar's two-part button, the hint pill, the comment card for a new pick or an edit, the detail
+ * card a pin opens in place, and the side panel. All renderer UI drawn over / beside the
+ * `<webview>`; the page itself only shows highlights, outlines and pins.
+ *
+ * Type scale: body text (comments, inputs, agent notes) `text-base` (13 px); secondary text
+ * (component names, group headings, hints, meta lines) `text-sm` (12 px); `text-xs` (11 px) only for
+ * number badges.
  */
 
 /** Pasted and attached images are compressed to this budget (the terminal paste path's value). */
 const IMAGE_BUDGET_BYTES = 3.5 * 1024 * 1024;
 const MAX_REFERENCE_IMAGES = 8;
+/** The comment input grows with its content up to this many lines, then scrolls. */
+const MAX_INPUT_LINES = 8;
 
 export type DraftImage = { key: string; dataUrl: string; mimeType: string; data: Uint8Array; kind: "screenshot" | "reference" };
 
@@ -29,6 +64,10 @@ export type AnnotationDraft = {
   annotationId: string | null;
   number: number | null;
   pick: DesktopAnnotatorPick | null;
+  /** The card's title (component chain, 「3 个元素 · …」, 「区域 · …」). */
+  title: string;
+  /** The comment as it was when the card opened (empty for a new one). */
+  original: string;
   comment: string;
   images: DraftImage[];
   existing: AnnotationImage[];
@@ -37,7 +76,13 @@ export type AnnotationDraft = {
   error: string | null;
 };
 
+/** Whether closing the card by clicking elsewhere would lose something the user wrote or attached. */
+export function draftIsDirty(draft: AnnotationDraft): boolean {
+  return draft.comment.trim() !== draft.original.trim() || draft.images.some((image) => image.kind === "reference") || draft.removed.length > 0;
+}
+
 type ImageUrl = (annotationId: string, imageId: string) => Promise<string | null>;
+type AreaSize = { width: number; height: number };
 
 function bytesToDataUrl(data: Uint8Array, mimeType: string): string {
   let binary = "";
@@ -79,6 +124,159 @@ export async function prepareReferenceImage(blob: Blob): Promise<DraftImage | nu
   return { key: crypto.randomUUID(), dataUrl: bytesToDataUrl(data, mimeType), mimeType, data, kind: "reference" };
 }
 
+/* ---------------------------------------------------------------- theme colours for the page */
+
+/** The theme's accent and success colours, resolved to computed values inside the app's theme scope. */
+export function resolveAnnotatorPalette(scope: HTMLElement): DesktopAnnotatorPalette | null {
+  const probe = document.createElement("span");
+  probe.style.display = "none";
+  scope.appendChild(probe);
+  const read = (token: string) => {
+    probe.style.color = `var(${token})`;
+    return getComputedStyle(probe).color;
+  };
+  const palette = {
+    accent: read("--color-accent"),
+    onAccent: read("--color-on-accent"),
+    success: read("--color-success"),
+    onSuccess: read("--color-on-success"),
+  };
+  probe.remove();
+  return palette.accent && palette.onAccent && palette.success && palette.onSuccess ? palette : null;
+}
+
+/** The page's colours, following the app theme (re-resolved when the system appearance changes). */
+export function useAnnotatorPalette(scopeRef: RefObject<HTMLElement | null>): DesktopAnnotatorPalette | null {
+  const [palette, setPalette] = useState<DesktopAnnotatorPalette | null>(null);
+  useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope) return;
+    const update = () =>
+      setPalette((current) => {
+        const next = resolveAnnotatorPalette(scope);
+        return current && next && JSON.stringify(current) === JSON.stringify(next) ? current : next;
+      });
+    update();
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [scopeRef]);
+  return palette;
+}
+
+/* ---------------------------------------------------------------- shared pieces */
+
+/** A number badge in the pin's colour (the theme accent; success with ✓ once resolved). */
+function NumberBadge({ number, resolved, className }: { number: number; resolved: boolean; className?: string }) {
+  return (
+    <span
+      className={cn(
+        "flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-xs font-semibold leading-none tabular-nums",
+        resolved ? "bg-(--color-success) text-(--color-on-success)" : "bg-(--color-accent) text-(--color-on-accent)",
+        className,
+      )}
+    >
+      {resolved ? <Check className="size-2.5" strokeWidth={3} /> : number}
+    </span>
+  );
+}
+
+function IconButton({ label, onClick, children, tone = "default", disabled }: { label: string; onClick: () => void; children: ReactNode; tone?: "default" | "danger"; disabled?: boolean }) {
+  return (
+    <Tooltip content={label} placement="above">
+      <button
+        type="button"
+        aria-label={label}
+        disabled={disabled}
+        className={cn(
+          "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent disabled:opacity-35 disabled:hover:bg-transparent",
+          tone === "danger" ? "hover:text-destructive" : "hover:text-foreground",
+        )}
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+      >
+        {children}
+      </button>
+    </Tooltip>
+  );
+}
+
+/** A textarea that grows with its content up to eight lines, then scrolls. */
+function GrowingInput({ inputRef, value, className, ...props }: { inputRef: RefObject<HTMLTextAreaElement | null>; value: string } & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "rows">) {
+  useLayoutEffect(() => {
+    const node = inputRef.current;
+    if (!node) return;
+    const style = getComputedStyle(node);
+    const px = (name: string) => parseFloat(style.getPropertyValue(name)) || 0;
+    const line = px("line-height") || 20;
+    const borders = px("border-top-width") + px("border-bottom-width");
+    const max = line * MAX_INPUT_LINES + px("padding-top") + px("padding-bottom") + borders;
+    node.style.height = "auto";
+    const full = node.scrollHeight + borders;
+    node.style.height = `${Math.min(full, max)}px`;
+    node.style.overflowY = full > max ? "auto" : "hidden";
+  }, [inputRef, value]);
+  return (
+    <textarea
+      ref={inputRef}
+      value={value}
+      rows={1}
+      className={cn(
+        "w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-base leading-5 text-foreground outline-none placeholder:text-muted-foreground focus:border-ring disabled:opacity-60",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** Enter (not while an input method composes, not with ⇧) submits. */
+function isSubmitKey(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+  return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229;
+}
+
+/** Places a card from its real measured size, inside the page area. */
+function usePlacement(ref: RefObject<HTMLDivElement | null>, anchor: CardBox | null, area: AreaSize): CSSProperties {
+  const [size, setSize] = useState<AreaSize | null>(null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    // offsetWidth/Height: layout size, unaffected by the shake animation's transform.
+    const measure = () =>
+      setSize((current) => (current && current.width === node.offsetWidth && current.height === node.offsetHeight ? current : { width: node.offsetWidth, height: node.offsetHeight }));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref]);
+  const maxHeight = Math.max(120, area.height - 16);
+  if (!size || area.width <= 0) return { left: 0, top: 0, visibility: "hidden", maxHeight };
+  const place = cardPlacement(anchor, size, area);
+  return { left: place.left, top: place.top, maxHeight };
+}
+
+/** Shakes the card (a click elsewhere while it holds unsaved text) and puts the caret back in it. */
+function useShake(shake: number, ref: RefObject<HTMLDivElement | null>, focus: RefObject<HTMLTextAreaElement | null>) {
+  const initial = useRef(shake);
+  useEffect(() => {
+    if (shake === initial.current) return;
+    ref.current?.animate(
+      [
+        { transform: "translateX(0)" },
+        { transform: "translateX(-6px)" },
+        { transform: "translateX(6px)" },
+        { transform: "translateX(-4px)" },
+        { transform: "translateX(4px)" },
+        { transform: "translateX(0)" },
+      ],
+      { duration: 320, easing: "ease-in-out" },
+    );
+    focus.current?.focus();
+  }, [shake, ref, focus]);
+}
+
 function StoredThumb({ annotationId, image, imageUrl, onRemove }: { annotationId: string; image: AnnotationImage; imageUrl: ImageUrl; onRemove?: () => void }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -93,70 +291,99 @@ function StoredThumb({ annotationId, image, imageUrl, onRemove }: { annotationId
   return <Thumb src={url} label={image.kind === AnnotationImageKind.SCREENSHOT ? "截图" : "参考图"} onRemove={onRemove} />;
 }
 
+/** A 32 px thumbnail; what it is shows as a tooltip, removing it on hover. */
 function Thumb({ src, label, onRemove }: { src: string | null; label: string; onRemove?: () => void }) {
   return (
-    <div className="group relative size-14 shrink-0 overflow-hidden rounded-md border border-border bg-muted">
-      {src ? <img src={src} alt={label} draggable={false} className="size-full object-cover" /> : <LoaderCircle className="m-auto mt-4 size-4 animate-spin text-muted-foreground" />}
-      <span className="absolute inset-x-0 bottom-0 bg-black/55 px-1 text-center text-[10px] leading-4 text-white">{label}</span>
-      {onRemove ? (
-        <Tooltip content="移除" placement="above">
+    <Tooltip content={label} placement="above">
+      <div className="group relative size-8 shrink-0 overflow-hidden rounded border border-border bg-muted">
+        {src ? <img src={src} alt={label} draggable={false} className="size-full object-cover" /> : <LoaderCircle className="m-auto mt-2 size-3.5 animate-spin text-muted-foreground" />}
+        {onRemove ? (
           <button
             type="button"
             aria-label={`移除${label}`}
-            className="absolute right-0.5 top-0.5 hidden size-4 items-center justify-center rounded-full bg-black/70 text-white group-hover:flex"
+            className="absolute inset-0 hidden items-center justify-center bg-black/55 text-white group-hover:flex"
             onClick={onRemove}
           >
-            <X className="size-2.5" />
+            <X className="size-3.5" />
           </button>
-        </Tooltip>
-      ) : null}
+        ) : null}
+      </div>
+    </Tooltip>
+  );
+}
+
+function CardHeader({ badge, title, onClose }: { badge: ReactNode; title: string; onClose: () => void }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      {badge}
+      <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{title}</span>
+      <Tooltip content="关闭 Esc" placement="above">
+        <button type="button" aria-label="关闭" className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" onClick={onClose}>
+          <X className="size-3.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
 
+const CARD_CLASS = "pointer-events-auto absolute z-30 flex w-80 flex-col gap-2 overflow-y-auto rounded-lg border border-border bg-popover p-2.5 text-popover-foreground shadow-lg";
+
+/* ---------------------------------------------------------------- the comment card */
+
 export function AnnotationCard({
+  cardRef,
   draft,
-  style,
+  anchor,
+  area,
+  shake,
   readOnly,
   imageUrl,
   onChange,
   onAddImages,
   onSave,
-  onCancel,
+  onClose,
 }: {
+  cardRef: RefObject<HTMLDivElement | null>;
   draft: AnnotationDraft;
-  style: CSSProperties;
+  /** The picked elements (or the annotation) in the page area's pixels; null when not on the page. */
+  anchor: CardBox | null;
+  area: AreaSize;
+  shake: number;
   readOnly: boolean;
   imageUrl: ImageUrl;
   onChange: (patch: Partial<AnnotationDraft>) => void;
   onAddImages: (blobs: Blob[]) => void;
   onSave: () => void;
-  onCancel: () => void;
+  onClose: () => void;
 }) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const style = usePlacement(cardRef, anchor, area);
+  useShake(shake, cardRef, inputRef);
   useEffect(() => {
     inputRef.current?.focus();
   }, [draft.key]);
 
-  const element = draft.pick?.element;
-  const heading = draft.annotationId ? `编辑批注 #${draft.number ?? ""}` : element ? `<${element.tag}${element.elementId ? `#${element.elementId}` : ""}>` : "新批注";
-  const references = draft.images.filter((image) => image.kind === "reference").length + draft.existing.filter((image) => image.kind === AnnotationImageKind.REFERENCE && !draft.removed.includes(image.imageId)).length;
+  const existing = draft.existing.filter((image) => !draft.removed.includes(image.imageId));
+  const references = draft.images.filter((image) => image.kind === "reference").length + existing.filter((image) => image.kind === AnnotationImageKind.REFERENCE).length;
   const canSave = !readOnly && !draft.saving && draft.comment.trim().length > 0;
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      onCancel();
-    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      onClose();
+    } else if (isSubmitKey(event)) {
       event.preventDefault();
       if (canSave) onSave();
     }
   }
 
   function onPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
-    const files = [...event.clipboardData.items].filter((item) => item.kind === "file" && item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => file !== null);
+    const files = [...event.clipboardData.items]
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
     if (files.length === 0) return;
     event.preventDefault();
     onAddImages(files);
@@ -164,38 +391,38 @@ export function AnnotationCard({
 
   return (
     <div
+      ref={cardRef}
       role="dialog"
       aria-label="批注"
-      className="pointer-events-auto absolute z-30 w-80 rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-lg"
+      className={CARD_CLASS}
       style={style}
       onPointerDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.nativeEvent.isComposing || event.defaultPrevented) return;
+        event.preventDefault();
+        onClose();
+      }}
     >
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">{heading}</span>
-        {draft.pick?.source?.components[0] ? <span className="max-w-32 truncate text-2xs text-muted-foreground">{draft.pick.source.components[0]}</span> : null}
-        <Tooltip content="取消 Esc" placement="above">
-          <button type="button" aria-label="取消" className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" onClick={onCancel}>
-            <X className="size-3.5" />
-          </button>
-        </Tooltip>
-      </div>
-      <textarea
-        ref={inputRef}
+      <CardHeader badge={draft.number !== null ? <NumberBadge number={draft.number} resolved={false} /> : null} title={draft.title} onClose={onClose} />
+      <GrowingInput
+        inputRef={inputRef}
         value={draft.comment}
-        rows={3}
         disabled={readOnly || draft.saving}
-        placeholder="这里要怎么改？可以粘贴参考图"
+        placeholder="这里要怎么改？"
         aria-label="批注内容"
-        className="mt-2 w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
         onChange={(event) => onChange({ comment: event.target.value, error: null })}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
       />
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {draft.annotationId
-          ? draft.existing
-              .filter((image) => !draft.removed.includes(image.imageId))
-              .map((image) => (
+      {draft.error ? (
+        <p role="alert" className="text-sm text-destructive">
+          {draft.error}
+        </p>
+      ) : null}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          {draft.annotationId
+            ? existing.map((image) => (
                 <StoredThumb
                   key={image.imageId}
                   annotationId={draft.annotationId!}
@@ -204,55 +431,259 @@ export function AnnotationCard({
                   onRemove={readOnly ? undefined : () => onChange({ removed: [...draft.removed, image.imageId] })}
                 />
               ))
-          : null}
-        {draft.images.map((image) => (
-          <Thumb
-            key={image.key}
-            src={image.dataUrl}
-            label={image.kind === "screenshot" ? "截图" : "参考图"}
-            onRemove={readOnly ? undefined : () => onChange({ images: draft.images.filter((item) => item.key !== image.key) })}
+            : null}
+          {draft.images.map((image) => (
+            <Thumb
+              key={image.key}
+              src={image.dataUrl}
+              label={image.kind === "screenshot" ? "截图" : "参考图"}
+              onRemove={readOnly ? undefined : () => onChange({ images: draft.images.filter((item) => item.key !== image.key) })}
+            />
+          ))}
+          {!readOnly && references < MAX_REFERENCE_IMAGES ? (
+            <IconButton label="附加参考图（也可以直接粘贴）" onClick={() => fileRef.current?.click()}>
+              <Paperclip className="size-3.5" />
+            </IconButton>
+          ) : null}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            className="sr-only"
+            tabIndex={-1}
+            aria-hidden
+            onChange={(event) => {
+              const files = [...(event.target.files ?? [])];
+              event.target.value = "";
+              if (files.length > 0) onAddImages(files);
+            }}
           />
-        ))}
-        {!readOnly && references < MAX_REFERENCE_IMAGES ? (
-          <Tooltip content="附加参考图（也可以直接粘贴）" placement="above">
-            <button
-              type="button"
-              aria-label="附加参考图"
-              className="flex size-14 shrink-0 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground hover:bg-accent hover:text-foreground"
-              onClick={() => fileRef.current?.click()}
-            >
-              <ImagePlus className="size-4" />
-            </button>
-          </Tooltip>
-        ) : null}
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          multiple
-          className="sr-only"
-          tabIndex={-1}
-          aria-hidden
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])];
-            event.target.value = "";
-            if (files.length > 0) onAddImages(files);
-          }}
-        />
-      </div>
-      {draft.error ? (
-        <p role="alert" className="mt-2 text-xs text-destructive">
-          {draft.error}
-        </p>
-      ) : null}
-      <div className="mt-2 flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">⌘↩ 保存 · 保存在这个工作区所在的设备上</span>
-        <Button label="取消" variant="secondary" size="sm" isDisabled={draft.saving} onClick={onCancel} />
-        <Button label={draft.error ? "重试" : "保存"} variant="primary" size="sm" isDisabled={!canSave} isLoading={draft.saving} onClick={onSave} />
+        </div>
+        <Tooltip content="↩ 保存 · ⇧↩ 换行" placement="above">
+          <Button label={draft.error ? "重试" : "保存"} variant="primary" size="sm" isDisabled={!canSave} isLoading={draft.saving} onClick={onSave} />
+        </Tooltip>
       </div>
     </div>
   );
 }
+
+/* ---------------------------------------------------------------- the detail card */
+
+/** Opened by a pin (or a panel row), in place: the comment, images, the agent's note and actions. */
+export function AnnotationDetailCard({
+  cardRef,
+  annotation,
+  title,
+  anchor,
+  area,
+  shake,
+  missing,
+  readOnly,
+  imageUrl,
+  onDirtyChange,
+  onEdit,
+  onDelete,
+  onConfirm,
+  onReopen,
+  onClose,
+}: {
+  cardRef: RefObject<HTMLDivElement | null>;
+  annotation: Annotation;
+  title: string;
+  anchor: CardBox | null;
+  area: AreaSize;
+  shake: number;
+  missing: boolean;
+  readOnly: boolean;
+  imageUrl: ImageUrl;
+  /** Whether a reopen comment is being written (clicking elsewhere then shakes instead of closing). */
+  onDirtyChange: (dirty: boolean) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onConfirm: () => void;
+  onReopen: (comment: string) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const style = usePlacement(cardRef, anchor, area);
+  useShake(shake, cardRef, inputRef);
+  const [reopening, setReopening] = useState(false);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resolved = isResolved(annotation);
+
+  const dirty = reopening && comment.trim().length > 0;
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (reopening) inputRef.current?.focus();
+  }, [reopening]);
+
+  async function submitReopen() {
+    if (!comment.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    const ok = await onReopen(comment.trim());
+    setBusy(false);
+    if (ok) {
+      setReopening(false);
+      setComment("");
+    } else setError("重新打开失败，可以重试");
+  }
+
+  return (
+    <div
+      ref={cardRef}
+      role="dialog"
+      aria-label={`批注 #${annotation.number}`}
+      className={CARD_CLASS}
+      style={style}
+      onPointerDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        onClose();
+      }}
+    >
+      <CardHeader badge={<NumberBadge number={annotation.number} resolved={resolved} />} title={title} onClose={onClose} />
+      <p className={cn("whitespace-pre-wrap break-words text-base", resolved ? "text-muted-foreground" : "text-foreground")}>{annotation.comment}</p>
+      {missing ? (
+        <p className="flex items-center gap-1 text-sm text-warning">
+          <MapPinOff className="size-3.5" />
+          元素未找到
+        </p>
+      ) : null}
+      {annotation.images.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {annotation.images.map((image) => (
+            <StoredThumb key={image.imageId} annotationId={annotation.annotationId} image={image} imageUrl={imageUrl} />
+          ))}
+        </div>
+      ) : null}
+      {resolved ? (
+        <div className="rounded-md bg-muted/60 px-2 py-1.5">
+          <p className="text-sm text-muted-foreground">Agent 的说明</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-base text-foreground">{annotation.resolutionNote || "（没有留下说明）"}</p>
+        </div>
+      ) : null}
+      {readOnly ? null : reopening ? (
+        <>
+          <GrowingInput
+            inputRef={inputRef}
+            value={comment}
+            placeholder="还有哪里不对？"
+            aria-label="重新打开的补充说明"
+            disabled={busy}
+            onChange={(event) => setComment(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === "Escape") {
+                // Leaves the reply, not the card.
+                event.preventDefault();
+                event.stopPropagation();
+                setReopening(false);
+              } else if (isSubmitKey(event)) {
+                event.preventDefault();
+                void submitReopen();
+              }
+            }}
+          />
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          <div className="flex justify-end gap-1.5">
+            <Button label="取消" variant="ghost" size="sm" onClick={() => setReopening(false)} />
+            <Button label="重新打开" variant="primary" size="sm" isLoading={busy} isDisabled={!comment.trim()} onClick={() => void submitReopen()} />
+          </div>
+        </>
+      ) : resolved ? (
+        <div className="flex justify-end gap-1.5">
+          <Button label="重新打开" variant="ghost" size="sm" icon={<RotateCcw className="size-3.5" />} onClick={() => setReopening(true)} />
+          <Button label="确认" variant="secondary" size="sm" icon={<Check className="size-3.5" />} onClick={onConfirm} />
+        </div>
+      ) : (
+        <div className="flex justify-end gap-1.5">
+          <Button label="删除" variant="ghost" size="sm" icon={<Trash2 className="size-3.5" />} onClick={onDelete} />
+          <Button label="编辑" variant="secondary" size="sm" icon={<Pencil className="size-3.5" />} onClick={onEdit} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- the toolbar and the hint */
+
+/**
+ * The toolbar's `[⬚↖ | n]`: the icon toggles annotate mode (⌘⇧D), the count toggles the panel. The
+ * count is the pending annotations, else ✓ with the resolved ones; absent when there are none.
+ */
+export function AnnotateButton({
+  active,
+  count,
+  disabledReason,
+  panelOpen,
+  onToggleMode,
+  onTogglePanel,
+}: {
+  active: boolean;
+  count: { kind: "pending" | "resolved"; count: number } | null;
+  disabledReason: string | null;
+  panelOpen: boolean;
+  onToggleMode: () => void;
+  onTogglePanel: () => void;
+}) {
+  const modeLabel = disabledReason ?? (active ? "退出批注模式 ⌘⇧D" : "批注模式 ⌘⇧D");
+  const panelLabel = panelOpen ? "隐藏批注列表" : "显示批注列表";
+  return (
+    <div className="flex h-6 shrink-0 items-center">
+      <Tooltip content={modeLabel} placement="below">
+        <button
+          type="button"
+          aria-label={modeLabel}
+          aria-pressed={active}
+          disabled={disabledReason !== null}
+          className={cn(
+            "flex size-6 items-center justify-center transition-colors disabled:opacity-35 disabled:hover:bg-transparent",
+            count ? "rounded-l-md" : "rounded-md",
+            active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          )}
+          onClick={onToggleMode}
+        >
+          <SquareDashedMousePointer className="size-3.5" />
+        </button>
+      </Tooltip>
+      {count ? (
+        <Tooltip content={panelLabel} placement="below">
+          <button
+            type="button"
+            aria-label={panelLabel}
+            aria-pressed={panelOpen}
+            className={cn(
+              "flex h-6 items-center gap-0.5 rounded-r-md border-l border-border px-1.5 text-sm tabular-nums transition-colors",
+              panelOpen ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+            onClick={onTogglePanel}
+          >
+            {count.kind === "resolved" ? <Check className="size-3" /> : null}
+            {count.count}
+          </button>
+        </Tooltip>
+      ) : null}
+    </div>
+  );
+}
+
+/** The pill at the top of the page while annotate mode waits for a pick. */
+export function AnnotationHint() {
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-background/95 px-2.5 py-1 text-sm text-muted-foreground shadow">
+      点击选择 · ⇧点击多选 · ⇧拖动框选 · ↑↓ 层级 · Esc 退出
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- the side panel */
 
 export type PanelNotice = "offline" | "unsupported" | "unreachable" | null;
 
@@ -263,11 +694,12 @@ export function AnnotationsPanel({
   notice,
   selectedId,
   agents,
-  imageUrl,
   onClose,
   onRetry,
   onSelect,
+  onHover,
   onEdit,
+  onDelete,
   onConfirm,
   onReopen,
   onClearResolved,
@@ -281,29 +713,34 @@ export function AnnotationsPanel({
   notice: PanelNotice;
   selectedId: string | null;
   agents: readonly AgentTerminal[];
-  imageUrl: ImageUrl;
   onClose: () => void;
   onRetry: () => void;
   onSelect: (annotation: Annotation) => void;
+  /** The row under the pointer: its elements or region are outlined on the page. */
+  onHover: (annotationId: string | null) => void;
   onEdit: (annotation: Annotation) => void;
-  onConfirm: (annotation: Annotation) => Promise<void>;
+  onDelete: (annotation: Annotation) => void;
+  onConfirm: (annotation: Annotation) => void;
   onReopen: (annotation: Annotation, comment: string) => Promise<boolean>;
-  onClearResolved: () => Promise<void>;
+  onClearResolved: () => void;
   onCopyMarkdown: () => void;
   onHandOff: (taskId: string) => void;
 }) {
   const [handOffOpen, setHandOffOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [resolvedOpen, setResolvedOpen] = useState(true);
   const handOffRef = useRef<HTMLButtonElement | null>(null);
+  const moreRef = useRef<HTMLButtonElement | null>(null);
   const annotations = entry.annotations ?? [];
   const pending = annotations.filter((annotation) => !isResolved(annotation));
-  const resolved = annotations.filter(isResolved);
+  const resolved = annotations.filter(isResolved).sort((a, b) => a.number - b.number);
   const readOnly = notice !== null;
   const currentKey = currentUrl ? pageKey(currentUrl) : "";
 
   return (
-    <aside aria-label="批注" className="flex w-72 shrink-0 flex-col border-l border-border bg-background">
+    <aside aria-label="批注" className="flex w-72 shrink-0 flex-col border-l border-border bg-background" onPointerLeave={() => onHover(null)}>
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border px-2">
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
+        <span className="min-w-0 flex-1 truncate text-base font-medium text-foreground">
           批注{pending.length > 0 ? ` · ${pending.length} 条待处理` : ""}
         </span>
         <DropdownMenu
@@ -326,27 +763,33 @@ export function AnnotationsPanel({
             <DropdownMenuItem label="这个工作区没有正在运行 agent 的终端" isDisabled onClick={() => undefined} />
           ) : (
             agents.map((agent) => (
-              <DropdownMenuItem
-                key={agent.taskId}
-                icon={<Bot className="size-3.5" />}
-                label={`${agent.title || "终端"} · ${agent.agent}`}
-                onClick={() => onHandOff(agent.taskId)}
-              />
+              <DropdownMenuItem key={agent.taskId} icon={<Bot className="size-3.5" />} label={`${agent.title || "终端"} · ${agent.agent}`} onClick={() => onHandOff(agent.taskId)} />
             ))
           )}
         </DropdownMenu>
+        {/* Sibling tooltips after their menus, never button.tooltip (docs/design-guidelines.md). */}
         <Tooltip anchorRef={handOffRef} isOpen={handOffOpen ? false : undefined} content="把待处理的批注交给这个工作区里的 agent" />
-        <Tooltip content="复制为 markdown" placement="below">
-          <button
-            type="button"
-            aria-label="复制为 markdown"
-            disabled={annotations.length === 0}
-            className="flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-35"
-            onClick={onCopyMarkdown}
-          >
-            <Copy className="size-3.5" />
-          </button>
-        </Tooltip>
+        <DropdownMenu
+          isMenuOpen={moreOpen}
+          onOpenChange={setMoreOpen}
+          menuWidth={200}
+          hasChevron={false}
+          placement="below"
+          alignment="end"
+          button={{
+            ref: moreRef,
+            label: "更多",
+            icon: <Ellipsis className="size-3.5" />,
+            isIconOnly: true,
+            variant: "ghost",
+            size: "sm",
+            style: { color: "var(--muted-foreground)", height: 24, width: 24, minWidth: 24, paddingInline: 0 },
+          }}
+        >
+          <DropdownMenuItem icon={<Copy className="size-3.5" />} label="复制为 markdown" isDisabled={annotations.length === 0} onClick={onCopyMarkdown} />
+          <DropdownMenuItem icon={<Trash2 className="size-3.5" />} label="清除全部已完成" isDisabled={readOnly || resolved.length === 0} onClick={onClearResolved} />
+        </DropdownMenu>
+        <Tooltip anchorRef={moreRef} isOpen={moreOpen ? false : undefined} content="更多" />
         <Tooltip content="关闭批注列表" placement="below">
           <button type="button" aria-label="关闭批注列表" className="flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground" onClick={onClose}>
             <X className="size-3.5" />
@@ -362,14 +805,12 @@ export function AnnotationsPanel({
             <LoaderCircle className="size-4 animate-spin" />
           </div>
         ) : annotations.length === 0 && !notice ? (
-          <p className="px-4 py-8 text-center text-xs leading-5 text-muted-foreground">
-            还没有批注。打开批注模式（工具栏的 <Pencil className="inline size-3" />），然后点击页面上的元素写下要怎么改。
-          </p>
+          <p className="px-4 py-8 text-center text-sm leading-5 text-muted-foreground">按 ⌘⇧D 进入批注模式，点击页面元素写下要怎么改</p>
         ) : null}
 
         {groupByPage(pending).map((group) => (
           <section key={group.key} className="border-b border-border py-1">
-            <h3 className="truncate px-3 pb-0.5 pt-1.5 text-2xs font-medium text-muted-foreground">
+            <h3 className="truncate px-3 pb-0.5 pt-1.5 text-sm font-medium text-muted-foreground">
               {group.title || displayUrl(group.url)}
               {group.key === currentKey ? " · 当前页面" : ""}
             </h3>
@@ -381,8 +822,9 @@ export function AnnotationsPanel({
                 missing={group.key === currentKey && missing.has(annotation.annotationId)}
                 readOnly={readOnly}
                 onSelect={() => onSelect(annotation)}
+                onHover={onHover}
                 onEdit={() => onEdit(annotation)}
-                onDelete={() => onConfirm(annotation)}
+                onDelete={() => onDelete(annotation)}
               />
             ))}
           </section>
@@ -390,28 +832,29 @@ export function AnnotationsPanel({
 
         {resolved.length > 0 ? (
           <section className="py-1">
-            <div className="flex items-center gap-2 px-3 pb-0.5 pt-1.5">
-              <h3 className="min-w-0 flex-1 truncate text-2xs font-medium text-muted-foreground">已完成 · 等你确认</h3>
-              {!readOnly ? (
-                <button type="button" className="text-2xs text-muted-foreground hover:text-foreground" onClick={() => void onClearResolved()}>
-                  清除全部已完成
-                </button>
-              ) : null}
-            </div>
-            {resolved
-              .sort((a, b) => a.number - b.number)
-              .map((annotation) => (
-                <ResolvedRow
-                  key={annotation.annotationId}
-                  annotation={annotation}
-                  selected={annotation.annotationId === selectedId}
-                  readOnly={readOnly}
-                  imageUrl={imageUrl}
-                  onSelect={() => onSelect(annotation)}
-                  onConfirm={() => onConfirm(annotation)}
-                  onReopen={(comment) => onReopen(annotation, comment)}
-                />
-              ))}
+            <button
+              type="button"
+              aria-expanded={resolvedOpen}
+              className="flex w-full min-w-0 items-center gap-1 px-2 pb-0.5 pt-1.5 text-left text-sm font-medium text-muted-foreground hover:text-foreground"
+              onClick={() => setResolvedOpen((open) => !open)}
+            >
+              <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", resolvedOpen && "rotate-90")} />
+              <span className="truncate">已完成 · 等你确认 ({resolved.length})</span>
+            </button>
+            {resolvedOpen
+              ? resolved.map((annotation) => (
+                  <ResolvedRow
+                    key={annotation.annotationId}
+                    annotation={annotation}
+                    selected={annotation.annotationId === selectedId}
+                    readOnly={readOnly}
+                    onSelect={() => onSelect(annotation)}
+                    onHover={onHover}
+                    onConfirm={() => onConfirm(annotation)}
+                    onReopen={(comment) => onReopen(annotation, comment)}
+                  />
+                ))
+              : null}
           </section>
         ) : null}
       </div>
@@ -427,9 +870,9 @@ function Notice({ notice, onRetry }: { notice: Exclude<PanelNotice, null>; onRet
         ? { icon: <WifiOff className="size-3.5 shrink-0" />, text: "设备离线：下面是上次加载的批注，只能查看。", retry: true }
         : { icon: <WifiOff className="size-3.5 shrink-0" />, text: "连不上这个工作区所在的设备，批注暂时只能查看。", retry: true };
   return (
-    <div className="flex items-start gap-2 border-b border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-      {content.icon}
-      <span className="min-w-0 flex-1 leading-4">{content.text}</span>
+    <div className="flex items-start gap-2 border-b border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+      <span className="mt-0.5">{content.icon}</span>
+      <span className="min-w-0 flex-1 leading-5">{content.text}</span>
       {content.retry ? (
         <button type="button" className="shrink-0 text-foreground hover:underline" onClick={onRetry}>
           重试
@@ -439,19 +882,13 @@ function Notice({ notice, onRetry }: { notice: Exclude<PanelNotice, null>; onRet
   );
 }
 
-function sourceLabel(annotation: Annotation): string {
-  const source = annotation.source;
-  if (!source) return "";
-  if (source.components.length > 0) return source.components.slice(0, 2).join(" ‹ ");
-  return source.file ? source.file.split("/").pop() ?? "" : "";
-}
-
 function PendingRow({
   annotation,
   selected,
   missing,
   readOnly,
   onSelect,
+  onHover,
   onEdit,
   onDelete,
 }: {
@@ -460,62 +897,44 @@ function PendingRow({
   missing: boolean;
   readOnly: boolean;
   onSelect: () => void;
+  onHover: (annotationId: string | null) => void;
   onEdit: () => void;
-  onDelete: () => Promise<void>;
+  onDelete: () => void;
 }) {
-  const source = sourceLabel(annotation);
   return (
     <div
       className={cn("group flex cursor-pointer items-start gap-2 px-3 py-1.5 hover:bg-accent/60", selected && "bg-accent")}
       role="button"
       tabIndex={0}
       onClick={onSelect}
+      onPointerEnter={() => onHover(annotation.annotationId)}
+      onPointerLeave={() => onHover(null)}
       onKeyDown={(event) => {
         if (event.key === "Enter") onSelect();
       }}
     >
-      <span className="mt-0.5 flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-warning px-1 text-[10px] font-semibold text-white">{annotation.number}</span>
+      <NumberBadge number={annotation.number} resolved={false} className="mt-0.5" />
       <div className="min-w-0 flex-1">
-        <p className="line-clamp-3 whitespace-pre-wrap break-words text-xs text-foreground">{annotation.comment}</p>
-        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground">
+        <p className="line-clamp-3 whitespace-pre-wrap break-words text-base text-foreground">{annotation.comment}</p>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
           {missing ? (
             <span className="flex shrink-0 items-center gap-0.5 text-warning">
               <MapPinOff className="size-3" />
               元素未找到
             </span>
           ) : null}
-          {source ? <span className="truncate font-mono">{source}</span> : <span className="truncate font-mono">{annotation.element?.tag ? `<${annotation.element.tag}>` : ""}</span>}
+          <span className="truncate">{annotationMeta(annotation)}</span>
           {annotation.followUps.length > 0 ? <span className="shrink-0">· 已重新打开</span> : null}
         </div>
       </div>
       {!readOnly ? (
-        <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-          <Tooltip content="编辑" placement="above">
-            <button
-              type="button"
-              aria-label="编辑批注"
-              className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground"
-              onClick={(event) => {
-                event.stopPropagation();
-                onEdit();
-              }}
-            >
-              <Pencil className="size-3" />
-            </button>
-          </Tooltip>
-          <Tooltip content="删除" placement="above">
-            <button
-              type="button"
-              aria-label="删除批注"
-              className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
-              onClick={(event) => {
-                event.stopPropagation();
-                void onDelete();
-              }}
-            >
-              <Trash2 className="size-3" />
-            </button>
-          </Tooltip>
+        <span className="hidden shrink-0 items-center group-hover:flex">
+          <IconButton label="编辑" onClick={onEdit}>
+            <Pencil className="size-3.5" />
+          </IconButton>
+          <IconButton label="删除" tone="danger" onClick={onDelete}>
+            <Trash2 className="size-3.5" />
+          </IconButton>
         </span>
       ) : null}
     </div>
@@ -526,24 +945,27 @@ function ResolvedRow({
   annotation,
   selected,
   readOnly,
-  imageUrl,
   onSelect,
+  onHover,
   onConfirm,
   onReopen,
 }: {
   annotation: Annotation;
   selected: boolean;
   readOnly: boolean;
-  imageUrl: ImageUrl;
   onSelect: () => void;
-  onConfirm: () => Promise<void>;
+  onHover: (annotationId: string | null) => void;
+  onConfirm: () => void;
   onReopen: (comment: string) => Promise<boolean>;
 }) {
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [reopening, setReopening] = useState(false);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const screenshots = annotation.images.filter((image) => image.kind === AnnotationImageKind.SCREENSHOT).slice(0, 1);
+  useEffect(() => {
+    if (reopening) inputRef.current?.focus();
+  }, [reopening]);
 
   async function submitReopen() {
     if (!comment.trim() || busy) return;
@@ -558,85 +980,59 @@ function ResolvedRow({
   }
 
   return (
-    <div className={cn("px-3 py-1.5 hover:bg-accent/40", selected && "bg-accent")}>
+    <div
+      className={cn("group px-3 py-1.5 hover:bg-accent/40", selected && "bg-accent")}
+      onPointerEnter={() => onHover(annotation.annotationId)}
+      onPointerLeave={() => onHover(null)}
+    >
       <div className="flex cursor-pointer items-start gap-2" onClick={onSelect}>
-        <CircleCheck className="mt-0.5 size-4 shrink-0 text-success" />
+        <NumberBadge number={annotation.number} resolved className="mt-0.5" />
         <div className="min-w-0 flex-1">
-          <p className="line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground line-through decoration-muted-foreground/40">{annotation.comment}</p>
-          {annotation.resolutionNote ? (
-            <p className="mt-1 whitespace-pre-wrap break-words rounded bg-muted/60 px-1.5 py-1 text-xs text-foreground">
-              <span className="text-2xs text-muted-foreground">Agent：</span>
-              {annotation.resolutionNote}
-            </p>
-          ) : null}
+          {/* The agent's note leads: it is what the user reviews. */}
+          <p className="line-clamp-3 whitespace-pre-wrap break-words text-base text-foreground">{annotation.resolutionNote || "（没有留下说明）"}</p>
+          <p className="mt-0.5 truncate text-sm text-muted-foreground">
+            #{annotation.number} · {annotation.comment.replace(/\s+/g, " ").trim()}
+          </p>
         </div>
-        {screenshots.map((image) => (
-          <StoredThumb key={image.imageId} annotationId={annotation.annotationId} image={image} imageUrl={imageUrl} />
-        ))}
+        {!readOnly && !reopening ? (
+          <span className="hidden shrink-0 items-center group-hover:flex">
+            <IconButton label="确认" onClick={onConfirm}>
+              <Check className="size-3.5" />
+            </IconButton>
+            <IconButton label="重新打开" onClick={() => setReopening(true)}>
+              <RotateCcw className="size-3.5" />
+            </IconButton>
+          </span>
+        ) : null}
       </div>
-      {!readOnly ? (
-        reopening ? (
-          <div className="mt-1.5 pl-6">
-            <textarea
-              value={comment}
-              rows={2}
-              autoFocus
-              placeholder="还有哪里不对？"
-              aria-label="重新打开的补充说明"
-              className="w-full resize-none rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
-              onChange={(event) => setComment(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return;
-                if (event.key === "Escape") setReopening(false);
-                else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void submitReopen();
-              }}
-            />
-            {error ? <p className="text-2xs text-destructive">{error}</p> : null}
-            <div className="mt-1 flex justify-end gap-1.5">
-              <Button label="取消" variant="ghost" size="sm" onClick={() => setReopening(false)} />
-              <Button label="重新打开" variant="primary" size="sm" isLoading={busy} isDisabled={!comment.trim()} onClick={() => void submitReopen()} />
-            </div>
+      {!readOnly && reopening ? (
+        <div className="mt-1.5 pl-6">
+          <GrowingInput
+            inputRef={inputRef}
+            value={comment}
+            placeholder="还有哪里不对？"
+            aria-label="重新打开的补充说明"
+            disabled={busy}
+            onChange={(event) => setComment(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setReopening(false);
+              } else if (isSubmitKey(event)) {
+                event.preventDefault();
+                void submitReopen();
+              }
+            }}
+          />
+          {error ? <p className="mt-0.5 text-sm text-destructive">{error}</p> : null}
+          <div className="mt-1 flex justify-end gap-1.5">
+            <Button label="取消" variant="ghost" size="sm" onClick={() => setReopening(false)} />
+            <Button label="重新打开" variant="primary" size="sm" isLoading={busy} isDisabled={!comment.trim()} onClick={() => void submitReopen()} />
           </div>
-        ) : (
-          <div className="mt-1 flex justify-end gap-1 pl-6">
-            <Button label="重新打开" variant="ghost" size="sm" icon={<RotateCcw className="size-3" />} onClick={() => setReopening(true)} />
-            <Button label="确认" variant="secondary" size="sm" icon={<Check className="size-3" />} onClick={() => void onConfirm()} />
-          </div>
-        )
+        </div>
       ) : null}
     </div>
-  );
-}
-
-/** The toolbar's 「✎ n」: toggles annotate mode; the count is the workspace's pending annotations. */
-export function AnnotateToggle({
-  active,
-  count,
-  disabledReason,
-  onToggle,
-}: {
-  active: boolean;
-  count: number;
-  disabledReason: string | null;
-  onToggle: () => void;
-}) {
-  const label = disabledReason ?? (active ? "退出批注模式 Esc" : "批注模式：点击页面元素添加批注");
-  return (
-    <Tooltip content={label} placement="below">
-      <button
-        type="button"
-        aria-label={label}
-        aria-pressed={active}
-        disabled={disabledReason !== null}
-        className={cn(
-          "flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs tabular-nums transition-colors disabled:opacity-35 disabled:hover:bg-transparent",
-          active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
-        )}
-        onClick={onToggle}
-      >
-        <Pencil className="size-3.5" />
-        {count > 0 ? <span>{count}</span> : null}
-      </button>
-    </Tooltip>
   );
 }
