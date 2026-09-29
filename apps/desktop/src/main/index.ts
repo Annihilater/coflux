@@ -206,7 +206,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
 
-    // 自动更新：generic provider 读仓库 desktop-updates 分支的 latest-mac.yml；状态变化广播给渲染层，
+    // Auto-update: the generic provider reads latest-mac.yml from the R2 download mirror (dl.coflux.dev/desktop)；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
     const updater = createUpdater({
       enabled: app.isPackaged,

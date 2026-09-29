@@ -362,7 +362,7 @@ jobs:
           else
             git checkout -q --orphan desktop-updates
           fi
-          node ../scripts/desktop-update-feed.mjs "$VERSION" "$REPO" ../assets/latest-mac.yml latest-mac.yml > "$RUNNER_TEMP/latest-mac.yml"
+          node ../scripts/desktop-update-feed.mjs "$VERSION" ../assets/latest-mac.yml latest-mac.yml > "$RUNNER_TEMP/latest-mac.yml"
           cp "$RUNNER_TEMP/latest-mac.yml" latest-mac.yml
           git add latest-mac.yml
           if git diff --cached --quiet; then exit 0; fi

@@ -31,8 +31,9 @@ export type UpdaterOptions = {
 };
 
 /**
- * 自动更新（plan 103）：electron-updater generic provider 读仓库 `desktop-updates` 分支上的 latest-mac.yml
- * （raw.githubusercontent.com，publish.url 写死在 electron-builder.yml；安装包在 GitHub Release，清单里是绝对下载地址）。发现即下载、退出时自动安装；渲染层可显式
+ * 自动更新（plan 103）：electron-updater generic provider reads `desktop/latest-mac.yml` on the R2
+ * download mirror (https://dl.coflux.dev/desktop, fixed in electron-builder.yml's publish.url; the
+ * feed carries absolute zip URLs on the same mirror, plan 20260930-r2-download-mirror). 发现即下载、退出时自动安装；渲染层可显式
  * 触发检查（版本准入被拒时）并请求立即重启安装。
  */
 export function createUpdater(options: UpdaterOptions): Updater {

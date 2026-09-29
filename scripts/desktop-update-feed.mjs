@@ -1,8 +1,12 @@
-// 旧桌面继续读取同一分支；统一发布只改变下载地址，不允许旧 run 回退稳定更新源。
+// Renders the stable desktop update feed. Both feeds use it: the `desktop-updates` branch that installed
+// apps read, and `desktop/latest-mac.yml` on the R2 mirror that newer builds read. Either way the zip
+// URL is the absolute R2 mirror URL of this release, and an old run can never roll a feed back.
+//   Usage: node scripts/desktop-update-feed.mjs <tag> <latest-mac.yml> [previous feed]
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseStrictSemver, compareSemver } from "./npm-publish-guard.mjs";
+import { mirrorAssetUrl } from "./release-mirror-layout.mjs";
 
 function manifestVersion(text) {
   const matches = [...text.matchAll(/^version: ['"]?([^\s'"]+)['"]?\s*$/gm)];
@@ -10,14 +14,13 @@ function manifestVersion(text) {
   return parseStrictSemver(matches[0][1]);
 }
 
-export function renderDesktopFeed(tag, repository, source, previous) {
+export function renderDesktopFeed(tag, source, previous) {
   if (!tag.startsWith("v")) throw new Error("更新源只接受统一 v* tag");
   const version = parseStrictSemver(tag.slice(1));
   if (version.prerelease.length || tag.includes("+")) throw new Error("预发布版本不能覆盖稳定更新源");
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("无效 repository");
   if (manifestVersion(source).raw !== version.raw) throw new Error("桌面清单版本与 tag 不一致");
   const asset = `coflux-${version.raw}-arm64.zip`;
-  const destination = `https://github.com/${repository}/releases/download/${tag}/${asset}`;
+  const destination = mirrorAssetUrl(tag, asset);
   let count = 0;
   const rendered = source.replace(/^(\s*-?\s*(?:url|path): )([^\r\n]+)$/gm, (_line, prefix, value) => {
     if (value !== asset) throw new Error("桌面清单包含非本次发布的产物地址");
@@ -35,7 +38,7 @@ export function renderDesktopFeed(tag, repository, source, previous) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const [tag, repository, source, previous] = process.argv.slice(2);
-    process.stdout.write(renderDesktopFeed(tag, repository, readFileSync(source, "utf8"), previous && existsSync(previous) ? readFileSync(previous, "utf8") : undefined));
+    const [tag, source, previous] = process.argv.slice(2);
+    process.stdout.write(renderDesktopFeed(tag, readFileSync(source, "utf8"), previous && existsSync(previous) ? readFileSync(previous, "utf8") : undefined));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

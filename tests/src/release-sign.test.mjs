@@ -147,6 +147,51 @@ test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的
       /前导 0/,
       "数字 prerelease 标识符必须与 Rust strict SemVer 一致",
     );
+
+    // A prerelease is never uploaded to the R2 mirror: every entry keeps its GitHub Release URL.
+    assert.deepEqual(manifestUrls(manifest), expectedUrls(
+      target,
+      (name) => `https://github.com/acme/coflux/releases/download/v2.3.4-rc.1/${name}`,
+    ));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const COMPONENTS = ["worker", "supervisor", "cli", "transport", "ptyd"];
+
+function manifestUrls(manifest) {
+  return Object.fromEntries(COMPONENTS.flatMap((component) =>
+    Object.entries(manifest[component] ?? {}).map(([target, entry]) => [`${component}/${target}`, entry.url])));
+}
+
+function expectedUrls(target, url) {
+  return Object.fromEntries(COMPONENTS.map((component) => [`${component}/${target}`, url(`coflux-${component}-${target}`)]));
+}
+
+test("release-sign points every component of a stable tag at the R2 mirror, with signatures that ignore the URL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "coflux-release-sign-stable-"));
+  try {
+    const target = "x86_64-unknown-linux-musl";
+    const artifact = Buffer.from("stable artifact\n", "utf8");
+    for (const component of COMPONENTS) writeFileSync(join(dir, `coflux-${component}-${target}`), artifact);
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.3.4"], {
+      cwd: ROOT,
+      env: { ...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({ format: "pem", type: "pkcs8" }) },
+      stdio: "pipe",
+    });
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    assert.deepEqual(manifestUrls(manifest), expectedUrls(
+      target,
+      (name) => `https://dl.coflux.dev/releases/v2.3.4/${name}`,
+    ));
+    assert.doesNotMatch(JSON.stringify(manifest), /github\.com/);
+    // The trust chain is unchanged: the release statement binds version/target/sha256/size, never the URL.
+    for (const component of COMPONENTS) {
+      const entry = parseReleaseManifestEntry(manifest, component, manifest.version, target);
+      verifyReleaseArtifact({ component, version: manifest.version, entry, data: artifact, publicKey });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -60,8 +60,9 @@ test("electron-builder.yml：签名公证、Fuses、arm64 dmg+zip、generic 更�
 
   assert.equal(config.publish.provider, "generic");
   assert.equal(config.publish.channel, "latest");
-  // 更新源是仓库 desktop-updates 分支上的清单（release workflow 推），安装包在 GitHub Release
-  assert.equal(config.publish.url, "https://raw.githubusercontent.com/myWsq/coflux/desktop-updates");
+  // The feed is desktop/latest-mac.yml on the R2 download mirror, written by the release workflow's
+  // pointer job (plan 20260930-r2-download-mirror); pre-mirror installs keep the desktop-updates branch.
+  assert.equal(config.publish.url, "https://dl.coflux.dev/desktop");
 });
 
 test("electron-builder.yml：内置 daemon 三件经 extraResources 进 Resources/daemon、mac.binaries 显式签名（plan 113）", () => {

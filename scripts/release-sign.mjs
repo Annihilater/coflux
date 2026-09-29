@@ -4,6 +4,9 @@
 //   2) worker/supervisor 各自 domain-separated 的 <name>.release.sig，绑定
 //      component/version/target/sha256/size，供热升级与 cofluxd 安装验真。
 // manifest.json 保留原 worker 字段并新增 supervisor / cli / transport / ptyd；老 server/supervisor 忽略新增字段。
+// Manifest URLs: a stable tag points at the R2 download mirror (dl.coflux.dev), which the release
+// workflow fills before the GitHub Release exists; a prerelease is never mirrored and keeps GitHub
+// URLs. URLs are unsigned download locations, so this choice never touches the trust chain.
 //   用法: WORKER_SIGNING_KEY=<PKCS8 PEM> GITHUB_REPOSITORY=owner/repo node scripts/release-sign.mjs <dir> <version>
 import crypto from "node:crypto";
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
@@ -16,6 +19,7 @@ import {
   transportReleaseStatement,
   workerReleaseStatement,
 } from "./release-statement.mjs";
+import { isStableTag, mirrorAssetUrl } from "./release-mirror-layout.mjs";
 
 const dir = process.argv[2];
 const version = process.argv[3];
@@ -31,6 +35,11 @@ if (!pem) {
 }
 const key = crypto.createPrivateKey(pem);
 assertReleaseVersion(version);
+const mirrored = isStableTag(version);
+// The single place that decides where a manifest entry downloads from.
+const assetUrl = (name) => mirrored
+  ? mirrorAssetUrl(version, name)
+  : `https://github.com/${repo}/releases/download/${version}/${name}`;
 
 const manifest = { schemaVersion: 2, version, worker: {}, supervisor: {} };
 const sums = [];
@@ -52,7 +61,7 @@ for (const name of readdirSync(dir)) {
   writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
   sums.push(`${sha256}  ${name}`);
   manifest.worker[target] = {
-    url: `https://github.com/${repo}/releases/download/${version}/${name}`,
+    url: assetUrl(name),
     target,
     sha256,
     size,
@@ -78,7 +87,7 @@ for (const name of readdirSync(dir)) {
   writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
   sums.push(`${sha256}  ${name}`);
   manifest.supervisor[target] = {
-    url: `https://github.com/${repo}/releases/download/${version}/${name}`,
+    url: assetUrl(name),
     target,
     sha256,
     size,
@@ -99,7 +108,7 @@ if (cliNames.length) {
     const releaseSignature = crypto.sign(null, cliReleaseStatement({ version, target, sha256, size }), key).toString("hex");
     writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
     sums.push(`${sha256}  ${name}`);
-    manifest.cli[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+    manifest.cli[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
   }
   if (Object.keys(manifest.cli).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) {
     throw new Error("CLI targets must match worker targets");
@@ -116,7 +125,7 @@ if (transportNames.length) {
     const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
     const releaseSignature = crypto.sign(null, transportReleaseStatement({ version, target, sha256, size }), key).toString("hex");
     writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
-    manifest.transport[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+    manifest.transport[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
   }
   if (Object.keys(manifest.transport).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) throw new Error("Transport targets must match worker targets");
 }
@@ -146,7 +155,7 @@ for (const name of ptydNames) {
   const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
   const releaseSignature = crypto.sign(null, ptydReleaseStatement({ version, target, sha256, size }), key).toString("hex");
   writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
-  manifest.ptyd[target] = { target, sha256, size, releaseSignature, url: `https://github.com/${repo}/releases/download/${version}/${name}` };
+  manifest.ptyd[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
 }
 if (Object.keys(manifest.ptyd).sort().join("\n") !== workerTargets.join("\n")) throw new Error("ptyd targets must match worker targets");
 
