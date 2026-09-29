@@ -86,6 +86,9 @@ export function createExecutorHostCore(options: ExecutorHostCoreOptions): Execut
       };
     },
     sendReport: (report) => options.send({ type: "report", ...report }),
+    // The daemon assigns the seq and buffers per run; the same frame rides JSONL for the daemon's
+    // own host and the device channel for Coflux.app.
+    sendTranscript: (runId, fragment) => options.send({ type: "transcript", runId, fragment }),
     log: options.log,
   });
 

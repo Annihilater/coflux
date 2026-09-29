@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { ExecutorManager, type ExecutorConfigSnapshot, type RunnerHandle } from "./manager.js";
-import type { ExecutorRunnerOutbound, ExecutorRunnerStart } from "./runner-protocol.js";
+import type { ExecutorRunnerOutbound, ExecutorRunnerStart, ExecutorTranscriptFragment } from "./runner-protocol.js";
 import type { ExecutorAssignment } from "./jobs.js";
 
 // Each run's scratch directory is created under tmpdir(), and the sandbox profile refuses /tmp and
@@ -61,6 +61,7 @@ class FakeRunner implements RunnerHandle {
 
 function harness(over: Partial<ExecutorConfigSnapshot> = {}) {
   const reports: Report[] = [];
+  const transcripts: { runId: string; fragment: ExecutorTranscriptFragment }[] = [];
   const runners: FakeRunner[] = [];
   const root = realpathSync(mkdtempSync(join(tmpdir(), "coflux-exec-test-")));
   mkdirSync(join(root, "sub"), { recursive: true });
@@ -72,10 +73,11 @@ function harness(over: Partial<ExecutorConfigSnapshot> = {}) {
     },
     config: () => ({ ...CONFIG, ...over }),
     sendReport: (report) => reports.push(report),
+    sendTranscript: (runId, fragment) => transcripts.push({ runId, fragment }),
     // It must work outside a git repository too; failing here takes the "no git metadata" branch.
     runGit: () => ({ stdout: "", ok: false }),
   });
-  return { manager, reports, runners, root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { manager, reports, transcripts, runners, root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 function assignment(root: string, over: Partial<ExecutorAssignment> = {}): ExecutorAssignment {
@@ -219,6 +221,22 @@ test("对账把 daemon 手里不认识的 run 判 unknown", () => {
     h.manager.onReconcile(["ghost"]);
     assert.equal(h.reports.at(-1)?.runId, "ghost");
     assert.equal(h.reports.at(-1)?.state, "unknown");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("transcript fragments of a live run are forwarded with their run id; a dropped run's are not", () => {
+  const h = harness();
+  try {
+    h.manager.onAssign(assignment(h.root));
+    const fragment: ExecutorTranscriptFragment = { kind: "assistant", text: "looking", at: 1 };
+    h.runners[0].emit({ type: "transcript", seq: 1, fragment });
+    assert.deepEqual(h.transcripts, [{ runId: "run-1", fragment }]);
+    h.runners[0].emit({ type: "done", outcome: "succeeded", summary: "ok", changedFiles: [] });
+    h.runners[0].exit(0);
+    h.runners[0].emit({ type: "transcript", seq: 2, fragment });
+    assert.equal(h.transcripts.length, 1);
   } finally {
     h.cleanup();
   }

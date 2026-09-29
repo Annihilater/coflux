@@ -42,7 +42,9 @@ import {
   type ExecutorRunnerInbound,
   type ExecutorRunnerOutbound,
   type ExecutorRunnerStart,
+  type ExecutorTranscriptFragment,
 } from "./runner-protocol.js";
+import { createTranscriptRecorder, toolEnvironment, type TranscriptRecorder } from "./transcript.js";
 
 /**
  * The link back to the host, in the two shapes a runner can be started in.
@@ -70,10 +72,17 @@ function onHostMessage(listener: (message: ExecutorRunnerInbound) => void): void
 }
 
 let transcriptSeq = 0;
-function transcript(kind: "assistant" | "tool" | "error", text: string): void {
-  if (!text) return;
-  send({ type: "transcript", seq: ++transcriptSeq, kind, text });
+function sendFragment(fragment: ExecutorTranscriptFragment): void {
+  send({ type: "transcript", seq: ++transcriptSeq, fragment });
 }
+
+/**
+ * The transcript recorder (transcript.ts): one assistant fragment per message, one tool fragment per
+ * call with its capped output, errors as they happen — every fragment redacted against the
+ * credential before it leaves. Created without a secret until `start` arrives, so an error before
+ * that still reaches the host.
+ */
+let recorder: TranscriptRecorder = createTranscriptRecorder({ emit: sendFragment, secrets: [] });
 
 /**
  * The register of running bash children. Recorded **by process group**, not by pid: pi's bash backend
@@ -120,17 +129,16 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
       const child: ChildProcess = spawn(file, args, {
         cwd: start.workspaceRoot,
         detached: true, // Its own process group, so the whole group can be killed.
-        env: {
-          ...options.env,
-          // The scratch dir, not the system /tmp: that holds other tasks and shared sockets, and the
-          // profile does not allow it anyway.
-          TMPDIR: start.scratchDir,
-          // The credential is never handed down to a tool process.
-          ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined,
-          GEMINI_API_KEY: undefined,
-          COFLUX_EXECUTOR_RUN_ID: start.runId,
-        } as NodeJS.ProcessEnv,
+        // The credential is never handed down to a tool process: the well-known credential
+        // variables are stripped by name, and anything carrying the key's value by value, so a tool
+        // that dumps its environment cannot echo it into the transcript. TMPDIR is the scratch dir,
+        // not the system /tmp: that holds other tasks and shared sockets, and the profile does not
+        // allow it anyway.
+        env: toolEnvironment(
+          options.env,
+          { TMPDIR: start.scratchDir, COFLUX_EXECUTOR_RUN_ID: start.runId },
+          [start.apiKey],
+        ),
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -322,7 +330,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
           writable: start.write,
         });
         if (verdict) {
-          transcript("error", `已拦下 ${event.toolName}：${verdict.reason}`);
+          recorder.error(`已拦下 ${event.toolName}：${verdict.reason}`);
           return { block: true, reason: verdict.reason };
         }
         if (event.toolName === "write" || event.toolName === "edit") {
@@ -384,30 +392,19 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
 
   send({ type: "running" });
 
-  let lastAssistantText = "";
   /**
    * **`prompt()` returning is not success.** pi reports model-side failures on the final
    * AssistantMessage's `stopReason` (`"error"` / `"aborted"`, with an `errorMessage`) rather than by
    * throwing — a smoke test with an invalid key still had `prompt()` return normally, and an earlier
-   * version reported succeeded on that basis. The terminal state must be read from here.
+   * version reported succeeded on that basis. The terminal state must be read from the recorder,
+   * which keeps the last message's stop reason.
    */
-  let lastStopReason = "";
-  let lastErrorMessage = "";
-
   session.subscribe((event: { type: string; [key: string]: unknown }) => {
-    if (event.type === "message_update") {
-      const inner = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
-      if (inner?.type === "text_delta" && inner.delta) lastAssistantText += inner.delta;
-    } else if (event.type === "tool_execution_start") {
+    if (event.type === "tool_execution_start") {
       const name = (event as { toolName?: string }).toolName ?? "tool";
       send({ type: "progress", note: `正在执行 ${name}` });
-      transcript("tool", `→ ${name}`);
-    } else if (event.type === "message_end" || event.type === "turn_end") {
-      const message = (event.message ?? {}) as { stopReason?: string; errorMessage?: string };
-      if (message.stopReason) lastStopReason = message.stopReason;
-      if (message.errorMessage) lastErrorMessage = message.errorMessage;
-      if (lastAssistantText) transcript("assistant", lastAssistantText);
     }
+    recorder.onEvent(event as Parameters<TranscriptRecorder["onEvent"]>[0]);
   });
 
   const timeout = setTimeout(() => void session.abort(), start.timeoutMs);
@@ -421,12 +418,14 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   // virtue of this run not being finished, so finishing early releases the lock early.
   await stopAllGroups();
 
+  const { reason: lastStopReason, errorMessage: lastErrorMessage } = recorder.lastStop();
+  const lastAssistantText = recorder.lastAssistantText();
   if (lastStopReason === "error") {
-    transcript("error", lastErrorMessage || "模型调用失败");
+    recorder.error(lastErrorMessage || "模型调用失败");
     send({
       type: "done",
       outcome: "model_error",
-      summary: lastAssistantText.trim(),
+      summary: lastAssistantText,
       changedFiles: [...changedFiles],
       error: lastErrorMessage || "模型调用失败，且未给出原因",
     });
@@ -436,7 +435,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     send({
       type: "done",
       outcome: "cancelled",
-      summary: lastAssistantText.trim(),
+      summary: lastAssistantText,
       changedFiles: [...changedFiles],
       error: lastErrorMessage || "任务被中断",
     });
@@ -457,7 +456,7 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   send({
     type: "done",
     outcome: "succeeded",
-    summary: lastAssistantText.trim(),
+    summary: lastAssistantText,
     changedFiles: [...changedFiles],
   });
 }
@@ -479,12 +478,15 @@ onHostMessage((message) => {
   // means the sandbox never allows it.
   if (!message.scratchDir) message.scratchDir = mkdtempSync(`${tmpdir()}/coflux-executor-`);
 
+  // From here on every fragment is redacted against the credential: it now leaves the host process.
+  recorder = createTranscriptRecorder({ emit: sendFragment, secrets: [message.apiKey] });
+
   run(message)
     .catch(async (error: unknown) => {
       if (aborting) return;
       await stopAllGroups();
       const text = error instanceof Error ? error.message : String(error);
-      transcript("error", text);
+      recorder.error(text);
       send({
         type: "done",
         outcome: text.includes("模型") || text.includes("model") ? "model_error" : "tool_failed",
