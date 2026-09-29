@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { assertBreakingResult, checkProtocolBreaking } from "./check-protocol-breaking.mjs";
-const retired = JSON.parse(readFileSync(new URL("../proto/tailcat-retirement-allowlist.json", import.meta.url), "utf8"));
+const retired = JSON.parse(readFileSync(new URL("../proto/breaking-allowlist.json", import.meta.url), "utf8"));
 const diagnostic = value => ({ status: 100, stdout: JSON.stringify(value), stderr: "" });
 test("only the exact reviewed FILE removals are exempt", () => {
-  assert.equal(retired.length, 26);
+  assert.equal(retired.length, 28);
   for (const entry of retired) {
     assert.doesNotThrow(() => assertBreakingResult(diagnostic(entry), true));
     for (const field of ["path", "type", "message"]) assert.throws(() => assertBreakingResult(diagnostic({ ...entry, [field]: entry[field] + "unrelated" }), true));

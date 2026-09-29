@@ -2118,24 +2118,29 @@ impl DeviceRuntime {
                 match action {
                     Action::Put(put) => store
                         .put(&workspace_id, put)
-                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)))),
+                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)), Vec::new())),
                     Action::Delete(delete) => store
                         .delete(&workspace_id, &delete.annotation_ids)
-                        .map(|revision| (revision, None)),
+                        .map(|(revision, removed)| (revision, None, removed)),
                     Action::Reopen(reopen) => store
                         .reopen(&workspace_id, &reopen.annotation_id, &reopen.comment)
-                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)))),
+                        .map(|(revision, stored)| (revision, Some(store.to_wire(&workspace_id, &stored)), Vec::new())),
                     Action::ClearResolved(_) => store
                         .clear_resolved(&workspace_id)
-                        .map(|revision| (revision, None)),
+                        .map(|(revision, removed)| (revision, None, removed)),
+                    // Undo (plan 20260929-annotation-polish): a variant of this same payload, so
+                    // no dispatch table changes and nothing reaches the center.
+                    Action::Restore(restore) => store
+                        .restore(&workspace_id, &restore.annotation_ids)
+                        .map(|(revision, _)| (revision, None, Vec::new())),
                 }
             })
             .await,
             Err(error) => Err(error),
         };
-        let (ok, error, revision, annotation) = match outcome {
-            Ok((revision, annotation)) => (true, String::new(), revision, annotation),
-            Err(error) => (false, error, 0, None),
+        let (ok, error, revision, annotation, removed_ids) = match outcome {
+            Ok((revision, annotation, removed)) => (true, String::new(), revision, annotation, removed),
+            Err(error) => (false, error, 0, None, Vec::new()),
         };
         if !ok {
             logln!("[annotations] change refused: {error}");
@@ -2146,6 +2151,7 @@ impl DeviceRuntime {
             error,
             revision,
             annotation,
+            removed_ids,
         })
     }
 

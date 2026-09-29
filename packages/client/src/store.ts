@@ -14,6 +14,7 @@ import {
   AnnotationClearResolvedSchema,
   AnnotationDeleteSchema,
   AnnotationReopenSchema,
+  AnnotationRestoreSchema,
   type ClientToServerPayload,
   type DaemonInfo,
   type DeviceSessionCatalog,
@@ -96,7 +97,9 @@ export type AnnotationSummaryState = {
  * `refused` = the worker answered and refused (the message says why). */
 export type AnnotationFailure = { ok: false; reason: "unsupported" | "unreachable" | "refused"; error: string };
 export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[] } | AnnotationFailure;
-export type AnnotationMutateResult = { ok: true; revision: number; annotation?: Annotation } | AnnotationFailure;
+/** `removedIds`: for a delete or clear-resolved, exactly the ids it removed — what one 「撤销」
+ * (`restore`) brings back within the worker's undo window (plan 20260929-annotation-polish). */
+export type AnnotationMutateResult = { ok: true; revision: number; annotation?: Annotation; removedIds: string[] } | AnnotationFailure;
 export type AnnotationImageResult = { ok: true; mimeType: string; data: Uint8Array } | AnnotationFailure;
 /** `held`: someone else holds the terminal. */
 export type AnnotationHandOffResult = { ok: true } | (AnnotationFailure & { held?: boolean });
@@ -104,7 +107,8 @@ export type AnnotationChange =
   | { kind: "put"; put: AnnotationPut }
   | { kind: "delete"; annotationIds: string[] }
   | { kind: "reopen"; annotationId: string; comment: string }
-  | { kind: "clear-resolved" };
+  | { kind: "clear-resolved" }
+  | { kind: "restore"; annotationIds: string[] };
 
 /** The pause between a handed-off instruction and its Enter: an agent's TUI treats one fast burst
  * ending in CR as a paste. The worker's path uses the same value. */
@@ -1512,11 +1516,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
           ? { case: "delete", value: create(AnnotationDeleteSchema, { annotationIds: change.annotationIds }) }
           : change.kind === "reopen"
             ? { case: "reopen", value: create(AnnotationReopenSchema, { annotationId: change.annotationId, comment: change.comment }) }
-            : { case: "clearResolved", value: create(AnnotationClearResolvedSchema) };
+            : change.kind === "restore"
+              ? { case: "restore", value: create(AnnotationRestoreSchema, { annotationIds: change.annotationIds }) }
+              : { case: "clearResolved", value: create(AnnotationClearResolvedSchema) };
     try {
       const result = await deviceRouter.mutateAnnotations(daemonId, workspaceId, action);
       if (!result.ok) return { ok: false, reason: "refused", error: result.error };
-      return { ok: true, revision: result.revision, annotation: result.annotation };
+      return { ok: true, revision: result.revision, annotation: result.annotation, removedIds: result.removedIds };
     } catch (error) {
       return annotationFailure(error);
     }

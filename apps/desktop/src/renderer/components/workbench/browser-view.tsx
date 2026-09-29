@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import {
   AppWindow,
@@ -13,7 +13,6 @@ import {
   Globe,
   History,
   LoaderCircle,
-  MessageSquareText,
   Minus,
   Plus,
   RefreshCw,
@@ -54,19 +53,25 @@ import {
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
 import {
   agentTerminals,
+  annotationCount,
   annotationsMarkdown,
+  annotationTitle,
   dataUrlToImage,
   HAND_OFF_INSTRUCTION,
   pageKey,
-  pendingCount,
   pinsForPage,
+  type CardBox,
 } from "@/components/workbench/browser-annotations";
 import { annotationsModelFor, useWorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
 import {
-  AnnotateToggle,
+  AnnotateButton,
   AnnotationCard,
+  AnnotationDetailCard,
+  AnnotationHint,
   AnnotationsPanel,
+  draftIsDirty,
   prepareReferenceImage,
+  useAnnotatorPalette,
   type AnnotationDraft,
   type PanelNotice,
 } from "@/components/workbench/browser-annotations-ui";
@@ -141,6 +146,9 @@ type Failure =
   | { kind: "tunnel"; url: string; reason: DesktopBrowserTunnelFailure }
   | { kind: "certificate"; url: string; host: string; certificate: DesktopBrowserCertificate | null }
   | { kind: "crashed"; url: string };
+
+/** How long a deletion's 「撤销」 toast stays; the worker keeps deletions restorable for a minute. */
+const UNDO_TOAST_MS = 8000;
 
 /** Chromium net error codes the error pages distinguish. */
 const NET_ERR_ABORTED = -3;
@@ -258,7 +266,7 @@ function BrowserView({
   const [selection, setSelection] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [trusting, setTrusting] = useState(false);
-  // Browser annotations (plan 20260929-browser-annotations).
+  // Browser annotations (plans 20260929-browser-annotations, 20260929-annotation-polish).
   const [annotating, setAnnotating] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<AnnotationDraft | null>(null);
@@ -267,8 +275,15 @@ function BrowserView({
   useEffect(() => {
     draftRef.current = draft;
   });
+  /** The annotation whose detail card is open (a pin or a panel row), and whether the page scrolls to it. */
+  const [detail, setDetail] = useState<{ id: string; scroll: boolean } | null>(null);
+  /** The detail card holds an unsent reopen comment. */
+  const [detailDirty, setDetailDirty] = useState(false);
+  /** Bumped to shake the open card (a click elsewhere while it holds unsaved text). */
+  const [shake, setShake] = useState(0);
+  /** The panel row under the pointer: its elements or region are outlined on the page. */
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [anchorBox, setAnchorBox] = useState<{ rect: DesktopAnnotatorBox | null; viewport: DesktopAnnotatorViewport } | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [missing, setMissing] = useState<{ url: string; ids: ReadonlySet<string> }>({ url: "", ids: new Set() });
   const [annotatorAvailable, setAnnotatorAvailable] = useState(true);
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
@@ -277,6 +292,9 @@ function BrowserView({
   const annotationSummary = useStore(client.store, (state) => state.annotationSummaries[workspaceId]);
   const daemonOnline = useStore(client.store, (state) => state.daemons.find((daemon) => daemon.daemonId === daemonId)?.online ?? false);
 
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const palette = useAnnotatorPalette(rootRef);
   const webviewHostRef = useRef<HTMLDivElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
   const devtoolsHostRef = useRef<HTMLDivElement | null>(null);
@@ -295,7 +313,7 @@ function BrowserView({
   const loading = tab?.loading ?? false;
   const blank = url === "" && failure === null;
 
-  // ---- browser annotations (plan 20260929-browser-annotations) ----
+  // ---- browser annotations (plans 20260929-browser-annotations, 20260929-annotation-polish) ----
   const annotationsModel = annotationsModelFor(client);
   const annotationsEntry = useWorkspaceAnnotations(client, workspaceId, visible && (isWebUrl(url) || panelOpen));
   const annotations = annotationsEntry.annotations;
@@ -312,21 +330,43 @@ function BrowserView({
           : !annotatorAvailable
             ? "这个页面暂时无法批注，稍后重试"
             : null;
-  const pagePins = isWebUrl(url) && !failure && annotations ? pinsForPage(annotations, url) : [];
+  const pageActive = isWebUrl(url) && !failure;
+  const pagePins = pageActive && annotations ? pinsForPage(annotations, url) : [];
+  const detailAnnotation = detail && annotations ? (annotations.find((annotation) => annotation.annotationId === detail.id) ?? null) : null;
+  const cardOpen = draft !== null || detailAnnotation !== null;
+  const cardDirty = (draft !== null && draftIsDirty(draft)) || (detailAnnotation !== null && detailDirty);
   const annotatorAnchor: DesktopAnnotatorState["anchor"] = draft?.pick
     ? { kind: "pick", token: draft.pick.token }
     : draft?.annotationId
       ? { kind: "pin", id: draft.annotationId, scroll: true }
-      : selectedId
-        ? { kind: "pin", id: selectedId, scroll: true }
+      : detailAnnotation && detail
+        ? { kind: "pin", id: detailAnnotation.annotationId, scroll: detail.scroll }
         : null;
+  const outlined = [...new Set([draft?.annotationId, detailAnnotation?.annotationId, hoveredId].filter((id): id is string => !!id))];
   const annotatorState: DesktopAnnotatorState = {
-    mode: annotating && draft === null && annotateDisabledReason === null,
+    mode: annotating && !cardOpen && annotateDisabledReason === null,
+    // While a card is open the page swallows clicks and reports them as clicks outside the card.
+    capture: cardOpen && pageActive,
     pins: pagePins,
     anchor: annotatorAnchor,
+    outlined,
+    palette,
   };
   const annotatorKey = JSON.stringify(annotatorState);
   const pageMissing = missing.url && pageKey(missing.url) === pageKey(url) ? missing.ids : new Set<string>();
+  const annotationImageUrl = useCallback(
+    (annotationId: string, imageId: string) => annotationsModel.imageUrl(workspaceId, annotationId, imageId),
+    [annotationsModel, workspaceId],
+  );
+  /** The anchor in the page area's pixels (page CSS pixels scale onto the webview). */
+  const cardAnchor: CardBox | null =
+    anchorBox?.rect && anchorBox.viewport.width > 0 && pageSize.width > 0
+      ? (() => {
+          const scale = pageSize.width / anchorBox.viewport.width;
+          const rect = anchorBox.rect;
+          return { x: rect.x * scale, y: rect.y * scale, width: rect.width * scale, height: rect.height * scale };
+        })()
+      : null;
 
   function annotationFailureText(result: AnnotationFailure, action: string): string {
     if (result.reason === "unsupported") return "该设备 coflux 版本过旧，不支持浏览器批注";
@@ -334,15 +374,33 @@ function BrowserView({
     return `${action}失败：${result.error}`;
   }
 
+  function closeCard() {
+    setDraft(null);
+    setDetail(null);
+    setDetailDirty(false);
+    setAnchorBox(null);
+    // Back to picking: the page takes the keys (↑↓, ⇧) again.
+    if (annotating) focusPage();
+  }
+
+  /** A click elsewhere: an empty card closes, one holding unsaved text shakes instead. */
+  function clickedOutsideCard() {
+    if (cardDirty) setShake((value) => value + 1);
+    else closeCard();
+  }
+
   function onAnnotatorPick(pick: DesktopAnnotatorPick) {
     const shot = pick.screenshot ? dataUrlToImage(pick.screenshot) : null;
-    setSelectedId(null);
+    setDetail(null);
+    setDetailDirty(false);
     setAnchorBox({ rect: pick.rect, viewport: pick.viewport });
     setDraft({
       key: crypto.randomUUID(),
       annotationId: null,
       number: null,
       pick,
+      title: annotationTitle(pick.targets, pick.region !== null),
+      original: "",
       comment: "",
       images: shot && pick.screenshot ? [{ key: crypto.randomUUID(), dataUrl: pick.screenshot, mimeType: shot.mimeType, data: shot.data, kind: "screenshot" }] : [],
       existing: [],
@@ -352,15 +410,40 @@ function BrowserView({
     });
   }
 
+  /** A pin click (in annotate mode or not) opens its detail card in place. */
+  function openDetail(annotationId: string, scroll: boolean) {
+    if (detail?.id === annotationId && draft === null) return;
+    if (cardDirty) {
+      setShake((value) => value + 1);
+      return;
+    }
+    setDraft(null);
+    setDetailDirty(false);
+    setAnchorBox(null);
+    setDetail({ id: annotationId, scroll });
+  }
+
+  function selectAnnotation(annotation: Annotation) {
+    openDetail(annotation.annotationId, true);
+    if (pageKey(annotation.pageUrl) !== pageKey(liveRef.current.url)) navigate(annotation.pageUrl);
+  }
+
   function editAnnotation(annotation: Annotation) {
+    if (cardDirty && draft?.annotationId !== annotation.annotationId) {
+      setShake((value) => value + 1);
+      return;
+    }
     if (pageKey(annotation.pageUrl) !== pageKey(liveRef.current.url)) navigate(annotation.pageUrl);
     setAnchorBox(null);
-    setSelectedId(annotation.annotationId);
+    setDetail(null);
+    setDetailDirty(false);
     setDraft({
       key: crypto.randomUUID(),
       annotationId: annotation.annotationId,
       number: annotation.number,
       pick: null,
+      title: annotationTitle(annotation.targets, annotation.region !== undefined),
+      original: annotation.comment,
       comment: annotation.comment,
       images: [],
       existing: annotation.images,
@@ -368,12 +451,6 @@ function BrowserView({
       saving: false,
       error: null,
     });
-  }
-
-  function selectAnnotation(annotation: Annotation) {
-    setAnchorBox(null);
-    setSelectedId(annotation.annotationId);
-    if (pageKey(annotation.pageUrl) !== pageKey(liveRef.current.url)) navigate(annotation.pageUrl);
   }
 
   async function addDraftImages(blobs: Blob[]) {
@@ -407,8 +484,8 @@ function BrowserView({
             comment: current.comment.trim(),
             pageUrl: pick?.url ?? liveRef.current.url,
             pageTitle: pick?.title ?? liveRef.current.title,
-            element: pick ? { ...pick.element } : undefined,
-            source: pick?.source ? { ...pick.source } : undefined,
+            targets: (pick?.targets ?? []).map((target) => ({ element: { ...target.element }, source: target.source ? { ...target.source } : undefined })),
+            region: pick?.region ? { ...pick.region } : undefined,
           },
       addImages: current.images.map((image) => ({
         kind: image.kind === "screenshot" ? AnnotationImageKind.SCREENSHOT : AnnotationImageKind.REFERENCE,
@@ -419,23 +496,54 @@ function BrowserView({
     });
     const result = await annotationsModel.change(workspaceId, { kind: "put", put });
     if (result.ok) {
-      setDraft((latest) => (latest?.key === current.key ? null : latest));
-      setSelectedId(null);
+      if (draftRef.current?.key === current.key) closeCard();
       return;
     }
     // The card keeps its input: saving again retries.
     setDraft((latest) => (latest?.key === current.key ? { ...latest, saving: false, error: annotationFailureText(result, "保存") } : latest));
   }
 
-  function cancelDraft() {
-    setDraft(null);
-    setSelectedId(null);
+  async function restoreAnnotations(annotationIds: string[]) {
+    const result = await annotationsModel.change(workspaceId, { kind: "restore", annotationIds });
+    if (!result.ok) showToast({ body: annotationFailureText(result, "撤销"), type: "error" });
   }
 
-  async function deleteAnnotation(annotation: Annotation) {
-    const result = await annotationsModel.change(workspaceId, { kind: "delete", annotationIds: [annotation.annotationId] });
-    if (!result.ok) showToast({ body: annotationFailureText(result, "删除"), type: "error" });
-    else if (selectedId === annotation.annotationId) setSelectedId(null);
+  /**
+   * The deletion already happened everywhere (the worker keeps the records restorable for a while);
+   * 「撤销」 restores exactly the ids it removed.
+   */
+  function offerUndo(body: string, annotationIds: string[]) {
+    if (annotationIds.length === 0) return;
+    let dismiss: (() => void) | null = null;
+    dismiss = showToast({
+      body,
+      type: "info",
+      autoHideDuration: UNDO_TOAST_MS,
+      endContent: (
+        <Button
+          label="撤销"
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            dismiss?.();
+            void restoreAnnotations(annotationIds);
+          }}
+        />
+      ),
+    });
+  }
+
+  /** Deletes a pending annotation, or confirms a resolved one; both can be undone for a while. */
+  async function removeAnnotation(annotation: Annotation, confirming: boolean) {
+    const id = annotation.annotationId;
+    setDetail((current) => (current?.id === id ? null : current));
+    setDetailDirty(false);
+    const result = await annotationsModel.change(workspaceId, { kind: "delete", annotationIds: [id] });
+    if (!result.ok) {
+      showToast({ body: annotationFailureText(result, confirming ? "确认" : "删除"), type: "error" });
+      return;
+    }
+    offerUndo(confirming ? `已确认批注 #${annotation.number}` : `已删除批注 #${annotation.number}`, result.removedIds);
   }
 
   async function reopenAnnotation(annotation: Annotation, comment: string): Promise<boolean> {
@@ -446,7 +554,11 @@ function BrowserView({
 
   async function clearResolved() {
     const result = await annotationsModel.change(workspaceId, { kind: "clear-resolved" });
-    if (!result.ok) showToast({ body: annotationFailureText(result, "清除"), type: "error" });
+    if (!result.ok) {
+      showToast({ body: annotationFailureText(result, "清除"), type: "error" });
+      return;
+    }
+    offerUndo(`已清除 ${result.removedIds.length} 条已完成的批注`, result.removedIds);
   }
 
   function copyAnnotationsMarkdown() {
@@ -468,24 +580,25 @@ function BrowserView({
     else showToast({ body: annotationFailureText(result, "交给 agent "), type: "error" });
   }
 
+  /** The icon segment and ⌘⇧D (in the page or the tab chrome). Entering never opens the panel. */
   function toggleAnnotating() {
-    const next = !annotating;
-    setAnnotating(next);
-    if (next) setPanelOpen(true);
+    if (annotating) {
+      setAnnotating(false);
+      return;
+    }
+    if (annotateDisabledReason !== null) {
+      showToast({ body: annotateDisabledReason, type: "info" });
+      return;
+    }
+    setAnnotating(true);
+    // The page must hold focus for ↑↓, ⇧ and Esc to reach the page script.
+    focusPage();
   }
 
-  function cardStyle(): CSSProperties {
-    const region = pageSize;
-    const cardWidth = 320;
-    const estimatedHeight = 230;
-    const box = anchorBox;
-    if (region.width <= 0 || !box?.rect || box.viewport.width <= 0) return { right: 12, top: 12 };
-    const scale = region.width / box.viewport.width;
-    const left = Math.max(8, Math.min(region.width - cardWidth - 8, box.rect.x * scale));
-    const below = (box.rect.y + box.rect.height) * scale + 8;
-    const above = box.rect.y * scale - estimatedHeight - 8;
-    const top = below + estimatedHeight <= region.height ? below : above >= 8 ? above : Math.max(8, region.height - estimatedHeight - 8);
-    return { left, top };
+  /** Esc from the page: a card closes first, then annotate mode ends. */
+  function onAnnotatorEscape() {
+    if (cardOpen) closeCard();
+    else setAnnotating(false);
   }
 
   // Handlers registered once per mount read the current values through this mirror.
@@ -555,9 +668,33 @@ function BrowserView({
   }
 
   // Keeps the latest closures reachable from handlers registered once.
-  const actionsRef = useRef({ navigate, focusAddress, focusPage, reload, toggleDevTools, retry, onAnnotatorPick });
+  const actionsRef = useRef({
+    navigate,
+    focusAddress,
+    focusPage,
+    reload,
+    toggleDevTools,
+    retry,
+    onAnnotatorPick,
+    openDetail,
+    onAnnotatorEscape,
+    clickedOutsideCard,
+    toggleAnnotating,
+  });
   useEffect(() => {
-    actionsRef.current = { navigate, focusAddress, focusPage, reload, toggleDevTools, retry, onAnnotatorPick };
+    actionsRef.current = {
+      navigate,
+      focusAddress,
+      focusPage,
+      reload,
+      toggleDevTools,
+      retry,
+      onAnnotatorPick,
+      openDetail,
+      onAnnotatorEscape,
+      clickedOutsideCard,
+      toggleAnnotating,
+    };
   });
 
   // The page's annotate mode, pins and anchor, pushed to main whenever they change (main re-applies
@@ -566,6 +703,15 @@ function BrowserView({
     if (guestId === null) return;
     desktop.browserAnnotatorSync(guestId, JSON.parse(annotatorKey) as DesktopAnnotatorState);
   }, [guestId, annotatorKey]);
+
+  // A detail card whose annotation is gone (deleted or confirmed, here or elsewhere) closes; a later
+  // 「撤销」 does not bring the card back.
+  useEffect(() => {
+    if (detail && annotations && !annotations.some((annotation) => annotation.annotationId === detail.id)) {
+      setDetail(null);
+      setDetailDirty(false);
+    }
+  }, [detail, annotations]);
 
   // The page area's size, for placing the comment card over the element (page CSS pixels scale onto it).
   useEffect(() => {
@@ -710,6 +856,7 @@ function BrowserView({
           switch (event.kind) {
             case "key":
               if (event.action === "focus-address") actionsRef.current.focusAddress();
+              else if (event.action === "toggle-annotate") actionsRef.current.toggleAnnotating();
               else actionsRef.current.toggleDevTools();
               return;
             case "favicon":
@@ -733,14 +880,16 @@ function BrowserView({
               setAnchorBox({ rect: event.rect, viewport: event.viewport });
               return;
             case "annotator-pin-click":
-              setSelectedId(event.annotationId);
-              setPanelOpen(true);
+              actionsRef.current.openDetail(event.annotationId, false);
               return;
             case "annotator-pins":
               setMissing({ url: event.url, ids: new Set(event.missing) });
               return;
-            case "annotator-exit":
-              setAnnotating(false);
+            case "annotator-escape":
+              actionsRef.current.onAnnotatorEscape();
+              return;
+            case "annotator-outside-click":
+              actionsRef.current.clickedOutsideCard();
               return;
             case "annotator-status":
               setAnnotatorAvailable(event.available);
@@ -949,14 +1098,28 @@ function BrowserView({
     }
   }
 
-  // ⌘L and ⌥⌘I while the caret is in the tab's own chrome (inside the page, main forwards them).
+  // ⌘L, ⌥⌘I and ⌘⇧D while the caret is in the tab's own chrome (inside the page, main forwards them).
   function onViewKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Escape" && annotating && draft === null && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      setAnnotating(false);
-      return;
+    if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+      // A card handles Esc itself while the caret is in it.
+      const inCard = event.target instanceof Node && cardRef.current?.contains(event.target);
+      if (cardOpen && !inCard) {
+        event.preventDefault();
+        closeCard();
+        return;
+      }
+      if (!cardOpen && annotating) {
+        event.preventDefault();
+        setAnnotating(false);
+        return;
+      }
     }
     if (!event.metaKey || event.ctrlKey) return;
+    if (event.code === "KeyD" && event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      toggleAnnotating();
+      return;
+    }
     if (event.code === "KeyL" && !event.altKey && !event.shiftKey) {
       event.preventDefault();
       focusAddress();
@@ -975,10 +1138,17 @@ function BrowserView({
 
   return (
     <div
+      ref={rootRef}
       className={cn("absolute isolate flex flex-col bg-terminal", visible ? "pointer-events-auto" : "invisible")}
       style={entry.frame}
       aria-hidden={!visible}
-      onPointerDownCapture={() => onPointerFocus(tabId)}
+      onPointerDownCapture={(event) => {
+        onPointerFocus(tabId);
+        // A press in the tab's own chrome while a card is open counts as a click elsewhere (clicks in
+        // the page arrive from the page script). Menus and tooltips are popovers: not elsewhere.
+        const target = event.target instanceof Element ? event.target : null;
+        if (cardOpen && target && !cardRef.current?.contains(target) && !target.closest("[popover]")) clickedOutsideCard();
+      }}
       onKeyDownCapture={onViewKeyDown}
     >
       {/* Toolbar: ← → ⟳, the address bar with ☆ and suggestions, Console, ⋯ (Cursor 3.20's layout). */}
@@ -1006,7 +1176,7 @@ function BrowserView({
             aria-label="地址栏"
             spellCheck={false}
             autoComplete="off"
-            className="h-6 w-full rounded-md bg-muted/60 px-2.5 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
+            className="h-6 w-full rounded-md bg-muted/60 px-2.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
             onFocus={(event) => {
               setAddressText(displayUrl(url));
               setEditing(true);
@@ -1034,7 +1204,7 @@ function BrowserView({
                   role="option"
                   aria-selected={index === highlight}
                   className={cn(
-                    "flex w-full min-w-0 items-center gap-2 px-2.5 py-1 text-left text-xs",
+                    "flex w-full min-w-0 items-center gap-2 px-2.5 py-1 text-left text-sm",
                     index === highlight ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/60",
                   )}
                   // Keep the caret in the address bar: a blur would close the list before the click lands.
@@ -1053,11 +1223,13 @@ function BrowserView({
             </div>
           ) : null}
         </div>
-        <AnnotateToggle
+        <AnnotateButton
           active={annotating && annotateDisabledReason === null}
-          count={pendingCount(annotationSummary, annotations)}
+          count={annotationCount(annotationSummary, annotations)}
           disabledReason={guestId === null ? "打开网页后才能批注" : annotateDisabledReason}
-          onToggle={toggleAnnotating}
+          panelOpen={panelOpen}
+          onToggleMode={toggleAnnotating}
+          onTogglePanel={() => setPanelOpen((open) => !open)}
         />
         <ToolbarButton label="控制台 ⌥⌘I" pressed={devtoolsOpen} disabled={guestId === null} onClick={toggleDevTools}>
           <SquareCode className="size-3.5" />
@@ -1083,7 +1255,6 @@ function BrowserView({
           <DropdownMenuItem icon={<Crop className="size-3.5" />} label="框选截图" isDisabled={!url || guestId === null} onClick={() => void startRegionCapture()} />
           <DropdownMenuDivider />
           <DropdownMenuItem icon={<Copy className="size-3.5" />} label="复制当前网址" isDisabled={!url} onClick={copyUrl} />
-          <DropdownMenuItem icon={<MessageSquareText className="size-3.5" />} label={panelOpen ? "隐藏批注列表" : "显示批注列表"} onClick={() => setPanelOpen((open) => !open)} />
           <DropdownMenuItem
             icon={<ExternalLink className="size-3.5" />}
             label="在系统浏览器中打开"
@@ -1112,7 +1283,7 @@ function BrowserView({
               <button
                 type="button"
                 aria-label="恢复 100%"
-                className="min-w-12 rounded-md px-1 text-center text-xs tabular-nums text-foreground hover:bg-accent"
+                className="min-w-12 rounded-md px-1 text-center text-sm tabular-nums text-foreground hover:bg-accent"
                 onClick={() => zoomCommand("zoom-reset")}
               >
                 {zoomPercent}%
@@ -1200,28 +1371,51 @@ function BrowserView({
                 }}
               />
             ) : null}
-            <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md border border-border bg-background/95 px-2.5 py-1 text-xs text-muted-foreground shadow">
+            <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md border border-border bg-background/95 px-2.5 py-1 text-sm text-muted-foreground shadow">
               拖动框选区域，截图会复制到剪贴板 · Esc 取消
             </div>
           </div>
         ) : null}
 
-        {annotating && draft === null && annotateDisabledReason === null ? (
-          <div className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-md border border-border bg-background/95 px-2.5 py-1 text-xs text-muted-foreground shadow">
-            点击元素添加批注 · Esc 退出批注模式
-          </div>
-        ) : null}
+        {annotatorState.mode ? <AnnotationHint /> : null}
 
         {draft ? (
           <AnnotationCard
+            key={draft.key}
+            cardRef={cardRef}
             draft={draft}
-            style={cardStyle()}
+            anchor={cardAnchor}
+            area={pageSize}
+            shake={shake}
             readOnly={annotationsReadOnly}
-            imageUrl={(annotationId, imageId) => annotationsModel.imageUrl(workspaceId, annotationId, imageId)}
+            imageUrl={annotationImageUrl}
             onChange={(patch) => setDraft((current) => (current ? { ...current, ...patch } : current))}
             onAddImages={(blobs) => void addDraftImages(blobs)}
             onSave={() => void saveDraft()}
-            onCancel={cancelDraft}
+            onClose={closeCard}
+          />
+        ) : detailAnnotation ? (
+          <AnnotationDetailCard
+            key={detailAnnotation.annotationId}
+            cardRef={cardRef}
+            annotation={detailAnnotation}
+            title={annotationTitle(detailAnnotation.targets, detailAnnotation.region !== undefined)}
+            anchor={cardAnchor}
+            area={pageSize}
+            shake={shake}
+            missing={pageMissing.has(detailAnnotation.annotationId)}
+            readOnly={annotationsReadOnly}
+            imageUrl={annotationImageUrl}
+            onDirtyChange={setDetailDirty}
+            onEdit={() => editAnnotation(detailAnnotation)}
+            onDelete={() => void removeAnnotation(detailAnnotation, false)}
+            onConfirm={() => void removeAnnotation(detailAnnotation, true)}
+            onReopen={async (comment) => {
+              const ok = await reopenAnnotation(detailAnnotation, comment);
+              if (ok) closeCard();
+              return ok;
+            }}
+            onClose={closeCard}
           />
         ) : null}
       </div>
@@ -1232,19 +1426,20 @@ function BrowserView({
           currentUrl={isWebUrl(url) ? url : ""}
           missing={pageMissing}
           notice={annotationNotice}
-          selectedId={selectedId}
+          selectedId={detailAnnotation?.annotationId ?? draft?.annotationId ?? null}
           agents={agentTerminals(tasks, sessionAgents, workspaceId)}
-          imageUrl={(annotationId, imageId) => annotationsModel.imageUrl(workspaceId, annotationId, imageId)}
           onClose={() => {
             setPanelOpen(false);
-            setSelectedId(null);
+            setHoveredId(null);
           }}
           onRetry={() => void annotationsModel.refresh(workspaceId)}
           onSelect={selectAnnotation}
+          onHover={setHoveredId}
           onEdit={editAnnotation}
-          onConfirm={deleteAnnotation}
+          onDelete={(annotation) => void removeAnnotation(annotation, false)}
+          onConfirm={(annotation) => void removeAnnotation(annotation, true)}
           onReopen={reopenAnnotation}
-          onClearResolved={clearResolved}
+          onClearResolved={() => void clearResolved()}
           onCopyMarkdown={copyAnnotationsMarkdown}
           onHandOff={(taskId) => void handOff(taskId)}
         />
@@ -1297,7 +1492,7 @@ function NewTabPage({
         <div className="flex max-w-sm flex-col items-center text-center">
           <Globe className="size-6 text-muted-foreground/50" strokeWidth={1.5} />
           <p className="mt-3 text-sm text-muted-foreground">输入网址、端口号或搜索内容</p>
-          {remoteNote ? <p className="mt-1 text-xs text-muted-foreground/70">{remoteNote}</p> : null}
+          {remoteNote ? <p className="mt-1 text-sm text-muted-foreground/70">{remoteNote}</p> : null}
         </div>
       </div>
     );
@@ -1332,7 +1527,7 @@ function NewTabPage({
             ))}
           </NewTabSection>
         ) : null}
-        {remoteNote ? <p className="px-2 text-xs text-muted-foreground/70">{remoteNote}</p> : null}
+        {remoteNote ? <p className="px-2 text-sm text-muted-foreground/70">{remoteNote}</p> : null}
       </div>
     </div>
   );
@@ -1341,7 +1536,7 @@ function NewTabPage({
 function NewTabSection({ label, children }: { label: string; children: ReactNode }) {
   return (
     <section className="flex flex-col">
-      <h3 className="mb-1 px-2 text-2xs font-medium text-muted-foreground">{label}</h3>
+      <h3 className="mb-1 px-2 text-sm font-medium text-muted-foreground">{label}</h3>
       {children}
     </section>
   );
@@ -1356,7 +1551,7 @@ function NewTabRow({ icon, primary, secondary, onClick }: { icon: ReactNode; pri
     >
       <span className="flex shrink-0 text-muted-foreground transition-colors group-hover:text-foreground">{icon}</span>
       <span className="min-w-0 truncate text-sm text-foreground">{primary}</span>
-      {secondary ? <span className="ml-auto min-w-0 max-w-[55%] shrink-0 truncate pl-3 text-xs text-muted-foreground">{secondary}</span> : null}
+      {secondary ? <span className="ml-auto min-w-0 max-w-[55%] shrink-0 truncate pl-3 text-sm text-muted-foreground">{secondary}</span> : null}
     </button>
   );
 }
@@ -1414,7 +1609,7 @@ function FailurePage({
         <h2 className="text-base font-medium text-foreground">{heading}</h2>
         <p className="mt-1.5 text-sm leading-5 text-muted-foreground">{body}</p>
         {failure.kind === "certificate" && failure.certificate ? (
-          <dl className="mt-3 grid w-full grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-border px-3 py-2 text-left text-2xs text-muted-foreground">
+          <dl className="mt-3 grid w-full grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-border px-3 py-2 text-left text-sm text-muted-foreground">
             <dt>颁发给</dt>
             <dd className="truncate text-foreground">{failure.certificate.subject || "—"}</dd>
             <dt>颁发者</dt>
@@ -1423,7 +1618,7 @@ function FailurePage({
             <dd className="break-all font-mono text-foreground">{failure.certificate.fingerprint}</dd>
           </dl>
         ) : null}
-        <p className="mt-2 max-w-full truncate font-mono text-2xs text-muted-foreground">{failure.url}</p>
+        <p className="mt-2 max-w-full truncate font-mono text-sm text-muted-foreground">{failure.url}</p>
         <div className="mt-5 flex items-center gap-2">
           {failure.kind === "certificate" ? (
             <Button

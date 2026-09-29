@@ -1,11 +1,13 @@
 import type { NativeImage, WebContents } from "electron";
 
-import type { DesktopAnnotatorState, DesktopBrowserEvent } from "../shared/desktop-bridge";
+import type { DesktopAnnotatorBox, DesktopAnnotatorSource, DesktopAnnotatorState, DesktopAnnotatorViewport, DesktopBrowserEvent } from "../shared/desktop-bridge";
 import {
   annotatorStateNeedsPage,
+  clipToViewport,
   elementCropFraction,
   parsePageMessage,
   sanitizeSourceIdentity,
+  SCREENSHOT_PADDING,
   type PageMessage,
 } from "./browser-annotator-policy";
 import { ANNOTATOR_BINDING, ANNOTATOR_PAGE_SCRIPT, ANNOTATOR_WORLD, SOURCE_IDENTITY_READER } from "./browser-annotator-page";
@@ -19,11 +21,13 @@ import { cropRectInPixels } from "./browser-policy";
  *   `Page.addScriptToEvaluateOnNewDocument` (so it survives navigations) and run into the current
  *   document at attach. Its only channel to main is a `Runtime.addBinding` binding exposed to
  *   contexts of that world's name — page scripts see neither.
- * - Framework source identity is read by main in the page's **main** world, on the node the
+ * - Framework source identity is read by main in the page's **main** world, on each node the
  *   isolated world picked (`DOM.describeNode` → `DOM.resolveNode` → `Runtime.callFunctionOn`), so no
- *   request/response handshake is ever exposed to page scripts.
- * - The element screenshot is the guest's `capturePage` cropped with `cropRectInPixels`, the same
- *   path as 框选截图 (device pixel ratio and zoom handled there).
+ *   request/response handshake is ever exposed to page scripts. All elements of one pick share one
+ *   time budget.
+ * - The screenshot — of the picked elements' union, or of a dragged region, clipped to the
+ *   viewport — is the guest's `capturePage` cropped with `cropRectInPixels`, the same path as
+ *   框选截图 (device pixel ratio and zoom handled there).
  * - Only the top-level frame is instrumented; the guest keeps no preload.
  *
  * Lifetimes follow the guest (its webContents id), never the tab: a re-created guest is a new
@@ -34,7 +38,8 @@ import { cropRectInPixels } from "./browser-policy";
  */
 
 const COMMAND_TIMEOUT_MS = 3000;
-const SOURCE_TIMEOUT_MS = 1500;
+/** One budget for reading the source identity of every element of a pick. */
+const SOURCE_BUDGET_MS = 1500;
 const CAPTURE_TIMEOUT_MS = 2500;
 const REATTACH_DELAY_MS = 600;
 const REATTACH_LIMIT = 5;
@@ -92,7 +97,7 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-const EMPTY_STATE: DesktopAnnotatorState = { mode: false, pins: [], anchor: null };
+const EMPTY_STATE: DesktopAnnotatorState = { mode: false, capture: false, pins: [], anchor: null, outlined: [], palette: null };
 
 export function createBrowserAnnotator(options: {
   send: (event: DesktopBrowserEvent) => void;
@@ -328,17 +333,22 @@ export function createBrowserAnnotator(options: {
       case "pins":
         options.send({ kind: "annotator-pins", guestId, url: message.url, missing: message.missing });
         return;
-      case "exit":
-        options.send({ kind: "annotator-exit", guestId });
+      case "escape":
+        options.send({ kind: "annotator-escape", guestId });
+        return;
+      case "outside-click":
+        options.send({ kind: "annotator-outside-click", guestId });
         return;
       case "pick": {
-        // The page hid its overlays for this frame; capture first, then let it show them again.
-        const screenshot = await withTimeout(captureElement(entry, message), CAPTURE_TIMEOUT_MS, "capture").catch((error: unknown) => {
+        // The page hid its overlays for this frame; capture first, then let it show them again. A
+        // dragged region is captured exactly; elements get a little padding.
+        const padding = message.region ? 0 : SCREENSHOT_PADDING;
+        const screenshot = await withTimeout(captureRect(entry, message.rect, message.viewport, padding), CAPTURE_TIMEOUT_MS, "capture").catch((error: unknown) => {
           options.log("浏览器批注：元素截图失败", String(error));
           return null;
         });
         void evaluateInWorld(entry, "globalThis.__cofluxAnnotatorApi && globalThis.__cofluxAnnotatorApi.show()").catch(() => undefined);
-        const source = await withTimeout(readSource(entry, message.token), SOURCE_TIMEOUT_MS, "source").catch(() => null);
+        const sources = await readSources(entry, message.token, message.elements.length);
         options.send({
           kind: "annotator-pick",
           guestId,
@@ -348,8 +358,8 @@ export function createBrowserAnnotator(options: {
             title: message.title,
             rect: message.rect,
             viewport: message.viewport,
-            element: message.element,
-            source,
+            targets: message.elements.map((element, index) => ({ element, source: sources[index] ?? null })),
+            region: message.region,
             screenshot,
           },
         });
@@ -358,8 +368,10 @@ export function createBrowserAnnotator(options: {
     }
   }
 
-  async function captureElement(entry: Instrument, pick: Extract<PageMessage, { type: "pick" }>): Promise<string | null> {
-    const fraction = elementCropFraction(pick.rect, pick.viewport);
+  async function captureRect(entry: Instrument, rect: DesktopAnnotatorBox, viewport: DesktopAnnotatorViewport, padding: number): Promise<string | null> {
+    // Only what is on screen can be captured: a union of distant elements is cut to the viewport.
+    const visible = clipToViewport(rect, viewport);
+    const fraction = visible ? elementCropFraction(visible, viewport, padding) : null;
     if (!fraction) return null;
     const image = await entry.contents.capturePage();
     if (image.isEmpty()) return null;
@@ -372,13 +384,28 @@ export function createBrowserAnnotator(options: {
     return `data:image/jpeg;base64,${cropped.toJPEG(85).toString("base64")}`;
   }
 
-  async function readSource(entry: Instrument, token: string) {
+  /** Every picked element's source identity within one shared budget; one that misses it is null. */
+  async function readSources(entry: Instrument, token: string, count: number): Promise<(DesktopAnnotatorSource | null)[]> {
+    const results: (DesktopAnnotatorSource | null)[] = Array.from({ length: count }, () => null);
+    const reads = results.map((_, index) =>
+      readSource(entry, token, index).then(
+        (source) => {
+          results[index] = source;
+        },
+        () => undefined,
+      ),
+    );
+    await withTimeout(Promise.all(reads), SOURCE_BUDGET_MS, "source").catch(() => undefined);
+    return [...results];
+  }
+
+  async function readSource(entry: Instrument, token: string, index: number): Promise<DesktopAnnotatorSource | null> {
     const mainContext = contextOf(entry, false);
     const worldContext = contextOf(entry, true);
     if (mainContext === null || worldContext === null) return null;
     const handle = record(
       await command(entry, "Runtime.evaluate", {
-        expression: `globalThis.__cofluxAnnotatorApi && globalThis.__cofluxAnnotatorApi.pickedElement(${JSON.stringify(token)})`,
+        expression: `globalThis.__cofluxAnnotatorApi && globalThis.__cofluxAnnotatorApi.pickedElement(${JSON.stringify(token)}, ${index})`,
         contextId: worldContext,
         silent: true,
       }),
