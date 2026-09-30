@@ -201,6 +201,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // shortcuts exactly as it does for the paper — the terminal is covered and Esc must collapse
   // the card, never reach the shell.
   const [executorExpanded, setExecutorExpanded] = useState(false);
+  // Executor cards sit in the pane's top-right corner (plan 20260930-executor-pip-motion), where the
+  // paper's toggle button lives: the button yields to them while the paper is closed.
+  const [executorTopRight, setExecutorTopRight] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState(NO_SEARCH_RESULTS);
   // 右键菜单打开那一刻的终端快照：菜单项的可用性要按当下的选区算，而组件不会因为选区变化重渲染。
@@ -1008,7 +1011,9 @@ export function TerminalPane(props: TerminalPaneProps) {
         <div ref={hostRef} data-terminal-host className={`absolute inset-0${isUploading ? " cursor-progress [&_*]:cursor-progress" : ""}`} />
       </ContextMenu>
       {searchOpen ? (
-        <div className="absolute right-4 top-2 z-20 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
+        // z-35: above the executor deck (z-30) that now starts in this same corner — a control the
+        // user just opened wins over an ambient card — and still below the paper (z-40).
+        <div className="absolute right-4 top-2 z-35 flex items-center gap-1 rounded-md border border-border bg-background/95 px-1.5 py-1 shadow-lg backdrop-blur">
           <input
             ref={searchInputRef}
             value={searchTerm}
@@ -1067,12 +1072,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           exec={props.execInWorkspace}
           open={paperOpen}
           onOpenChange={setPaperOpen}
-          buttonHidden={searchOpen}
+          buttonHidden={searchOpen || executorTopRight}
           escapeEnabled={props.focused}
           onRestoreFocus={() => terminalRef.current?.focus()}
         />
       ) : null}
-      {props.secretCards}
+      {/* Secret requests sit above the executor deck (z-35 over its z-30): a request waiting on the
+          user's answer is never covered by a card thrown into its corner. */}
+      <div className="pointer-events-none absolute inset-0 z-35">{props.secretCards}</div>
       {/* Executor cards (plan 20260929-executor-pip): always mounted, so a card whose run ended while
           expanded can keep its panel until the user closes it. Renders nothing without runs. */}
       {props.executorRuns && props.executorClient ? (
@@ -1082,6 +1089,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           client={props.executorClient}
           focused={props.focused}
           onExpandedChange={setExecutorExpanded}
+          onTopRightChange={setExecutorTopRight}
           onRestoreFocus={() => terminalRef.current?.focus()}
         />
       ) : null}
