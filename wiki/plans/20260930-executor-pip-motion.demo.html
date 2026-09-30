@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Executor PiP 手感</title>
+<style>
+  :root {
+    --bg: #0e0e10;
+    --window: #161618;
+    --tabbar: #1b1b1e;
+    --term: #111113;
+    --term-fg: #a9a9b3;
+    --card: rgb(33, 33, 37);
+    --card-a: rgba(33, 33, 37, 0.94);
+    --border: rgba(255, 255, 255, 0.08);
+    --fg: #ececf1;
+    --fg-2: rgba(236, 236, 241, 0.82);
+    --muted: #8a8a94;
+    --accent: rgba(255, 255, 255, 0.07);
+    --warning: #e0a44a;
+    --destructive: #e5605a;
+    --active: #6aa6ff;
+    --panel: #151517;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
+  .app { display: grid; grid-template-columns: 1fr 320px; height: 100%; }
+  .stage { padding: 24px; overflow: auto; }
+  .window {
+    width: 900px; height: 600px; min-width: 460px; min-height: 320px;
+    resize: both; overflow: hidden;
+    display: flex; flex-direction: column;
+    background: var(--window); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.45);
+  }
+  .tabbar { height: 36px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--tabbar); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  .tabbar .dot { width: 10px; height: 10px; border-radius: 50%; background: #3a3a3f; }
+  .tabbar .tab { margin-left: 12px; padding: 3px 10px; border-radius: 6px; background: var(--accent); color: var(--fg); }
+  .pane { position: relative; flex: 1; overflow: hidden; background: var(--term); touch-action: none; }
+  .term { margin: 0; padding: 12px 16px; font: 12.5px/1.55 var(--mono); color: var(--term-fg); white-space: pre; user-select: none; }
+  .term b { color: #7fd48f; font-weight: 500; }
+  .paper-btn {
+    position: absolute; right: 16px; top: 8px; z-index: 5000;
+    width: 24px; height: 24px; display: grid; place-items: center;
+    border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer;
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .paper-btn:hover { background: var(--accent); color: var(--fg); }
+  .paper-btn.hidden { opacity: 0; transform: scale(.85); pointer-events: none; }
+
+  /* ------------------------------------------------------------ card */
+  .card {
+    --pad: 12px;          /* left/right padding */
+    --glyph: 12px;        /* status glyph column */
+    --gutter: 8px;        /* glyph → title */
+    position: absolute; left: 0; top: 0;
+    width: 320px; will-change: transform, opacity;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--card-a); color: var(--fg);
+    backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
+    cursor: grab; user-select: none;
+  }
+  .card.dragging { cursor: grabbing; }
+  .card .content { position: relative; }
+
+  .card .head {
+    position: relative; height: 36px; padding: 0 var(--pad);
+    display: grid; grid-template-columns: var(--glyph) minmax(0, 1fr) auto; column-gap: var(--gutter); align-items: center;
+  }
+  .card .glyph { display: flex; justify-content: center; align-items: center; height: 16px; }
+  .card .title { font-size: 13px; line-height: 16px; font-weight: 550; letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta { display: flex; align-items: center; gap: 8px; transition: opacity .14s ease; }
+  .card .badge { display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 4px; background: var(--accent); color: var(--muted); font-size: 10px; font-weight: 500; line-height: 1; }
+  .card .time { min-width: 28px; text-align: right; font-size: 11px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Hover controls take the meta's place instead of reserving space for themselves. */
+  .card .ctrl {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    display: flex; align-items: center; gap: 2px; padding-left: 20px;
+    background: linear-gradient(to right, transparent, var(--card) 16px);
+    opacity: 0; pointer-events: none; transition: opacity .14s ease;
+  }
+  /* Hover is judged on the whole deck (JS sets .deck-hover on the pane), so switching cards under
+     a still pointer never drops and re-gains it. */
+  .pane.deck-hover .card:not(.back) .ctrl { opacity: 1; pointer-events: auto; }
+  .pane.deck-hover .card:not(.back) .meta { opacity: 0; }
+  .card .ctrl button { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+  .card .ctrl button:hover { background: var(--accent); color: var(--fg); }
+  .card .ctrl button.stop:hover { color: var(--destructive); }
+  .card .count { display: none; padding: 0 4px; font-size: 11px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .card.multi .count { display: inline-block; }
+
+  /* The log uses the card's full width. It flows top-down; once full, the newest line stays at the
+     bottom and older ones scroll out of the top edge under a fade. */
+  .card .body {
+    height: 72px; margin: 0 0 10px; padding: 0 var(--pad);
+    overflow: hidden; display: flex; flex-direction: column; justify-content: flex-start;
+  }
+  .card .body.clipped { justify-content: flex-end; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px); mask-image: linear-gradient(to bottom, transparent 0, #000 26px); }
+  .card .body .lines { will-change: transform; }
+  .card .body p { margin: 0; height: 18px; line-height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .card .body .cmd { font: 11.5px/18px var(--mono); color: var(--fg-2); }
+  .card .body .prose { font-size: 12px; color: var(--muted); }
+
+  .dots { display: inline-flex; gap: 2px; }
+  .dots i { width: 3px; height: 3px; border-radius: 50%; background: var(--active); animation: tw 1.2s infinite ease-in-out; }
+  .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes tw { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+
+  /* The switch arrows and the edge fades belong to the deck, not to a card: one overlay that sits
+     exactly over the front slot, so they stay put while cards slide underneath. Arrows sit on the
+     log's vertical centre and stay quiet until the pointer is on them. */
+  .deck-ui { position: absolute; left: 0; top: 0; width: 320px; z-index: 1100; pointer-events: none; transform-origin: 50% 50%; display: none; }
+  .deck-ui.multi { display: block; }
+  .deck-ui::before, .deck-ui::after {
+    content: ""; position: absolute; top: 37px; height: 72px; width: 30px;
+    opacity: 0; transition: opacity .15s ease;
+  }
+  .deck-ui::before { left: 1px; border-radius: 0; background: linear-gradient(to right, var(--card) 20%, transparent); }
+  .deck-ui::after { right: 1px; background: linear-gradient(to left, var(--card) 20%, transparent); }
+  .pane.deck-hover .deck-ui::before, .pane.deck-hover .deck-ui::after { opacity: 1; }
+  .deck-ui .side {
+    position: absolute; top: calc(37px + 36px); z-index: 1;
+    width: 20px; height: 20px; display: grid; place-items: center; padding: 0;
+    border: 0; border-radius: 50%;
+    background: rgba(255, 255, 255, .06); color: var(--muted);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    cursor: pointer; opacity: 0; pointer-events: none;
+    transition: opacity .15s ease, transform .15s ease, background .12s ease, color .12s ease;
+  }
+  .deck-ui .side.prev { left: 6px; transform: translate(-2px, -50%); }
+  .deck-ui .side.next { right: 6px; transform: translate(2px, -50%); }
+  .pane.deck-hover .deck-ui .side { opacity: 1; pointer-events: auto; transform: translate(0, -50%); }
+  .deck-ui .side:hover { background: rgba(255, 255, 255, .14); color: var(--fg); }
+  .pane.deck-hover .deck-ui .side:active { transform: translate(0, -50%) scale(.88); }
+  .pane.dragging-deck .deck-ui::before, .pane.dragging-deck .deck-ui::after, .pane.dragging-deck .deck-ui .side { opacity: 0; pointer-events: none; }
+  /* Cards behind the front one are only a surface: no controls, click brings one forward. */
+  .card.back .ctrl { display: none; }
+  .card.back { cursor: pointer; }
+
+  .ghost { position: absolute; left: 0; top: 0; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--warning); z-index: 6000; pointer-events: none; opacity: 0; transition: opacity .3s; }
+  .ghost.on { opacity: .9; }
+  .quad { position: absolute; inset: 0; pointer-events: none; z-index: 5; opacity: 0; transition: opacity .2s; }
+  .quad.on { opacity: 1; }
+  .quad::before, .quad::after { content: ""; position: absolute; background: rgba(224,164,74,.25); }
+  .quad::before { left: 50%; top: 0; bottom: 0; width: 1px; }
+  .quad::after { top: 50%; left: 0; right: 0; height: 1px; }
+  .toast { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 7000; padding: 6px 12px; border-radius: 8px; background: #2a2a2f; border: 1px solid var(--border); font-size: 12px; color: var(--fg); opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+
+  /* ------------------------------------------------------------ panel */
+  .panel { border-left: 1px solid var(--border); background: var(--panel); padding: 16px; overflow: auto; }
+  .panel h2 { margin: 0 0 4px; font-size: 14px; }
+  .panel .hint { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+  .panel h3 { margin: 18px 0 8px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .04em; }
+  .row { margin-bottom: 10px; }
+  .row label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+  .row label span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .row input[type=range] { width: 100%; accent-color: var(--active); }
+  .row .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 6px; cursor: pointer; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .btns button { padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--accent); color: var(--fg); font-size: 12px; cursor: pointer; }
+  .btns button:hover { background: rgba(255,255,255,.12); }
+  pre.params { margin: 8px 0 0; padding: 8px; border-radius: 6px; background: #0f0f11; border: 1px solid var(--border); font: 11px/1.5 var(--mono); color: var(--term-fg); white-space: pre-wrap; }
+
+  /* Same scrollbar as the desktop app (apps/desktop/src/renderer/index.css), which the sidebar and
+     every other overflow container there inherit. */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #333333; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #4a4a4a; background-clip: padding-box; }
+
+  /* ------------------------------------------------------------ expanded panel */
+  .scrim { position: absolute; inset: 0; z-index: 1900; background: #000; opacity: 0; pointer-events: none; }
+  .pane.expanded .scrim { pointer-events: auto; }
+  .pane.expanded .deck-ui { display: none; }
+  .xp {
+    position: absolute; left: 0; top: 0; z-index: 2000; display: none; overflow: hidden;
+    border: 1px solid var(--border); background: rgb(30, 30, 34); color: var(--fg);
+    will-change: transform, width, height;
+  }
+  .xp.on { display: block; }
+  .xp-head {
+    position: absolute; left: 0; right: 0; top: 0; z-index: 2; height: 36px; padding: 0 8px 0 12px;
+    display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px; align-items: center;
+    border-bottom: 1px solid transparent; background: rgb(30, 30, 34);
+  }
+  .xp-head .glyph { display: flex; justify-content: center; align-items: center; height: 16px; }
+  .xp-title { font-size: 13px; line-height: 16px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .xp-right { display: flex; align-items: center; gap: 8px; }
+  .xp-right .badge { display: inline-flex; align-items: center; height: 16px; padding: 0 5px; border-radius: 4px; background: var(--accent); color: var(--muted); font-size: 10px; font-weight: 500; }
+  .xp-state, .xp-time { font-size: 11px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+  .xp-time { min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; }
+  .xp-right button { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+  .xp-right button:hover { background: var(--accent); color: var(--fg); }
+  .xp-right button.xp-stop:hover { color: var(--destructive); }
+  .xp-right button:disabled { opacity: .35; pointer-events: none; }
+  .xp-check { color: #58c27d; font-size: 12px; line-height: 1; }
+  /* The card's own log, shown for the first moments of the morph so the content doesn't blink. */
+  .xp-mini { position: absolute; left: 0; top: 36px; width: 318px; height: 72px; padding: 0 12px; overflow: hidden; font-size: 12px; line-height: 18px; }
+  .xp-mini p { margin: 0; height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .xp-mini .cmd { font: 11.5px/18px var(--mono); color: var(--fg-2); }
+  .xp-mini .prose { color: var(--muted); }
+  /* The full transcript is laid out at the panel's final size from the start, so it never reflows
+     while the panel grows; it only fades in once there is room for it. */
+  .xp-body { position: absolute; left: 0; top: 37px; overflow-y: auto; user-select: text; cursor: text; }
+  .xp-inner { max-width: 760px; margin: 0 auto; padding: 20px 32px 56px; font-size: 14px; line-height: 1.65; }
+  .xp-prompt { display: flex; justify-content: flex-end; margin: 0 0 20px; }
+  .xp-bubble { max-width: 80%; padding: 8px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.05); color: var(--fg); }
+  .xp-say { margin: 0 0 12px; color: var(--fg-2); }
+  .xp-tool { display: flex; gap: 6px; align-items: flex-start; margin: 0 -6px 10px; padding: 2px 6px; border-radius: 6px; font: 12.5px/1.6 var(--mono); color: var(--muted); cursor: pointer; }
+  .xp-tool:hover { background: rgba(255,255,255,.05); color: var(--fg-2); }
+  .xp-tool .chev { flex: none; width: 10px; transition: transform .15s ease; }
+  .xp-tool.open .chev { transform: rotate(90deg); }
+  .xp-out { margin: -4px 0 14px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: #141416; font: 12px/1.5 var(--mono); color: var(--term-fg); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="stage">
+    <div class="window" id="window">
+      <div class="tabbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="tab">claude · coflux</span></div>
+      <div class="pane" id="pane">
+        <pre class="term" id="term"></pre>
+        <button class="paper-btn" id="paperBtn" title="会话纸面（占位）">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        </button>
+        <div class="quad" id="quad"></div>
+        <div class="ghost" id="ghost"></div>
+        <div class="toast" id="toast"></div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="panel">
+    <h2>Executor PiP 手感</h2>
+    <p class="hint">拖动卡片、往角落甩；窗口右下角可拖动改尺寸。拖动中途可以再抓住正在飞的卡片。</p>
+
+    <h3>归位弹簧</h3>
+    <div class="row"><label><span>response（周期，秒）</span><span id="v-response"></span></label><input type="range" id="response" min="0.15" max="1.0" step="0.01" /><div class="sub">越小越快、越硬</div></div>
+    <div class="row"><label><span>dampingRatio（阻尼比）</span><span id="v-damping"></span></label><input type="range" id="damping" min="0.3" max="1.2" step="0.01" /><div class="sub">&lt;1 有回弹，=1 刚好不过冲</div></div>
+
+    <h3>甩动</h3>
+    <div class="row"><label><span>decelerationRate（投射）</span><span id="v-decel"></span></label><input type="range" id="decel" min="0.98" max="0.999" step="0.001" /><div class="sub">越大越容易被甩到对角；落点 = 位置 + 速度 × <span id="v-proj"></span>s</div></div>
+    <div class="row"><label><span>速度取样窗口（ms）</span><span id="v-velWindow"></span></label><input type="range" id="velWindow" min="30" max="200" step="5" /></div>
+
+    <h3>拿起 / 边缘</h3>
+    <div class="row"><label><span>拿起时放大</span><span id="v-grabScale"></span></label><input type="range" id="grabScale" min="1" max="1.08" step="0.005" /></div>
+    <label class="check"><input type="checkbox" id="rubber" /> 拖出 pane 边缘时橡皮筋阻力</label>
+
+    <h3>出现 / 消失</h3>
+    <div class="row"><label><span>response</span><span id="v-enterResponse"></span></label><input type="range" id="enterResponse" min="0.15" max="0.8" step="0.01" /></div>
+    <div class="row"><label><span>dampingRatio</span><span id="v-enterDamping"></span></label><input type="range" id="enterDamping" min="0.4" max="1.2" step="0.01" /></div>
+    <div class="row"><label><span>起始缩放</span><span id="v-enterFrom"></span></label><input type="range" id="enterFrom" min="0.7" max="1" step="0.01" /></div>
+
+    <h3>叠放（多个 run，左右）</h3>
+    <div class="row"><label><span>露出宽度（px/层）</span><span id="v-peek"></span></label><input type="range" id="peek" min="3" max="24" step="1" /></div>
+    <div class="row"><label><span>每层缩小</span><span id="v-scaleStep"></span></label><input type="range" id="scaleStep" min="0" max="0.12" step="0.005" /></div>
+    <div class="row"><label><span>倾斜（度/层）</span><span id="v-tilt"></span></label><input type="range" id="tilt" min="0" max="10" step="0.5" /><div class="sub">右侧顺时针、左侧逆时针，最前面一张始终摆正</div></div>
+    <div class="row"><label><span>随意感（每张随机偏转，度）</span><span id="v-jitter"></span></label><input type="range" id="jitter" min="0" max="5" step="0.5" /></div>
+    <div class="row"><label><span>背后卡片内容淡化</span><span id="v-backDim"></span></label><input type="range" id="backDim" min="0" max="1" step="0.05" /></div>
+    <div class="row"><label><span>切换 response</span><span id="v-switchResponse"></span></label><input type="range" id="switchResponse" min="0.15" max="0.8" step="0.01" /></div>
+    <div class="row"><label><span>切换 dampingRatio</span><span id="v-switchDamping"></span></label><input type="range" id="switchDamping" min="0.4" max="1.2" step="0.01" /></div>
+
+    <h3>展开 / 收起</h3>
+    <div class="row"><label><span>response</span><span id="v-expandResponse"></span></label><input type="range" id="expandResponse" min="0.2" max="0.9" step="0.01" /></div>
+    <div class="row"><label><span>dampingRatio</span><span id="v-expandDamping"></span></label><input type="range" id="expandDamping" min="0.5" max="1.2" step="0.01" /></div>
+    <div class="row"><label><span>背景压暗</span><span id="v-dim"></span></label><input type="range" id="dim" min="0" max="0.6" step="0.05" /></div>
+    <div class="row"><label><span>面板离 pane 边距（px）</span><span id="v-inset"></span></label><input type="range" id="inset" min="8" max="64" step="2" /></div>
+
+    <h3>调试</h3>
+    <label class="check"><input type="checkbox" id="slowmo" /> 慢放 0.25×</label>
+    <label class="check"><input type="checkbox" id="debug" /> 显示预测落点与象限线</label>
+
+    <h3>操作</h3>
+    <div class="btns">
+      <button id="addRun">+ 新 run</button>
+      <button id="endRun">结束一个 run</button>
+      <button id="resetParams">重置参数</button>
+      <button id="copyParams">复制参数</button>
+    </div>
+    <pre class="params" id="params"></pre>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------------------------------------------------------------- params
+  const DEFAULTS = {
+    response: 0.42, damping: 0.8,
+    decel: 0.997, velWindow: 80,
+    grabScale: 1.03, rubber: true,
+    enterResponse: 0.32, enterDamping: 0.78, enterFrom: 0.88,
+    peek: 10, scaleStep: 0.06, tilt: 3, jitter: 1.5, backDim: 0.8, switchResponse: 0.36, switchDamping: 0.86,
+    expandResponse: 0.42, expandDamping: 0.88, dim: 0.25, inset: 24,
+    slowmo: false, debug: false,
+  };
+  const KEY = "coflux-pip-demo-params-v4";
+  let P = { ...DEFAULTS };
+  try { Object.assign(P, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(P)); } catch {} };
+
+  const MARGIN = 16, CARD_W = 320;
+  const SIDE_DEPTH = 2; // peeking layers per side; deeper cards hide behind the last one
+
+  const $ = (id) => document.getElementById(id);
+  const pane = $("pane"), ghost = $("ghost"), quad = $("quad"), paperBtn = $("paperBtn"), toastEl = $("toast");
+
+  const fmt = { response: 2, damping: 2, decel: 3, velWindow: 0, grabScale: 3, enterResponse: 2, enterDamping: 2, enterFrom: 2, peek: 0, scaleStep: 3, tilt: 1, jitter: 1, backDim: 2, switchResponse: 2, switchDamping: 2, expandResponse: 2, expandDamping: 2, dim: 2, inset: 0 };
+  function bindControls() {
+    for (const k of Object.keys(fmt)) {
+      const input = $(k);
+      input.value = P[k];
+      $("v-" + k).textContent = Number(P[k]).toFixed(fmt[k]);
+    }
+    for (const k of ["rubber", "slowmo", "debug"]) $(k).checked = P[k];
+  }
+  for (const k of Object.keys(fmt)) {
+    $(k).addEventListener("input", (e) => {
+      P[k] = Number(e.target.value);
+      $("v-" + k).textContent = P[k].toFixed(fmt[k]);
+      refreshParams(); save();
+      if (stack.placed && !stack.drag) retarget();
+    });
+  }
+  for (const k of ["rubber", "slowmo", "debug"]) $(k).addEventListener("change", (e) => { P[k] = e.target.checked; refreshParams(); save(); });
+
+  function projection() { return P.decel / (1 - P.decel) / 1000; }
+  function refreshParams() {
+    $("v-proj").textContent = projection().toFixed(2);
+    const { slowmo, debug, ...rest } = P;
+    $("params").textContent = JSON.stringify(rest, null, 2);
+    quad.classList.toggle("on", P.debug);
+  }
+  $("resetParams").onclick = () => { P = { ...DEFAULTS }; save(); bindControls(); refreshParams(); retarget(); };
+  $("copyParams").onclick = async () => {
+    const { slowmo, debug, ...rest } = P;
+    try { await navigator.clipboard.writeText(JSON.stringify(rest)); toast("参数已复制"); } catch { toast("复制失败，手动选中下面的 JSON"); }
+  };
+
+  // ---------------------------------------------------------------- spring
+  // Damped harmonic oscillator, unit mass, parameterised like SwiftUI (response, dampingFraction).
+  class Spring {
+    constructor(value, eps) { this.x = value; this.v = 0; this.target = value; this.eps = eps; }
+    step(dt, response, ratio) {
+      const k = Math.pow((2 * Math.PI) / response, 2);
+      const c = (4 * Math.PI * ratio) / response;
+      const a = -k * (this.x - this.target) - c * this.v;
+      this.v += a * dt;
+      this.x += this.v * dt;
+    }
+    get settled() { return Math.abs(this.x - this.target) < this.eps && Math.abs(this.v) < this.eps * 10; }
+    snap() { this.x = this.target; this.v = 0; }
+  }
+
+  // ---------------------------------------------------------------- state
+  // The stack's (x, y) is the top-left of the deck's bounding box inside the pane.
+  const stack = {
+    corner: "top-right",
+    x: new Spring(0, 0.05), y: new Spring(0, 0.05),
+    scale: new Spring(1, 0.0005),
+    drag: null,
+    placed: false,
+  };
+  let cards = []; // { id, el, contentEl, bodyEl, logEl, timeEl, enter: Spring, depth: Spring, removing, h, start }
+  // Deck order: order[0] is the front card; the rest sit behind it in that order.
+  let order = [];
+  let nextId = 1;
+
+  const TITLES = ["排查 CI 里 signed-upgrade 的偶发红", "给 changes 面板补文件树排序", "把 R2 镜像的清单同步脚本改成幂等", "扫一遍 tailcat 日志里的 rejected"];
+  const LOG = [
+    ["cmd", "$ rg -n \"snapCorner\" apps/desktop"],
+    ["prose", "先看看卡片是怎么挂到 pane 上的。"],
+    ["cmd", "$ sed -n 360,420p executor-run-card.tsx"],
+    ["cmd", "$ pnpm -C apps/desktop typecheck"],
+    ["prose", "类型检查通过，接着看回放逻辑。"],
+    ["cmd", "$ git diff --stat"],
+    ["cmd", "$ node --test tests/src/contract.test.mjs"],
+    ["prose", "还剩一处需要确认的边界情况。"],
+    ["cmd", "$ rg -n --glob '!node_modules' \"executorRunsForTask|retainAfterEnd\" apps/desktop/src/renderer/components/workbench"],
+    ["prose", "retainAfterEnd 只在面板展开时保留卡片，收起状态下结束即消失，这和 plan 里的约定一致，不需要改。"],
+  ];
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  function paneSize() { return { w: pane.clientWidth, h: pane.clientHeight }; }
+  function liveCards() { return cards.filter((c) => !c.removing); }
+  function cardHeight() { return (cards[0] && cards[0].h) || 120; }
+  const isLeft = () => stack.corner.endsWith("left");
+  // Carousel deck: the front card in the middle, the next ones peeking out on its right and the
+  // previous ones on its left — the same sides the › and ‹ arrows point to.
+  // Signed position relative to the front: order[1] is +1 (right), order[n-1] is -1 (left).
+  function relOf(index, n) { return index <= n / 2 ? index : index - n; }
+  function deckSize() {
+    const n = Math.max(order.length, 1);
+    const right = Math.min(Math.floor(n / 2), SIDE_DEPTH);
+    const left = Math.min(n - 1 - Math.floor(n / 2), SIDE_DEPTH);
+    return { w: CARD_W + P.peek * (left + right), h: cardHeight(), leftExt: P.peek * left };
+  }
+  function cornerTarget(corner) {
+    const { w, h } = paneSize();
+    const deck = deckSize();
+    const left = corner.endsWith("left");
+    const top = corner.startsWith("top");
+    return { x: left ? MARGIN : w - deck.w - MARGIN, y: top ? MARGIN : h - deck.h - MARGIN };
+  }
+  function retarget() {
+    const t = cornerTarget(stack.corner);
+    stack.x.target = t.x;
+    stack.y.target = t.y;
+    const n = order.length;
+    order.forEach((id, index) => {
+      const c = cards.find((x) => x.id === id);
+      if (!c) return;
+      const target = relOf(index, n);
+      // Wrapping around (the leftmost becoming the rightmost, or back) would sweep the card across
+      // the front one; instead it re-enters from just outside its new side, fading in.
+      if (Math.abs(target - c.depth.target) > 1.5) {
+        c.depth.x = target + Math.sign(target) * 1;
+        c.depth.v = 0;
+        c.fade.x = 0;
+      }
+      c.depth.target = target;
+    });
+    refreshSwitch();
+  }
+  function refreshSwitch() {
+    const n = order.length;
+    const arrival = liveCards().map((c) => c.id);
+    // The counter shows the front card's position in arrival order.
+    const label = `${arrival.indexOf(order[0]) + 1}/${n}`;
+    for (const c of liveCards()) {
+      c.el.classList.toggle("multi", n > 1);
+      c.el.querySelector(".count").textContent = label;
+    }
+  }
+  // Next: the front card goes to the back. Previous: the back card comes to the front.
+  function cycle(step) {
+    if (order.length < 2) return;
+    if (step > 0) order.push(order.shift());
+    else order.unshift(order.pop());
+    retarget();
+  }
+  function bringToFront(id) {
+    const i = order.indexOf(id);
+    if (i <= 0) return;
+    order.splice(i, 1);
+    order.unshift(id);
+    retarget();
+  }
+  function nearestCorner(cx, cy) {
+    const { w, h } = paneSize();
+    return (cy < h / 2 ? "top" : "bottom") + "-" + (cx < w / 2 ? "left" : "right");
+  }
+
+  // ---------------------------------------------------------------- cards
+  const ICON = {
+    collapse: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>',
+    close: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    chev: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+    stop: '<svg width="10" height="10" viewBox="0 0 10 10"><rect width="10" height="10" rx="1.5" fill="currentColor"/></svg>',
+    expand: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+    prev: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
+    next: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+  };
+  const deckUi = document.createElement("div");
+  deckUi.className = "deck-ui";
+  deckUi.innerHTML = `
+    <button class="side prev" title="往左切换">${ICON.prev}</button>
+    <button class="side next" title="往右切换">${ICON.next}</button>`;
+  pane.appendChild(deckUi);
+  // Arrows move the deck the way they point: ‹ slides everything left, so the card peeking on
+  // the right comes to the front; › slides right and brings the left one forward.
+  deckUi.querySelector(".prev").addEventListener("click", () => cycle(1));
+  deckUi.querySelector(".next").addEventListener("click", () => cycle(-1));
+
+  // Deck-level hover: the pointer is anywhere over the deck's box (a little slack for the tilted
+  // corners), whichever card happens to be under it.
+  const HOVER_SLACK = 8;
+  let pointer = null;
+  pane.addEventListener("pointermove", (e) => { pointer = paneXY(e); });
+  pane.addEventListener("pointerleave", () => { pointer = null; });
+  function deckHovered() {
+    if (!pointer || liveCards().length === 0 || expand.card) return false;
+    const deck = deckSize();
+    return pointer.x >= stack.x.x - HOVER_SLACK && pointer.x <= stack.x.x + deck.w + HOVER_SLACK
+      && pointer.y >= stack.y.x - HOVER_SLACK && pointer.y <= stack.y.x + deck.h + HOVER_SLACK;
+  }
+
+  // A fixed pseudo-random value in [-1, 1] per card, so its "casual" angle never changes.
+  function wobble(id) { const x = Math.sin(id * 12.9898 + 78.233) * 43758.5453; return (x - Math.floor(x)) * 2 - 1; }
+  function makeCard() {
+    const id = nextId++;
+    const el = document.createElement("div");
+    el.className = "card";
+    el.innerHTML = `
+      <div class="content">
+        <div class="head">
+          <span class="glyph"><span class="dots"><i></i><i></i><i></i></span></span>
+          <span class="title"></span>
+          <span class="meta"><span class="badge">只读</span><span class="time">0:00</span></span>
+          <span class="ctrl">
+            <span class="count">1/1</span>
+            <button class="stop" title="停止">${ICON.stop}</button>
+            <button class="expand" title="展开">${ICON.expand}</button>
+          </span>
+        </div>
+        <div class="body"><div class="lines"></div></div>
+      </div>`;
+    el.querySelector(".title").textContent = TITLES[(id - 1) % TITLES.length];
+    pane.appendChild(el);
+    const card = {
+      id, el,
+      contentEl: el.querySelector(".content"), bodyEl: el.querySelector(".body"), logEl: el.querySelector(".lines"), timeEl: el.querySelector(".time"),
+      enter: new Spring(0, 0.001), depth: new Spring(0, 0.001), fade: Object.assign(new Spring(1, 0.001), { target: 1 }),
+      removing: false, h: el.offsetHeight, start: performance.now(), logIdx: (id * 3) % LOG.length, history: [], slot: null,
+    };
+    card.enter.target = 1;
+    for (const button of el.querySelectorAll("button")) button.addEventListener("pointerdown", (e) => e.stopPropagation());
+    el.querySelector(".stop").addEventListener("click", () => removeCard(card));
+    el.querySelector(".expand").addEventListener("click", () => openPanel(card));
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onCancel);
+    // A new run lands on top of the deck; the others step back one layer.
+    cards.push(card);
+    order.unshift(id);
+    if (!stack.placed) {
+      const t = cornerTarget(stack.corner);
+      stack.x.x = t.x;
+      stack.y.x = t.y;
+      stack.placed = true;
+    }
+    retarget();
+    return card;
+  }
+  function removeCard(card) {
+    if (!card || card.removing) return;
+    card.removing = true;
+    card.enter.target = 0;
+    order = order.filter((id) => id !== card.id);
+    retarget();
+  }
+
+  // ---------------------------------------------------------------- drag
+  function rubber(value, min, max, dim) {
+    if (!P.rubber) return value;
+    const f = (d) => (1 - 1 / ((d * 0.55) / dim + 1)) * dim;
+    if (value < min) return min - f(min - value);
+    if (value > max) return max + f(value - max);
+    return value;
+  }
+  function paneXY(e) { const r = pane.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+
+  function onDown(e) {
+    if (e.button !== 0 || stack.drag || expand.card) return;
+    const p = paneXY(e);
+    // Grab wherever the stack is right now, mid-flight included: the spring is interrupted.
+    stack.drag = { pointerId: e.pointerId, grabX: p.x - stack.x.x, grabY: p.y - stack.y.x, startX: p.x, startY: p.y, moved: false, samples: [{ t: performance.now(), x: stack.x.x, y: stack.y.x }], el: e.currentTarget };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onMove(e) {
+    const d = stack.drag;
+    if (!d || d.pointerId !== e.pointerId) return;
+    const p = paneXY(e);
+    if (!d.moved && Math.hypot(p.x - d.startX, p.y - d.startY) < 4) return;
+    if (!d.moved) { d.moved = true; stack.scale.target = P.grabScale; for (const c of cards) c.el.classList.add("dragging"); }
+    const { w, h } = paneSize();
+    const deck = deckSize();
+    const x = rubber(p.x - d.grabX, 0, w - deck.w, w);
+    const y = rubber(p.y - d.grabY, 0, h - deck.h, h);
+    stack.x.x = x; stack.y.x = y;
+    const now = performance.now();
+    d.samples.push({ t: now, x, y });
+    while (d.samples.length > 2 && now - d.samples[0].t > P.velWindow) d.samples.shift();
+    if (P.debug) showGhost(d);
+  }
+  function velocity(d) {
+    const now = performance.now();
+    const s = d.samples.filter((q) => now - q.t <= P.velWindow);
+    if (s.length < 2) return { vx: 0, vy: 0 };
+    const a = s[0], b = s[s.length - 1];
+    const dt = (b.t - a.t) / 1000;
+    if (dt <= 0) return { vx: 0, vy: 0 };
+    return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt };
+  }
+  function projected(d) {
+    const { vx, vy } = velocity(d);
+    const k = projection();
+    const deck = deckSize();
+    return { cx: stack.x.x + deck.w / 2 + vx * k, cy: stack.y.x + deck.h / 2 + vy * k, vx, vy };
+  }
+  function showGhost(d) {
+    const p = projected(d);
+    ghost.style.transform = `translate(${p.cx}px, ${p.cy}px)`;
+    ghost.classList.add("on");
+  }
+  function endDrag() {
+    stack.drag = null;
+    stack.scale.target = 1;
+    for (const c of cards) c.el.classList.remove("dragging");
+  }
+  function onUp(e) {
+    const d = stack.drag;
+    if (!d || d.pointerId !== e.pointerId) return;
+    endDrag();
+    if (!d.moved) {
+      const hit = cards.find((c) => c.el === d.el);
+      if (hit && order.indexOf(hit.id) > 0) bringToFront(hit.id);
+      else if (hit) openPanel(hit);
+      return;
+    }
+    const p = projected(d);
+    stack.corner = nearestCorner(p.cx, p.cy);
+    retarget();
+    // Hand the pointer's velocity to the spring: the card keeps moving the way it was thrown.
+    stack.x.v = p.vx;
+    stack.y.v = p.vy;
+    if (P.debug) { ghost.style.transform = `translate(${p.cx}px, ${p.cy}px)`; ghost.classList.add("on"); setTimeout(() => ghost.classList.remove("on"), 700); }
+  }
+  function onCancel(e) {
+    if (!stack.drag || stack.drag.pointerId !== e.pointerId) return;
+    endDrag();
+    retarget();
+  }
+
+  // ---------------------------------------------------------------- expanded panel
+  // Expanding morphs the card itself: one element grows from the card's slot to the panel's rect
+  // on a spring, and shrinks back into the same slot on collapse.
+  const scrim = document.createElement("div");
+  scrim.className = "scrim";
+  pane.appendChild(scrim);
+  const xp = document.createElement("div");
+  xp.className = "xp";
+  xp.innerHTML = `
+    <div class="xp-head">
+      <span class="glyph"><span class="dots"><i></i><i></i><i></i></span></span>
+      <span class="xp-title"></span>
+      <span class="xp-right">
+        <span class="badge">只读</span><span class="xp-state">执行中</span><span class="xp-time">0:00</span>
+        <button class="xp-stop" title="停止">${ICON.stop}</button>
+        <button class="xp-close" title="收起">${ICON.collapse}</button>
+      </span>
+    </div>
+    <div class="xp-mini"></div>
+    <div class="xp-body"><div class="xp-inner"></div></div>`;
+  pane.appendChild(xp);
+  const xpHead = xp.querySelector(".xp-head"), xpMini = xp.querySelector(".xp-mini"), xpBody = xp.querySelector(".xp-body"), xpInner = xp.querySelector(".xp-inner");
+  const xpClose = xp.querySelector(".xp-close"), xpStop = xp.querySelector(".xp-stop");
+  const expand = { p: new Spring(0, 0.0005), card: null, open: false, ended: false, stick: true };
+
+  const OUTPUT = {
+    "$ git diff --stat": " apps/desktop/src/renderer/components/workbench/executor-run-card.tsx | 42 ++++++-----\n 1 file changed, 28 insertions(+), 14 deletions(-)",
+    "$ pnpm -C apps/desktop typecheck": "> tsc -p tsconfig.json --noEmit\n\nDone in 6.2s",
+    "$ node --test tests/src/contract.test.mjs": "✔ exec contract (412ms)\n✔ fs contract (388ms)\nℹ tests 2  pass 2  fail 0",
+  };
+  function appendEntry([kind, text]) {
+    if (kind === "prose") {
+      const p = document.createElement("p");
+      p.className = "xp-say";
+      p.textContent = text;
+      xpInner.appendChild(p);
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "xp-tool";
+    row.innerHTML = `<span class="chev">${ICON.chev}</span><span></span>`;
+    row.lastChild.textContent = text;
+    row.addEventListener("click", () => {
+      const open = row.classList.toggle("open");
+      if (open) {
+        const out = document.createElement("pre");
+        out.className = "xp-out";
+        out.textContent = OUTPUT[text] || "（无输出）";
+        row.after(out);
+      } else if (row.nextElementSibling && row.nextElementSibling.classList.contains("xp-out")) {
+        row.nextElementSibling.remove();
+      }
+    });
+    xpInner.appendChild(row);
+  }
+  function openPanel(card) {
+    if (expand.card && expand.card !== card) return;
+    expand.card = card;
+    expand.open = true;
+    expand.p.target = 1;
+    expand.stick = true;
+    const title = card.el.querySelector(".title").textContent;
+    xp.querySelector(".xp-title").textContent = title;
+    xp.querySelector(".xp-state").textContent = expand.ended ? "已停止" : "执行中";
+    xpMini.innerHTML = "";
+    for (const line of card.history.slice(-4)) {
+      const p = document.createElement("p");
+      p.className = line[0];
+      p.textContent = line[1];
+      xpMini.appendChild(p);
+    }
+    xpInner.innerHTML = "";
+    const prompt = document.createElement("div");
+    prompt.className = "xp-prompt";
+    prompt.innerHTML = `<div class="xp-bubble"></div>`;
+    prompt.firstChild.textContent = `${title}。只读模式，完成后给出结论和涉及的文件。`;
+    xpInner.appendChild(prompt);
+    for (const line of card.history) appendEntry(line);
+    xp.classList.add("on");
+    pane.classList.add("expanded");
+    requestAnimationFrame(() => { xpBody.scrollTop = xpBody.scrollHeight; xpBody.focus({ preventScroll: true }); });
+  }
+  function closePanel() {
+    if (!expand.open) return;
+    expand.open = false;
+    expand.p.target = 0;
+    pane.classList.remove("expanded");
+  }
+  xpClose.addEventListener("click", closePanel);
+  scrim.addEventListener("click", closePanel);
+  xpStop.addEventListener("click", () => {
+    // A run that ends while expanded keeps its panel until the user closes it.
+    if (!expand.card || expand.ended) return;
+    expand.ended = true;
+    expand.card.endedAt = performance.now();
+    xp.querySelector(".xp-state").textContent = "已停止";
+    xp.querySelector(".xp-head .glyph").innerHTML = '<span class="xp-check">✓</span>';
+    xpStop.disabled = true;
+    xpClose.innerHTML = ICON.close;
+    xpClose.title = "关闭";
+  });
+  xpBody.addEventListener("scroll", () => { expand.stick = xpBody.scrollHeight - xpBody.scrollTop - xpBody.clientHeight < 48; });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape" && expand.open) { e.preventDefault(); closePanel(); } }, true);
+
+  function renderPanel() {
+    const c = expand.card;
+    if (!c || !c.slot) return;
+    const p = expand.p.x;
+    const q = clamp(p, 0, 1);
+    const { w: pw, h: ph } = paneSize();
+    const from = c.slot;
+    const to = { x: P.inset, y: P.inset, w: pw - 2 * P.inset, h: ph - 2 * P.inset };
+    const L = (a, b) => a + (b - a) * p;
+    xp.style.transform = `translate3d(${L(from.x, to.x)}px, ${L(from.y, to.y)}px, 0)`;
+    xp.style.width = `${Math.max(40, L(from.w, to.w))}px`;
+    xp.style.height = `${Math.max(36, L(from.h, to.h))}px`;
+    xp.style.borderRadius = `${10 + 4 * q}px`;
+    xp.style.boxShadow = `0 ${12 + 28 * q}px ${32 + 48 * q}px -10px rgba(0,0,0,${0.55 + 0.15 * q}), 0 0 0 .5px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05)`;
+    xpHead.style.borderBottomColor = `rgba(255,255,255,${0.08 * q})`;
+    xpMini.style.opacity = clamp(1 - p / 0.25, 0, 1);
+    xpBody.style.width = `${to.w - 2}px`;
+    xpBody.style.height = `${to.h - 39}px`;
+    xpBody.style.opacity = clamp((p - 0.35) / 0.45, 0, 1);
+    xpBody.style.pointerEvents = expand.open ? "auto" : "none";
+    scrim.style.opacity = String(P.dim * q);
+    if (!expand.open && p < 0.004) {
+      // Back in its slot: hand the stage back to the card.
+      xp.classList.remove("on");
+      scrim.style.opacity = "0";
+      if (expand.ended) removeCard(c);
+      expand.card = null;
+      expand.ended = false;
+      xp.querySelector(".xp-head .glyph").innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+      xpStop.disabled = false;
+      xpClose.innerHTML = ICON.collapse;
+      xpClose.title = "收起";
+    }
+  }
+
+  // ---------------------------------------------------------------- loop
+  const STEP = 1 / 240;
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (P.slowmo) dt *= 0.25;
+    acc += dt;
+    while (acc >= STEP) {
+      acc -= STEP;
+      if (!stack.drag) { stack.x.step(STEP, P.response, P.damping); stack.y.step(STEP, P.response, P.damping); }
+      stack.scale.step(STEP, 0.25, 0.7);
+      expand.p.step(STEP, P.expandResponse, P.expandDamping);
+      for (const c of cards) {
+        c.enter.step(STEP, P.enterResponse, P.enterDamping);
+        c.depth.step(STEP, P.switchResponse, P.switchDamping);
+        c.fade.step(STEP, P.switchResponse, 1);
+      }
+    }
+    if (!stack.drag) {
+      if (stack.x.settled) stack.x.snap();
+      if (stack.y.settled) stack.y.snap();
+    }
+    for (const c of cards) if (c.removing && c.enter.x < 0.02 && Math.abs(c.enter.v) < 0.05) { c.el.remove(); c.dead = true; }
+    cards = cards.filter((c) => !c.dead);
+
+    const deck = deckSize();
+    const frontX = stack.x.x + deck.leftExt;
+    const lifted = stack.drag && stack.drag.moved;
+    for (const c of cards) {
+      const W = CARD_W, H = c.h;
+      const r = c.depth.x;
+      const d = Math.abs(r);
+      const dPos = clamp(d, 0, SIDE_DEPTH);
+      // Each layer out shrinks a little, stays vertically centred on the front card and shows
+      // `peek` px of its outer edge: the right edge for cards on the right, the left for the left.
+      const sd = 1 - P.scaleStep * dPos;
+      const x0 = r >= 0
+        ? frontX + W + P.peek * dPos - W * sd
+        : frontX - P.peek * dPos;
+      const y0 = stack.y.x + (H * (1 - sd)) / 2;
+      // Enter/exit and the grab lift scale about the card's own centre.
+      const e = Math.max(0, c.enter.x);
+      const se = stack.scale.x * (P.enterFrom + (1 - P.enterFrom) * e);
+      const s = sd * se;
+      // Centre of the card on screen; rotation and scale both happen about it.
+      const cx = x0 + (W * sd) / 2;
+      const cy = y0 + (H * sd) / 2;
+      // A loosely stacked deck: cards on the right lean clockwise, on the left anticlockwise, each a
+      // little more per layer, plus a small fixed per-card wobble. The front card is always straight.
+      const out = clamp(d, 0, 1);
+      const angle = Math.sign(r) * P.tilt * dPos + P.jitter * wobble(c.id) * out;
+      c.el.style.transformOrigin = "50% 50%";
+      c.el.style.transform = `translate3d(${cx - W / 2}px, ${cy - H / 2}px, 0) rotate(${angle}deg) scale(${s})`;
+      // The slot the panel grows out of and shrinks back into (untilted).
+      c.slot = { x: x0, y: y0, w: W * sd, h: H * sd };
+      // While a panel is out, its own card is hidden (the panel is that card) and the rest of the
+      // deck steps away.
+      const panelOut = expand.card ? clamp(expand.p.x, 0, 1) : 0;
+      const hidden = expand.card === c ? 0 : 1 - panelOut;
+      c.el.style.opacity = clamp(e, 0, 1) * clamp(SIDE_DEPTH + 1 - d, 0, 1) * clamp(c.fade.x, 0, 1) * hidden;
+      c.el.style.zIndex = String(1000 - Math.round(d * 100));
+      c.contentEl.style.opacity = 1 - P.backDim * clamp(d, 0, 1);
+      c.el.classList.toggle("back", c.removing || c.depth.target !== 0);
+      c.el.style.boxShadow = d > 0.5
+        ? "0 4px 14px -4px rgba(0,0,0,.4)"
+        : lifted
+          ? "0 24px 56px -12px rgba(0,0,0,.6), 0 0 0 .5px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05)"
+          : "0 12px 32px -10px rgba(0,0,0,.55), 0 0 0 .5px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05)";
+    }
+    // The overlay sits exactly over the front slot and follows the grab lift.
+    deckUi.style.height = `${cardHeight()}px`;
+    deckUi.style.transform = `translate3d(${frontX}px, ${stack.y.x}px, 0) scale(${stack.scale.x})`;
+    deckUi.classList.toggle("multi", order.length > 1);
+    pane.classList.toggle("deck-hover", deckHovered());
+    renderPanel();
+    pane.classList.toggle("dragging-deck", !!lifted);
+    // The paper button yields while the cards sit in the top-right corner.
+    paperBtn.classList.toggle("hidden", liveCards().length > 0 && stack.corner === "top-right");
+    requestAnimationFrame(frame);
+  }
+
+  // ---------------------------------------------------------------- fake content
+  function tick() {
+    const now = performance.now();
+    for (const c of cards) {
+      const s = Math.floor(((c.endedAt || now) - c.start) / 1000);
+      c.timeEl.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+      if (expand.card === c) xp.querySelector(".xp-time").textContent = c.timeEl.textContent;
+    }
+  }
+  const EASE = "cubic-bezier(.2,.8,.2,1)";
+  function pushLog() {
+    for (const c of liveCards()) {
+      if (Math.random() < 0.4) continue;
+      // Keep a few more lines than fit, so there is always something to fade out at the top.
+      if (c.endedAt) continue;
+      const [kind, text] = LOG[c.logIdx++ % LOG.length];
+      c.history.push([kind, text]);
+      if (expand.card === c) {
+        appendEntry([kind, text]);
+        if (expand.stick) xpBody.scrollTop = xpBody.scrollHeight;
+      }
+      const p = document.createElement("p");
+      p.className = kind;
+      p.textContent = text;
+      c.logEl.appendChild(p);
+      while (c.logEl.children.length > 8) c.logEl.firstChild.remove();
+      const clipped = c.logEl.offsetHeight > c.bodyEl.clientHeight;
+      c.bodyEl.classList.toggle("clipped", clipped);
+      if (clipped) {
+        // Full: the whole log glides up one line.
+        const lines = c.logEl;
+        lines.style.transition = "none";
+        lines.style.transform = "translateY(18px)";
+        lines.offsetHeight;
+        lines.style.transition = `transform 260ms ${EASE}`;
+        lines.style.transform = "translateY(0)";
+      } else {
+        // Still filling: only the new line fades in below the previous one.
+        p.style.opacity = "0";
+        p.style.transform = "translateY(4px)";
+        p.offsetHeight;
+        p.style.transition = `opacity 220ms ${EASE}, transform 220ms ${EASE}`;
+        p.style.opacity = "1";
+        p.style.transform = "translateY(0)";
+      }
+    }
+  }
+  let toastTimer;
+  function toast(text) {
+    toastEl.textContent = text;
+    toastEl.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("on"), 1400);
+  }
+  function fillTerm() {
+    const rows = [];
+    for (let i = 0; i < 60; i++) {
+      rows.push(i % 7 === 0 ? `<b>~/Workspace/coflux</b> main ❯ pnpm -C apps/desktop build` : `  vite v6 building for production... transforming (${(i * 37) % 900}) src/renderer/components/workbench/${["terminal-pane", "executor-run-card", "sidebar", "branch-menu"][i % 4]}.tsx`);
+    }
+    $("term").innerHTML = rows.join("\n");
+  }
+
+  $("addRun").onclick = () => makeCard();
+  $("endRun").onclick = () => removeCard(liveCards()[0]);
+  new ResizeObserver(() => { if (stack.placed && !stack.drag) retarget(); }).observe(pane);
+
+  bindControls();
+  refreshParams();
+  fillTerm();
+  makeCard();
+  makeCard();
+  makeCard();
+  setInterval(tick, 250);
+  setInterval(pushLog, 900);
+  pushLog();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

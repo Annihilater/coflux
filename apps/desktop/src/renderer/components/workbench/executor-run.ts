@@ -3,7 +3,8 @@ import type { ExecutorRunState } from "@coflux/client";
 /**
  * The executor picture-in-picture card (plan 20260929-executor-pip), the pure half: which runs
  * belong to a terminal, where a dragged card snaps, which transcript lines the collapsed card
- * shows, how long a run has been going, and when a card outlives its run.
+ * shows, how long a run has been going, when a card outlives its run, and how the deck of several
+ * runs reorders (plan 20260930-executor-pip-motion).
  */
 
 /** One transcript fragment as the card renders it (the wire message with `seq` as a number and the
@@ -60,20 +61,22 @@ export function executorTaskIds(runs: Readonly<Record<string, ExecutorRunState>>
 }
 
 export type ExecutorCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
-export const DEFAULT_EXECUTOR_CORNER: ExecutorCorner = "bottom-right";
+export const DEFAULT_EXECUTOR_CORNER: ExecutorCorner = "top-right";
 
-/** Picture-in-picture: on release the card goes to the corner nearest to where its centre is,
- * measured inside the pane. Exactly on a midline the right / bottom side wins, matching the
- * default corner. */
+/** Picture-in-picture: on release the deck goes to the corner nearest to where its centre is
+ * projected to land (plan 20260930-executor-pip-motion: the position plus the release velocity
+ * carried forward), measured inside the pane. Exactly on a midline the right / top side wins,
+ * matching the default corner. */
 export function snapCorner(center: { x: number; y: number }, pane: { width: number; height: number }): ExecutorCorner {
   const left = center.x < pane.width / 2;
-  const top = center.y < pane.height / 2;
+  const top = center.y <= pane.height / 2;
   if (top) return left ? "top-left" : "top-right";
   return left ? "bottom-left" : "bottom-right";
 }
 
-/** One line of the collapsed card's rolling log. */
-export type ExecutorLogLine = { kind: "prose" | "command" | "error"; text: string };
+/** One line of the collapsed card's rolling log. `key` names the line for good (its fragment and
+ * its place in it), so the card can tell which lines are new and animate only those. */
+export type ExecutorLogLine = { kind: "prose" | "command" | "error"; text: string; key: string };
 
 /** How many lines the collapsed card shows. */
 export const ROLLING_LOG_LINES = 4;
@@ -93,13 +96,13 @@ export function rollingLog(fragments: readonly ExecutorFragmentView[], limit = R
     const fragment = fragments[index]!;
     const own: ExecutorLogLine[] = [];
     if (fragment.kind === "tool") {
-      own.push({ kind: "command", text: `$ ${fragment.argument || fragment.tool}` });
+      own.push({ kind: "command", text: `$ ${fragment.argument || fragment.tool}`, key: `${fragment.seq}` });
     } else if (fragment.kind === "error") {
-      own.push({ kind: "error", text: fragment.text.trim() || "error" });
+      own.push({ kind: "error", text: fragment.text.trim() || "error", key: `${fragment.seq}` });
     } else {
       for (const line of fragment.text.split("\n")) {
         const trimmed = line.trim();
-        if (trimmed) own.push({ kind: "prose", text: trimmed });
+        if (trimmed) own.push({ kind: "prose", text: trimmed, key: `${fragment.seq}:${own.length}` });
       }
     }
     // Take the fragment's own last lines first (they are the newest).
@@ -133,6 +136,29 @@ export function runClockStart(run: Pick<ExecutorRunState, "startedAt" | "submitt
 export function retainAfterEnd(state: { live: boolean; ended: boolean; expanded: boolean }): boolean {
   if (state.expanded) return true;
   return state.live && !state.ended;
+}
+
+/**
+ * The deck's order after the set of present runs changed (plan 20260930-executor-pip-motion).
+ * `order` is front first; `present` is every run the deck should show, oldest first. Runs still
+ * present keep their places; a new run lands at the front (several at once: the newest in front);
+ * a run no longer present moves to `leaving`, where its card springs out before it is dropped. A
+ * leaving run that is present again returns to the deck. Null when nothing changed.
+ */
+export function reconcileDeck(
+  deck: { order: readonly string[]; leaving: readonly string[] },
+  present: readonly string[],
+): { order: string[]; leaving: string[] } | null {
+  const isPresent = new Set(present);
+  const kept = deck.order.filter((id) => isPresent.has(id));
+  const known = new Set(kept);
+  const entering = present.filter((id) => !known.has(id)).reverse();
+  const dropped = deck.order.filter((id) => !isPresent.has(id));
+  const leaving = [...deck.leaving.filter((id) => !isPresent.has(id)), ...dropped];
+  const order = [...entering, ...kept];
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id, index) => id === b[index]);
+  if (same(order, deck.order) && same(leaving, deck.leaving)) return null;
+  return { order, leaving };
 }
 
 /** How a terminal state reads on the card. */
