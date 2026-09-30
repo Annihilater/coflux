@@ -176,6 +176,11 @@ type WorkspaceTerminalProps = {
   changesOpen: boolean;
   /** Measured width of the action dock floating over the top-right strip. */
   dockWidth: number;
+  /**
+   * Space the left dock (the expand button right of the traffic lights) takes while the sidebar is
+   * collapsed, 0 otherwise: the top-left strip and the changes overlay's header keep it free on their left.
+   */
+  leftDockReserve: number;
   actions: WorkspaceLayoutActions;
   /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
   browser: BrowserRuntime;
@@ -474,6 +479,7 @@ export function WorkspaceTerminal({
   layout,
   changesOpen,
   dockWidth,
+  leftDockReserve,
   actions,
   browser,
   screens,
@@ -962,6 +968,7 @@ export function WorkspaceTerminal({
     const top = touchesTop(rect);
     const showBranch = !isDirWorkspace && top && touchesLeft(rect);
     const reserveDock = top && touchesRight(rect);
+    const reserveLeftDock = top && touchesLeft(rect) && leftDockReserve > 0;
     const activeTask = group.activeTabId ? (taskById.get(group.activeTabId) ?? null) : null;
     const activeControlState: TerminalControlState = activeTask ? stateOf(activeTask) : "stopped";
     const showsPending = Boolean(pending && group.activeTabId === pending.id);
@@ -983,11 +990,17 @@ export function WorkspaceTerminal({
             window drag regions (plan 108): drag the window from empty space, double-click follows the macOS
             title-bar preference; lower groups' strips are not. A drag region swallows pointer events, so
             anything clickable or hoverable added here needs NO_DRAG_REGION_STYLE (see drag-region.ts). The
-            top-right group reserves the action dock's measured width. */}
+            top-right group reserves the action dock's measured width; with the sidebar collapsed the top-left
+            group reserves the left dock's (traffic lights plus the expand button) the same way — as padding
+            of this header, so that space drags the window exactly when the rest of the strip does. */}
         {/* `h-9` is GROUP_TAB_STRIP_HEIGHT (terminal-layout.ts): panes are placed that far below the group's top. */}
         <header
           className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-background pl-3"
-          style={{ ...(stripIsDragRegion ? DRAG_REGION_STYLE : NO_DRAG_REGION_STYLE), paddingRight: reserveDock ? dockWidth : 8 }}
+          style={{
+            ...(stripIsDragRegion ? DRAG_REGION_STYLE : NO_DRAG_REGION_STYLE),
+            paddingRight: reserveDock ? dockWidth : 8,
+            ...(reserveLeftDock ? { paddingLeft: leftDockReserve } : null),
+          }}
         >
           {showBranch ? (
             <>
@@ -1221,13 +1234,14 @@ export function WorkspaceTerminal({
       {/* The changes overlay: opened from the action dock, it covers the whole main area (every group stays
           as it is underneath, agents keep running); pressing again or Esc returns to the groups. Kept alive
           like the panes (hidden, not unmounted), so its collapsed state and fetched data survive. Its top
-          band is a window drag region as tall as a strip, so the window stays draggable while it is open.
+          band is a window drag region as tall as a strip, so the window stays draggable while it is open; it
+          reserves both docks' space, the left one only while the sidebar is collapsed.
           Directory workspaces have no git semantics and do not render it. */}
       {isDirWorkspace ? null : (
         <div className={cn("absolute inset-0 z-20 flex flex-col bg-terminal", changesOpen ? "" : "hidden")}>
           <header
             className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background pl-3 text-sm"
-            style={{ ...DRAG_REGION_STYLE, paddingRight: dockWidth }}
+            style={{ ...DRAG_REGION_STYLE, paddingRight: dockWidth, ...(leftDockReserve > 0 ? { paddingLeft: leftDockReserve } : null) }}
           >
             <FileDiff className="size-3 shrink-0 opacity-90" />
             <span>变更</span>

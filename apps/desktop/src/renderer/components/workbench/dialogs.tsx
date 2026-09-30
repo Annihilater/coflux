@@ -201,6 +201,7 @@ function shortcutRows(): { keys: string[]; description: string }[] {
     { keys: [...mod, "["], description: "当前分组的上一个终端" },
     { keys: [...mod, "]"], description: "当前分组的下一个终端" },
     { keys: [...mod, "N"], description: "新建工作区" },
+    { keys: [...mod, "B"], description: "显示 / 隐藏侧边栏" },
     // ⌘R 不在 use-global-shortcuts 里：它由原生菜单的 role: "reload" 注册（见 main/menu.ts）。
     { keys: [...mod, "R"], description: "重新载入界面" },
     // The screen tab's one local combination (plan 20260929-remote-desktop); everything else goes to the remote.

@@ -84,6 +84,9 @@ export function buildAppMenu(actions: MenuActions): Menu {
         // Navigation palette (plan 20260921): the accelerator is displayed but not registered
         // either, so the key itself reaches the page and use-global-shortcuts handles it.
         pageShortcut("快速跳转…", "CmdOrCtrl+P", "toggle-palette"),
+        // Collapsible sidebar (plan 20260930-collapsible-sidebar): displayed, not registered — a
+        // registered ⌘B would be taken from built-in browser pages, where it means bold.
+        pageShortcut("显示/隐藏侧边栏", "CmdOrCtrl+B", "toggle-sidebar"),
         { type: "separator" },
         pageShortcut("上一个终端", "CmdOrCtrl+[", "previous-tab"),
         pageShortcut("下一个终端", "CmdOrCtrl+]", "next-tab"),

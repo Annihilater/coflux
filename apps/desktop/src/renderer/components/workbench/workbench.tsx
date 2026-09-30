@@ -30,6 +30,15 @@ import { resolveOutdatedPrompt } from "@/components/workbench/desktop-update";
 import { DESKTOP_DRAG_BAND_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { ImportProjectWizard } from "@/components/workbench/import-project-wizard";
 import { Sidebar, type PendingWorkspace } from "@/components/workbench/sidebar";
+import {
+  LEFT_DOCK_WIDTH,
+  SidebarToggleButton,
+  leftDockLeft,
+  leftDockReserve,
+  persistSidebarCollapsed,
+  readSidebarCollapsed,
+} from "@/components/workbench/sidebar-collapse";
+import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
@@ -123,6 +132,9 @@ const LAYOUT_PERSIST_DELAY_MS = 400;
  * 无顶栏的空态主区（plan 108）：顶部留一条与侧栏空白带等高的窗口拖拽带，没有终端顶栏时
  * 也能从主区顶部拖动 / 双击窗口；空态内容在余下区域里继续垂直居中，按钮不落进拖拽带
  * （拖拽区吞指针事件，见 drag-region.ts）。
+ * With the sidebar collapsed the left dock floats over the band's left end: the band holds
+ * nothing that could sit under the traffic lights or the dock, so its reserved space is simply the
+ * empty band, which keeps dragging the window around the dock's no-drag hole.
  */
 function EmptyMain({ className, children }: { className?: string; children: ReactNode }) {
   return (
@@ -297,6 +309,15 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 侧栏宽度在这里持有一份，工作台侧栏与设置页左栏共用，避免设置页盖上来时宽度突变。
   const sidebarWidth = useSidebarWidth();
+  // Whether the sidebar is collapsed (plan 20260930-collapsible-sidebar): a separate boolean, never
+  // folded into the width control above, which the settings page's column shares and which has to
+  // survive a collapse untouched. Ref mirror so a key repeated before the re-render reads "now".
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(readSidebarCollapsed);
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  // ⌘N / 新建工作区 while collapsed: the project whose create menu opens once the sidebar is back.
+  const pendingCreateMenuRef = useRef<string | null>(null);
+  // Native full screen hides the traffic lights, and the left dock moves up to the window's edge.
+  const [windowFullScreen, setWindowFullScreen] = useState(false);
   // 齿轮 tooltip 的压制开关同理：点一下齿轮就换了一个脚部实例接管同一个位置，状态必须在它们之上。
   const settingsTooltip = useSettingsTooltipControl();
   const attemptedAuthToken = useRef<string | null>(null);
@@ -626,11 +647,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
   function toggleImmersive(tabId: string) {
     setImmersive(immersiveTabIdRef.current === tabId ? null : tabId);
   }
-  // Leaving full screen by the OS's own gesture ends immersive mode too.
+  // Leaving full screen by the OS's own gesture ends immersive mode too. Full screen is also
+  // tracked for the left dock, which needs no room for the traffic lights there.
   useEffect(
     () =>
       desktop.onScreenEvent((event) => {
-        if (event.kind === "fullscreen" && !event.on && immersiveTabIdRef.current) setImmersiveTabId(null);
+        if (event.kind !== "fullscreen") return;
+        setWindowFullScreen(event.on);
+        if (!event.on && immersiveTabIdRef.current) setImmersiveTabId(null);
       }),
     [],
   );
@@ -870,6 +894,54 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
   const landOnTaskRef = useRef(landOnTask);
   landOnTaskRef.current = landOnTask;
+
+  /**
+   * Collapse or expand the sidebar (plan 20260930-collapsible-sidebar). The button that was clicked
+   * unmounts with the side it belongs to (the sidebar's band, or the left dock), which would drop
+   * keyboard focus to `body` and leave the terminal deaf until clicked, so the caret goes back to the
+   * focused tab — unless the expand is on the way to the create-workspace menu, which takes it.
+   * Collapsing never leaves a create menu queued or open: with the sidebar unmounted it would pop
+   * open on its own at the next expand.
+   */
+  function setSidebarCollapsed(collapsed: boolean, options: { refocus: boolean }) {
+    if (sidebarCollapsedRef.current === collapsed) return;
+    sidebarCollapsedRef.current = collapsed;
+    setSidebarCollapsedState(collapsed);
+    persistSidebarCollapsed(collapsed);
+    if (collapsed) {
+      pendingCreateMenuRef.current = null;
+      setCreateMenuProjectId(null);
+    }
+    if (!options.refocus) return;
+    const focused = currentScreen().focused ?? focusedBrowserTabId();
+    if (focused) focusTab(focused);
+  }
+
+  /** The two buttons, ⌘B and 「视图 → 显示/隐藏侧边栏」. A no-op in immersive mode, where the sidebar is gone regardless. */
+  function toggleSidebar() {
+    if (immersiveTabIdRef.current) return;
+    setSidebarCollapsed(!sidebarCollapsedRef.current, { refocus: true });
+  }
+
+  /**
+   * ⌘N and 「新建工作区」: the create menu lives in the sidebar, so a collapsed sidebar comes back
+   * first and the menu opens once it has mounted (see the effect below) — a DropdownMenu handed
+   * `isMenuOpen` on its first mount is not relied upon.
+   */
+  function openCreateWorkspaceMenu(projectId: string) {
+    if (!sidebarCollapsedRef.current) {
+      setCreateMenuProjectId(projectId);
+      return;
+    }
+    pendingCreateMenuRef.current = projectId;
+    setSidebarCollapsed(false, { refocus: false });
+  }
+  useEffect(() => {
+    const projectId = pendingCreateMenuRef.current;
+    if (sidebarCollapsed || !projectId) return;
+    pendingCreateMenuRef.current = null;
+    setCreateMenuProjectId(projectId);
+  }, [sidebarCollapsed]);
 
   // The palette names the workspace too; the task alone decides where it lands.
   function openPaletteTerminal(_workspaceId: string, taskId: string) {
@@ -1383,7 +1455,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useGlobalShortcuts({
     selectedProjectId: selectedWorkspace?.projectId ?? null,
     activeTerminalRef,
-    onOpenCreateWorkspaceMenu: setCreateMenuProjectId,
+    onOpenCreateWorkspaceMenu: openCreateWorkspaceMenu,
+    onToggleSidebar: toggleSidebar,
     onToggleHelp: () => setHelpOpen((open) => !open),
     onToggleSettings: () => setSettingsOpen((open) => !open),
     onTogglePalette: togglePalette,
@@ -1402,6 +1475,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   const surface = resolveWorkbenchSurface(authState);
   const showReconnectBanner = shouldShowReconnectBanner(status);
+  // The left dock is on screen only while the sidebar is collapsed and the workbench is what is
+  // visible: immersive mode has no chrome at all, and the settings page brings its own left column.
+  const showLeftDock = sidebarCollapsed && !immersiveOnScreen && !settingsOpen;
+  const reservedLeft = sidebarCollapsed ? leftDockReserve(windowFullScreen) : 0;
 
   // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
   if (surface === "authenticating") {
@@ -1441,7 +1518,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       )}
     >
       <DesktopAttention client={client} bridge={desktop} selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null} />
-      {immersiveOnScreen ? null : (
+      {immersiveOnScreen || sidebarCollapsed ? null : (
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
@@ -1465,6 +1542,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onToggleSettings={() => setSettingsOpen((open) => !open)}
         widthControl={sidebarWidth}
         settingsTooltip={settingsTooltip}
+        onCollapse={toggleSidebar}
       />
       )}
 
@@ -1485,7 +1563,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
             "isolate min-w-0 bg-terminal",
             activeWorkspaceId ? "relative flex-1" : "pointer-events-none invisible absolute bottom-0 right-0",
           )}
-          style={activeWorkspaceId ? undefined : { top: showReconnectBanner ? 28 : 0, left: sidebarWidth.width }}
+          // A collapsed sidebar takes no width (plan 20260930-collapsible-sidebar).
+          style={activeWorkspaceId ? undefined : { top: showReconnectBanner ? 28 : 0, left: sidebarCollapsed ? 0 : sidebarWidth.width }}
           aria-hidden={!activeWorkspaceId}
         >
           <Suspense
@@ -1508,6 +1587,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     layout={workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id)}
                     changesOpen={Boolean(changesOpen[workspace.id])}
                     dockWidth={dockWidth}
+                    leftDockReserve={reservedLeft}
                     actions={workspaceActions}
                     browser={browser}
                     screens={screens}
@@ -1620,7 +1700,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
             </div>
             <h1 className="text-base font-medium">{projects.length === 0 ? "从一个项目开始" : "选择一个工作区"}</h1>
             <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
-              {projects.length === 0 ? "导入在线设备上的 git 仓库，主工作区会自动创建。" : "从左侧项目或子工作区进入终端工作台。"}
+              {projects.length === 0
+                ? "导入在线设备上的 git 仓库，主工作区会自动创建。"
+                : sidebarCollapsed
+                  ? `按 ${SHORTCUT_MODIFIER_PREFIX}B 展开侧边栏，从项目或子工作区进入终端工作台。`
+                  : "从左侧项目或子工作区进入终端工作台。"}
             </p>
             {projects.length === 0 ? (
               <Button className="mt-5" label="导入项目" variant="primary" size="sm" onClick={() => setImportOpen(true)} />
@@ -1791,6 +1875,27 @@ export function Workbench({ client }: { client: CofluxClient }) {
         />
         <NotificationInbox client={client} open={notificationOpen} onOpen={() => { setSettingsOpen(false); setNotificationOpen(true); }} onClose={() => setNotificationOpen(false)} onNavigate={landOnTask} />
       </div>
+
+      {/* The left dock (plan 20260930-collapsible-sidebar), the action dock's mirror image: while the
+          sidebar is collapsed, one instance holds the expand button just right of the traffic lights for
+          every workspace and empty state. The surfaces under the window's top-left corner keep its space
+          free (the top-left strip and the changes header reserve `reservedLeft`; the empty states' band is
+          empty anyway) and are drag regions, so like the action dock this node comes **after** the main
+          area in document order — placed before it, its no-drag hole would be filled back in and the button
+          would get no click and no tooltip (see drag-region.ts). Unlike the action dock it is not shown
+          over the settings page, which has its own left column and drag band. It has no background: it
+          only punches a hole in whatever strip or band lies under it. */}
+      {showLeftDock ? (
+        <div
+          role="group"
+          aria-label="侧边栏"
+          // As tall as a strip (h-9), so it never covers a pane; pt-0.5 nudges the button's centre towards the traffic lights' (y≈20).
+          className="absolute z-30 flex h-9 items-center justify-center pt-0.5"
+          style={{ top: showReconnectBanner ? 28 : 0, left: leftDockLeft(windowFullScreen), width: LEFT_DOCK_WIDTH, ...NO_DRAG_REGION_STYLE }}
+        >
+          <SidebarToggleButton collapsed onToggle={toggleSidebar} />
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -12,6 +12,7 @@ import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
+import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
@@ -75,6 +76,8 @@ type SidebarProps = {
   settingsTooltip: SettingsTooltipControl;
   /** 侧栏宽度：与设置页左栏共用同一份，见 use-sidebar-width.ts */
   widthControl: SidebarWidthControl;
+  /** The band's collapse button (plan 20260930-collapsible-sidebar): hides the whole sidebar; ⌘B does the same. */
+  onCollapse: () => void;
 };
 
 export function Sidebar(props: SidebarProps) {
@@ -141,8 +144,12 @@ export function Sidebar(props: SidebarProps) {
       className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-sidebar text-base"
       style={{ width: props.widthControl.width }}
     >
-      {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。 */}
-      <div className="shrink-0" style={DESKTOP_DRAG_BAND_STYLE} />
+      {/* 红绿灯（x=14,y=14）内嵌在这条空白带里，它同时是侧栏的窗口拖拽带（见 drag-region.ts）。
+          The collapse button sits at its right end (plan 20260930-collapsible-sidebar); as the band's
+          descendant it comes after it in document order, so its no-drag hole holds. */}
+      <div className="flex shrink-0 items-center justify-end pr-2" style={DESKTOP_DRAG_BAND_STYLE}>
+        <SidebarToggleButton collapsed={false} onToggle={props.onCollapse} />
+      </div>
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <div className="mb-1.5 flex h-7 items-center px-2">
