@@ -11,6 +11,13 @@ type GlobalShortcutsOptions = {
    * 保活但隐藏的实例永远读不到这份 ref，天然满足"只有 active 实例响应"的约束 */
   activeTerminalRef: RefObject<WorkspaceTerminalHandle | null>;
   onOpenCreateWorkspaceMenu: (projectId: string) => void;
+  /**
+   * ⌘B and 「视图 → 显示/隐藏侧边栏」 (plan 20260930-collapsible-sidebar): collapse or expand the
+   * sidebar. After the suspension gate like the terminal keys: it does not fire behind the settings
+   * page or the palette. Terminals hand bare-⌘ keys to the app already; a focused built-in browser
+   * page keeps ⌘B (bold in web editors), and a focused screen picture forwards it to the remote.
+   */
+  onToggleSidebar: () => void;
   onToggleHelp: () => void;
   /** ⌘, 与应用菜单的「设置…」：开关设置页；挂起期间照样受理 */
   onToggleSettings: () => void;
@@ -56,6 +63,7 @@ export function useGlobalShortcuts({
   selectedProjectId,
   activeTerminalRef,
   onOpenCreateWorkspaceMenu,
+  onToggleSidebar,
   onToggleHelp,
   onToggleSettings,
   onTogglePalette,
@@ -176,6 +184,11 @@ export function useGlobalShortcuts({
           event.stopPropagation();
           if (selectedProjectId) onOpenCreateWorkspaceMenu(selectedProjectId);
           return;
+        case "KeyB":
+          event.preventDefault();
+          event.stopPropagation();
+          onToggleSidebar();
+          return;
         case "BracketLeft":
           event.preventDefault();
           event.stopPropagation();
@@ -202,7 +215,7 @@ export function useGlobalShortcuts({
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended, screenFocusedRef, onToggleImmersive]);
+  }, [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended, screenFocusedRef, onToggleImmersive]);
 
   // 原生菜单命令：与上面的键位一一对应。
   useEffect(
@@ -262,6 +275,9 @@ export function useGlobalShortcuts({
           case "new-screen-tab":
             terminal?.openScreenTab();
             return;
+          case "toggle-sidebar":
+            onToggleSidebar();
+            return;
           case "toggle-help":
             onToggleHelp();
             return;
@@ -274,6 +290,6 @@ export function useGlobalShortcuts({
           else terminal?.selectTabByIndex(index);
         }
       }),
-    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended],
+    [selectedProjectId, activeTerminalRef, onOpenCreateWorkspaceMenu, onToggleSidebar, onToggleHelp, onToggleSettings, onTogglePalette, isSuspended],
   );
 }

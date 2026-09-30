@@ -11,6 +11,12 @@ export const LEGACY_TOKEN_KEY = "coflux_token";
 export const BUILD_ID = __COFLUX_BUILD_ID__;
 export const WORKSPACE_KEY = "coflux_workspace";
 export const SIDEBAR_WIDTH_KEY = "coflux_sidebar_width";
+/**
+ * Whether the workbench sidebar is collapsed (plan 20260930-collapsible-sidebar). Separate from the
+ * width, which the settings page's column shares and which must survive a collapse; unscoped like
+ * the width, a per-machine UI preference.
+ */
+export const SIDEBAR_COLLAPSED_KEY = "coflux_sidebar_collapsed";
 /** 本机 daemon 接入引导点过「暂不」（plan 113）：按服务器地址分 key，之后只从账号菜单再进 */
 export const DAEMON_ONBOARDING_DISMISSED_KEY = `coflux_daemon_onboarding_dismissed:${SERVER_URL}`;
 /**

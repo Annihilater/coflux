@@ -108,6 +108,8 @@ export type DesktopCommand =
   /** 文件 → 新建屏幕标签页 (plan 20260929-remote-desktop); no keyboard shortcut. */
   | "new-screen-tab"
   | "toggle-help"
+  /** ⌘B / 视图 → 显示/隐藏侧边栏 (plan 20260930-collapsible-sidebar): collapse or expand the workbench sidebar. */
+  | "toggle-sidebar"
   | "open-settings"
   | "toggle-palette";
 
