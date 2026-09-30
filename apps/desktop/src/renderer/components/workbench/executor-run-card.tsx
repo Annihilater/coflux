@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Maximize2, Minimize2, Square, Unplug, X } from "lucide-react";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { useToast } from "@astryxdesign/core/Toast";
@@ -104,8 +103,6 @@ export function ExecutorRunCards({
   const [ended, setEnded] = useState<ReadonlySet<string>>(() => new Set());
   // The expanded run: `open` until the user collapses it, then kept until it is back in its slot.
   const [panel, setPanel] = useState<PanelState>(null);
-  // Where an expanded panel is rendered (a portal target over the whole pane).
-  const [panelSlot, setPanelSlot] = useState<HTMLDivElement | null>(null);
   // The last snapshot of every run shown here, so a card whose run the store already dropped can
   // still render: while its panel stays open, and while it springs out.
   const lastSeen = useRef(new Map<string, ExecutorRunState>());
@@ -207,6 +204,16 @@ export function ExecutorRunCards({
       {/* The deck: above the terminal, below the paper, the ⌘F box and secret requests (z-30);
           while a panel is out it rises to the paper's level (z-40), still under the paper's button. */}
       <div ref={controller.deckRef} className={cn("group/deck absolute inset-0", panel ? "z-40" : "z-30")}>
+        {/* The dimmed pane behind an expanded card (its opacity is the loop's); a click collapses.
+            It covers this pane only, never the window. */}
+        {panel ? (
+          <div
+            ref={controller.backdropRef}
+            aria-hidden
+            className={cn("absolute inset-0 z-[1900] bg-black", panel.open ? "pointer-events-auto" : "pointer-events-none")}
+            onClick={collapse}
+          />
+        ) : null}
         {mounted.map((run) => {
           const runId = run.runId;
           const role: CardRole = current.order[0] === runId ? "front" : current.order.includes(runId) ? "back" : "leaving";
@@ -219,8 +226,7 @@ export function ExecutorRunCards({
               controller={controller}
               role={role}
               counter={role === "front" ? counter : null}
-              expanded={panelOpen && panel?.runId === runId}
-              panelSlot={panelSlot}
+              panel={panel?.runId === runId ? (panel.open ? "open" : "closing") : "none"}
               onExpand={() => expand(runId)}
               onCollapse={collapse}
               onEnded={() => setEnded((cur) => (cur.has(runId) ? cur : new Set([...cur, runId])))}
@@ -229,7 +235,6 @@ export function ExecutorRunCards({
         })}
         {current.order.length > 1 && !panel ? <DeckSwitch controller={controller} onSlide={cycle} /> : null}
       </div>
-      <div ref={setPanelSlot} className="pointer-events-none absolute inset-0 z-40" />
     </div>
   );
 }
@@ -287,8 +292,7 @@ function ExecutorRunCard({
   controller,
   role,
   counter,
-  expanded,
-  panelSlot,
+  panel,
   onExpand,
   onCollapse,
   onEnded,
@@ -300,8 +304,8 @@ function ExecutorRunCard({
   role: CardRole;
   /** `n/N` on the front card when the deck holds several runs. */
   counter: string | null;
-  expanded: boolean;
-  panelSlot: HTMLDivElement | null;
+  /** Expanded (`open`), shrinking back into its slot (`closing`), or a card in the deck. */
+  panel: CardPanel;
   onExpand: () => void;
   onCollapse: () => void;
   /** The worker's end batch arrived: the deck decides when the card leaves. */
@@ -365,27 +369,124 @@ function ExecutorRunCard({
         ? { kind: "running" }
         : { kind: "queued" };
 
-  if (expanded) {
-    if (!panelSlot) return null;
-    return createPortal(
-      <ExecutorPanel run={run} state={state} elapsed={elapsed} transcript={transcript} onStop={stop} onCollapse={onCollapse} />,
-      panelSlot,
-    );
+  // Each expansion starts a fresh transcript view (prompt fold, stick-to-bottom), as a newly
+  // mounted panel did before the morph — also when the card is reopened mid-collapse.
+  const open = panel === "open";
+  const [wasOpen, setWasOpen] = useState(open);
+  const [expansion, setExpansion] = useState(0);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setExpansion(expansion + 1);
   }
+
+  const expanded = panel !== "none";
+  const front = role === "front";
+  const lines = rollingLog(transcript.fragments, ROLLING_LOG_KEPT);
+  const placeholder = transcript.unsupported
+    ? "这台设备的 daemon 版本过旧，看不到执行过程"
+    : lines.length === 0
+      ? state.kind === "queued"
+        ? "等待主机接单…"
+        : state.kind === "host-lost"
+          ? "主机连接中断，等待它重连"
+          : "还没有输出"
+      : null;
+
   return (
-    <CollapsedCard
-      run={run}
-      state={state}
-      elapsed={elapsed}
-      transcript={transcript}
-      controller={controller}
-      role={role}
-      counter={counter}
-      onStop={stop}
-      onExpand={onExpand}
-    />
+    // One element for both sizes: expanding morphs this very card (its rect is the loop's) into the
+    // panel and back, so the card — and its transcript subscription — is never remounted.
+    // Position, size, scale, rotation and opacity are written by the deck's loop: no React `style`.
+    <div
+      ref={controller.cardRef(run.runId)}
+      role={expanded ? "dialog" : "status"}
+      aria-label={`executor：${run.title}`}
+      className={cn(
+        "absolute left-0 top-0 w-80 overflow-hidden border border-border text-popover-foreground transition-[border-radius,box-shadow] duration-200",
+        expanded
+          ? "pointer-events-auto rounded-xl bg-popover shadow-2xl"
+          : cn(
+              "select-none rounded-lg bg-popover/95 backdrop-blur",
+              front && "pointer-events-auto cursor-grab shadow-lg group-data-[lifted]/deck:cursor-grabbing group-data-[lifted]/deck:shadow-2xl",
+              role === "back" && "pointer-events-auto cursor-pointer shadow-md",
+              role === "leaving" && "pointer-events-none shadow-md",
+            ),
+      )}
+      onPointerDown={(event) => controller.pointerDown(event.nativeEvent, event.currentTarget, run.runId)}
+      onPointerMove={(event) => controller.pointerMove(event.nativeEvent)}
+      onPointerUp={(event) => controller.pointerUp(event.nativeEvent)}
+      onPointerCancel={(event) => controller.pointerCancel(event.nativeEvent)}
+    >
+      <div data-deck-part="content" className={cn(!expanded && state.kind === "host-lost" && "[&>*]:opacity-70")}>
+        <div className="relative grid h-9 select-none grid-cols-[12px_minmax(0,1fr)_auto] items-center gap-x-2 px-3">
+          <span className="flex h-4 items-center justify-center">
+            <StateGlyph state={state} />
+          </span>
+          <span className="truncate text-base font-medium leading-4">{run.title}</span>
+          {expanded ? (
+            <div className="-mr-1.5 flex items-center gap-2">
+              <ModeBadge write={run.write} />
+              <span className="whitespace-nowrap text-sm leading-4 text-muted-foreground">{stateText(state)}</span>
+              <span className="min-w-7 text-right text-sm tabular-nums leading-4 text-muted-foreground">{elapsed}</span>
+              <div className="flex items-center">
+                <StopButton onStop={stop} disabled={state.kind === "ended"} size="md" />
+                <Tooltip content={state.kind === "ended" ? "关闭" : "收起"}>
+                  <button
+                    className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    aria-label={state.kind === "ended" ? "关闭" : "收起"}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={onCollapse}
+                  >
+                    {state.kind === "ended" ? <X className="size-3.5" /> : <Minimize2 className="size-3.5" />}
+                  </button>
+                </Tooltip>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Hovering the deck swaps these for the controls, which overlay them instead of
+                  reserving width while hidden. */}
+              <div className={cn("flex items-center gap-2 transition-opacity duration-150", front && "group-data-[hover]/deck:opacity-0")}>
+                <ModeBadge write={run.write} />
+                <span className="min-w-7 text-right text-sm tabular-nums leading-4 text-muted-foreground">{elapsed}</span>
+              </div>
+              {front ? (
+                <div className="pointer-events-none absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 bg-gradient-to-r from-transparent to-popover to-[16px] pl-5 opacity-0 transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-data-[hover]/deck:pointer-events-auto group-data-[hover]/deck:opacity-100">
+                  {counter ? <span className="px-1 text-xs tabular-nums leading-4 text-muted-foreground">{counter}</span> : null}
+                  <StopButton onStop={stop} disabled={state.kind === "ended"} size="sm" />
+                  <Tooltip content="展开">
+                    <button
+                      className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      aria-label="展开 executor 记录"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onExpand();
+                      }}
+                    >
+                      <Maximize2 className="size-3" />
+                    </button>
+                  </Tooltip>
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+        <RollingLog lines={lines} placeholder={placeholder} />
+      </div>
+      {/* The full transcript exists only while the card is expanded or shrinking back: mounted when
+          expansion starts, unmounted once the card is back in its slot. The loop lays it out at
+          the panel's final size and fades it in once there is room. */}
+      {expanded ? (
+        <>
+          <div data-deck-part="divider" aria-hidden className="absolute inset-x-0 top-9 h-px bg-border" />
+          <TranscriptView key={expansion} transcript={transcript} state={state} open={open} />
+        </>
+      ) : null}
+    </div>
   );
 }
+
+type CardPanel = "none" | "open" | "closing";
 
 type CardState = { kind: "queued" } | { kind: "running" } | { kind: "host-lost" } | { kind: "ended"; terminal: string };
 
@@ -468,98 +569,6 @@ function StopButton({ onStop, disabled, size }: { onStop: () => void; disabled: 
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Collapsed: fixed size, rolling log; the deck moves it
- * ------------------------------------------------------------------ */
-
-function CollapsedCard({
-  run,
-  state,
-  elapsed,
-  transcript,
-  controller,
-  role,
-  counter,
-  onStop,
-  onExpand,
-}: {
-  run: ExecutorRunState;
-  state: CardState;
-  elapsed: string;
-  transcript: TranscriptState;
-  controller: DeckController;
-  role: CardRole;
-  counter: string | null;
-  onStop: () => void;
-  onExpand: () => void;
-}) {
-  const front = role === "front";
-  const lines = rollingLog(transcript.fragments, ROLLING_LOG_KEPT);
-  const placeholder = transcript.unsupported
-    ? "这台设备的 daemon 版本过旧，看不到执行过程"
-    : lines.length === 0
-      ? state.kind === "queued"
-        ? "等待主机接单…"
-        : state.kind === "host-lost"
-          ? "主机连接中断，等待它重连"
-          : "还没有输出"
-      : null;
-
-  return (
-    // Position, scale, rotation and opacity are written by the deck's loop: no React `style` here.
-    <div
-      ref={controller.cardRef(run.runId)}
-      role="status"
-      aria-label={`executor：${run.title}`}
-      className={cn(
-        "absolute left-0 top-0 w-80 select-none overflow-hidden rounded-lg border border-border bg-popover/95 text-popover-foreground backdrop-blur transition-shadow duration-200",
-        front && "pointer-events-auto cursor-grab shadow-lg group-data-[lifted]/deck:cursor-grabbing group-data-[lifted]/deck:shadow-2xl",
-        role === "back" && "pointer-events-auto cursor-pointer shadow-md",
-        role === "leaving" && "pointer-events-none shadow-md",
-      )}
-      onPointerDown={(event) => controller.pointerDown(event.nativeEvent, event.currentTarget, run.runId)}
-      onPointerMove={(event) => controller.pointerMove(event.nativeEvent)}
-      onPointerUp={(event) => controller.pointerUp(event.nativeEvent)}
-      onPointerCancel={(event) => controller.pointerCancel(event.nativeEvent)}
-    >
-      <div data-deck-part="content" className={cn(state.kind === "host-lost" && "[&>*]:opacity-70")}>
-        <div className="relative grid h-9 grid-cols-[12px_minmax(0,1fr)_auto] items-center gap-x-2 px-3">
-          <span className="flex h-4 items-center justify-center">
-            <StateGlyph state={state} />
-          </span>
-          <span className="truncate text-base font-medium leading-4">{run.title}</span>
-          {/* Hovering the deck swaps these for the controls, which overlay them instead of
-              reserving width while hidden. */}
-          <div className={cn("flex items-center gap-2 transition-opacity duration-150", front && "group-data-[hover]/deck:opacity-0")}>
-            <ModeBadge write={run.write} />
-            <span className="min-w-7 text-right text-sm tabular-nums leading-4 text-muted-foreground">{elapsed}</span>
-          </div>
-          {front ? (
-            <div className="pointer-events-none absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 bg-gradient-to-r from-transparent to-popover to-[16px] pl-5 opacity-0 transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-data-[hover]/deck:pointer-events-auto group-data-[hover]/deck:opacity-100">
-              {counter ? <span className="px-1 text-xs tabular-nums leading-4 text-muted-foreground">{counter}</span> : null}
-              <StopButton onStop={onStop} disabled={state.kind === "ended"} size="sm" />
-              <Tooltip content="展开">
-                <button
-                  className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                  aria-label="展开 executor 记录"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onExpand();
-                  }}
-                >
-                  <Maximize2 className="size-3" />
-                </button>
-              </Tooltip>
-            </div>
-          ) : null}
-        </div>
-        <RollingLog lines={lines} placeholder={placeholder} />
-      </div>
-    </div>
-  );
-}
-
 /**
  * The collapsed card's log, at the card's full width, flowing top-down. Once full, the newest line
  * stays at the bottom: each new line slides the block up by one line and the oldest leave through
@@ -638,28 +647,26 @@ function RollingLog({ lines, placeholder }: { lines: ExecutorLogLine[]; placehol
  * Expanded: the paper's typography over most of the pane
  * ------------------------------------------------------------------ */
 
-function ExecutorPanel({
-  run,
-  state,
-  elapsed,
-  transcript,
-  onStop,
-  onCollapse,
-}: {
-  run: ExecutorRunState;
-  state: CardState;
-  elapsed: string;
-  transcript: TranscriptState;
-  onStop: () => void;
-  onCollapse: () => void;
-}) {
+/**
+ * The expanded card's scroll area. The deck's loop sizes it to the panel's final rect from the
+ * first frame of the morph (so it never reflows while the card grows) and fades it in.
+ */
+function TranscriptView({ transcript, state, open }: { transcript: TranscriptState; state: CardState; open: boolean }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
   const stickToBottom = useRef(true);
 
-  // The panel takes the focus, so the terminal underneath does not even see keydown.
+  // The panel takes the focus the moment expansion starts, so the terminal underneath does not
+  // even see keydown (a stray Esc must never reach the shell).
   useEffect(() => {
-    scrollRef.current?.focus({ preventScroll: true });
+    if (open) scrollRef.current?.focus({ preventScroll: true });
+  }, [open]);
+
+  // Start at the newest fragment. This runs after the deck's layout pass has given the view its
+  // size (the loop writes it in the same commit); the layout effect below runs before that.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
   }, []);
 
   // Follow the newest fragment unless the reader scrolled up to read something.
@@ -672,71 +679,49 @@ function ExecutorPanel({
   const foldPrompt = promptIsLong(transcript.prompt) && !promptOpen;
 
   return (
+    // Below the header and its 1 px divider (CARD_LOG_TOP); width, height, opacity and pointer
+    // events are the loop's.
     <div
-      role="dialog"
-      aria-label={`executor：${run.title}`}
-      // inset-6 leaves the terminal visible around the panel: it still reads as floating over it.
-      // The slot it is portalled into sits at z-40 (the paper's level), above the collapsed stack.
-      className="pointer-events-auto absolute inset-6 flex flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-2xl"
+      ref={scrollRef}
+      data-deck-part="body"
+      tabIndex={-1}
+      className="absolute left-0 top-[37px] cursor-text select-text overflow-y-auto outline-none"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+      }}
     >
-      <div className="flex h-10 shrink-0 select-none items-center gap-2 border-b border-border px-4">
-        <StateGlyph state={state} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{run.title}</span>
-        <ModeBadge write={run.write} />
-        <span className="shrink-0 text-xs text-muted-foreground">{stateText(state)}</span>
-        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{elapsed}</span>
-        <StopButton onStop={onStop} disabled={state.kind === "ended"} size="md" />
-        <Tooltip content={state.kind === "ended" ? "关闭" : "收起"}>
-          <button
-            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            aria-label={state.kind === "ended" ? "关闭" : "收起"}
-            onClick={onCollapse}
-          >
-            {state.kind === "ended" ? <X className="size-3.5" /> : <Minimize2 className="size-3.5" />}
-          </button>
-        </Tooltip>
-      </div>
-      <div
-        ref={scrollRef}
-        tabIndex={-1}
-        className="min-h-0 flex-1 cursor-text select-text overflow-y-auto outline-none"
-        onScroll={(event) => {
-          const node = event.currentTarget;
-          stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-        }}
-      >
-        <div className="mx-auto max-w-[840px] break-words px-8 pb-16 pt-6 font-sans text-lg leading-[1.6]">
-          {transcript.prompt ? (
-            <div className="flex justify-end pb-5 pt-1">
-              <div className="min-w-0 max-w-[80%] rounded-[12px] border border-foreground/12 bg-input px-3 py-2 text-foreground">
-                <PaperMarkdown text={foldPrompt ? promptHead(transcript.prompt) : transcript.prompt} />
-                {promptIsLong(transcript.prompt) ? (
-                  <button
-                    className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                    onClick={() => setPromptOpen((open) => !open)}
-                  >
-                    {promptOpen ? "收起任务描述" : "展开完整任务描述"}
-                  </button>
-                ) : null}
-              </div>
+      <div className="mx-auto max-w-[840px] break-words px-8 pb-16 pt-6 font-sans text-lg leading-[1.6]">
+        {transcript.prompt ? (
+          <div className="flex justify-end pb-5 pt-1">
+            <div className="min-w-0 max-w-[80%] rounded-[12px] border border-foreground/12 bg-input px-3 py-2 text-foreground">
+              <PaperMarkdown text={foldPrompt ? promptHead(transcript.prompt) : transcript.prompt} />
+              {promptIsLong(transcript.prompt) ? (
+                <button
+                  className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  onClick={() => setPromptOpen((value) => !value)}
+                >
+                  {promptOpen ? "收起任务描述" : "展开完整任务描述"}
+                </button>
+              ) : null}
             </div>
-          ) : null}
-          {transcript.unsupported ? (
-            <p className="pb-4 text-sm text-muted-foreground">这台设备的 daemon 版本过旧，看不到执行过程；运行 cofluxd update 后再试。</p>
-          ) : null}
-          {transcript.omitted ? <p className="pb-4 text-xs text-muted-foreground">更早的输出已省略</p> : null}
-          <div className="space-y-4">
-            {transcript.fragments.map((fragment) => (
-              <FragmentEntry key={fragment.seq} fragment={fragment} />
-            ))}
           </div>
-          {transcript.fragments.length === 0 && !transcript.unsupported && state.kind !== "ended" ? (
-            <p className="text-sm text-muted-foreground">{state.kind === "queued" ? "等待主机接单…" : "还没有输出"}</p>
-          ) : null}
-          {transcript.end ? <EndEntry end={transcript.end} /> : state.kind === "ended" ? (
-            <p className="pt-6 text-sm text-muted-foreground">运行已结束</p>
-          ) : null}
+        ) : null}
+        {transcript.unsupported ? (
+          <p className="pb-4 text-sm text-muted-foreground">这台设备的 daemon 版本过旧，看不到执行过程；运行 cofluxd update 后再试。</p>
+        ) : null}
+        {transcript.omitted ? <p className="pb-4 text-xs text-muted-foreground">更早的输出已省略</p> : null}
+        <div className="space-y-4">
+          {transcript.fragments.map((fragment) => (
+            <FragmentEntry key={fragment.seq} fragment={fragment} />
+          ))}
         </div>
+        {transcript.fragments.length === 0 && !transcript.unsupported && state.kind !== "ended" ? (
+          <p className="text-sm text-muted-foreground">{state.kind === "queued" ? "等待主机接单…" : "还没有输出"}</p>
+        ) : null}
+        {transcript.end ? <EndEntry end={transcript.end} /> : state.kind === "ended" ? (
+          <p className="pt-6 text-sm text-muted-foreground">运行已结束</p>
+        ) : null}
       </div>
     </div>
   );
