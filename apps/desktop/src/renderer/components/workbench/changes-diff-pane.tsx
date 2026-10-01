@@ -89,8 +89,17 @@ const ROW_BLOCK = 120;
 // size: monospace looks larger than the UI sans at the same px, so it sits one step below body.
 const ROW_HEIGHT_PX = 20;
 
+/** Additions only or deletions only: one side has nothing to show, so split view is never offered. */
+function isOneSided(file: ChangedFile): boolean {
+  if (file.status === "added" || file.status === "untracked" || file.status === "deleted") return true;
+  return file.additions > 0 !== file.deletions > 0;
+}
+
 export function ChangesDiffPane(props: DiffPaneProps) {
-  const { file, state, mode, onModeChange, whitespace, onWhitespaceChange, onStep } = props;
+  const { file, state, onModeChange, whitespace, onWhitespaceChange, onStep } = props;
+  // The saved preference is left alone: the next two-sided file shows it again.
+  const oneSided = isOneSided(file);
+  const mode: DiffMode = oneSided ? "inline" : props.mode;
   const slash = file.path.lastIndexOf("/");
   const name = slash >= 0 ? file.path.slice(slash + 1) : file.path;
   const directory = slash >= 0 ? file.path.slice(0, slash) : "";
@@ -118,7 +127,14 @@ export function ChangesDiffPane(props: DiffPaneProps) {
             <ChevronDown className="size-3.5" />
           </HeaderButton>
           <HeaderButton
-            label={mode === "split" ? "并排显示，点击切换为内联" : "内联显示，点击切换为并排"}
+            label={
+              oneSided
+                ? `${file.deletions > 0 || file.status === "deleted" ? "只有删除" : "只有新增"}，固定内联显示`
+                : mode === "split"
+                  ? "并排显示，点击切换为内联"
+                  : "内联显示，点击切换为并排"
+            }
+            disabled={oneSided}
             onClick={() => onModeChange(mode === "split" ? "inline" : "split")}
           >
             {mode === "split" ? <Columns2 className="size-3.5" /> : <Rows2 className="size-3.5" />}
@@ -128,7 +144,7 @@ export function ChangesDiffPane(props: DiffPaneProps) {
         </div>
       </div>
       <div className="relative min-h-0 flex-1">
-        <PaneBody {...props} />
+        <PaneBody {...props} mode={mode} />
       </div>
     </div>
   );
@@ -156,13 +172,19 @@ export function HeaderButton({
         type="button"
         aria-label={label}
         aria-pressed={pressed}
-        disabled={disabled}
+        // `aria-disabled`, not `disabled`: a disabled button gets no hover, and the tooltip is what
+        // says why it does nothing.
+        aria-disabled={disabled || undefined}
         className={cn(
-          "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-35 disabled:hover:bg-transparent",
-          pressed ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors",
+          disabled
+            ? "cursor-default text-muted-foreground opacity-35"
+            : pressed
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground",
           className,
         )}
-        onClick={onClick}
+        onClick={disabled ? undefined : onClick}
       >
         {children}
       </button>
