@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { shouldCopyTerminalFileReference, shouldOpenTerminalWebLink } from "./terminal-link-activation";
+import { shouldOpenTerminalFileLink, shouldOpenTerminalWebLink } from "./terminal-link-activation";
 
 test("a web link opens on a plain primary click, with or without modifiers", () => {
   assert.equal(shouldOpenTerminalWebLink({ button: 0 }, false), true);
@@ -15,9 +15,9 @@ test("a web link does not open from a right or middle click, nor at the end of a
   assert.equal(shouldOpenTerminalWebLink({ button: 0 }, true), false);
 });
 
-test("a file reference still needs ⌘ (or Ctrl) and the primary button", () => {
-  assert.equal(shouldCopyTerminalFileReference({ button: 0 }), false);
-  assert.equal(shouldCopyTerminalFileReference({ button: 0, metaKey: true }), true);
-  assert.equal(shouldCopyTerminalFileReference({ button: 0, ctrlKey: true }), true);
-  assert.equal(shouldCopyTerminalFileReference({ button: 2, metaKey: true }), false);
+test("a file link still needs ⌘ (or Ctrl) and the primary button", () => {
+  assert.equal(shouldOpenTerminalFileLink({ button: 0 }), false);
+  assert.equal(shouldOpenTerminalFileLink({ button: 0, metaKey: true }), true);
+  assert.equal(shouldOpenTerminalFileLink({ button: 0, ctrlKey: true }), true);
+  assert.equal(shouldOpenTerminalFileLink({ button: 2, metaKey: true }), false);
 });

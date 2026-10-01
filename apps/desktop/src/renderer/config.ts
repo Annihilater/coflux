@@ -42,6 +42,12 @@ export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
  */
 export const SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
 /**
+ * File tabs' records (plan 20261001-terminal-file-tab): per tab, its workspace, the file's canonical
+ * workspace-relative path and the line it was opened at. Scoped like the layouts that reference
+ * them; never synced to the account.
+ */
+export const FILE_TABS_KEY = `coflux_file_tabs:${SERVER_URL}`;
+/**
  * The built-in browser's history: global on this Mac — every workspace and every server share
  * it — and never synced.
  */

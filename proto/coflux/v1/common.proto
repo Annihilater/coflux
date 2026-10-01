@@ -161,7 +161,48 @@ message FsReadResult {
   string request_id = 1;
   bool ok = 2;
   string content = 3;
+  // Free-form, human-readable text. Clients decide every state from `status`, never from this.
   optional string error = 4;
+  // Opaque revision of the file the answer describes (plan 20261001-terminal-file-tab), derived by
+  // the worker from file metadata; clients only compare it for equality. A worker that knows this
+  // field always sets it on OK and NOT_MODIFIED; an OK answer with an empty revision comes from a
+  // worker that predates it.
+  string revision = 5;
+  // UNSPECIFIED only from a worker that predates the field.
+  FsReadStatus status = 6;
+}
+
+// The typed outcome of an fs read (plan 20261001-terminal-file-tab).
+enum FsReadStatus {
+  FS_READ_STATUS_UNSPECIFIED = 0;
+  // `content` is the whole file (lossy UTF-8) and `revision` is its revision.
+  FS_READ_STATUS_OK = 1;
+  // The request's `known_revision` equals the file's current revision; `content` is empty.
+  FS_READ_STATUS_NOT_MODIFIED = 2;
+  // The path does not exist (or a link in it is dangling).
+  FS_READ_STATUS_NOT_FOUND = 3;
+  // The path exists but is not a regular file.
+  FS_READ_STATUS_NOT_FILE = 4;
+  // The file is larger than the worker's read cap (2 MB).
+  FS_READ_STATUS_TOO_LARGE = 5;
+  // Anything else: the path resolves outside the workspace, an I/O failure.
+  FS_READ_STATUS_ERROR = 6;
+}
+
+// One entry of a DeviceFsStatResult, in request order (plan 20261001-terminal-file-tab).
+message FsStatEntry {
+  // Echo of the requested path, byte for byte.
+  string path = 1;
+  // The path resolves (links followed) to something inside the workspace root. False for a
+  // missing path, a dangling link and a path that resolves outside the root.
+  bool exists = 2;
+  // The resolved target is a regular file.
+  bool is_file = 3;
+  // The file's revision, comparable with FsReadResult.revision; empty unless `is_file`.
+  string revision = 4;
+  // Set when `exists`: the canonical path relative to the canonicalised root ("~" expanded,
+  // links and ".." resolved, absolute inputs made relative); empty for the root itself.
+  string relative_path = 5;
 }
 
 message FsWriteResult {

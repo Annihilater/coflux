@@ -553,6 +553,29 @@ message DeviceFsRead {
   string request_id = 1;
   string workspace_id = 2; // worker 从中心同步的 WorkspaceList 解析并锚定 root。
   string path = 3;
+  // Conditional read (plan 20261001-terminal-file-tab): when set and equal to the file's current
+  // revision, the worker answers FS_READ_STATUS_NOT_MODIFIED with empty content. A worker that
+  // predates the field ignores it and answers the whole file.
+  optional string known_revision = 4;
+}
+
+// Batched existence check (plan 20261001-terminal-file-tab), anchored and scoped like DeviceFsRead
+// (DEVICE_SCOPE_RPC). Each path is resolved against the workspace root like a read; the answer has
+// one entry per requested path, in order. A worker that predates this payload decodes it as an
+// empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients attribute
+// that, arriving on the RPC lane, to their in-flight stat requests (daemon outdated).
+message DeviceFsStat {
+  string request_id = 1;
+  string workspace_id = 2;
+  // At most 64 paths; a larger batch is refused with ok=false.
+  repeated string paths = 3;
+}
+
+message DeviceFsStatResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  repeated FsStatEntry entries = 4;
 }
 
 // fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
@@ -1824,5 +1847,7 @@ message DeviceEnvelope {
     ScreenCursor screen_cursor = 141;
     ScreenClipboardSet screen_clipboard_set = 142;
     ScreenClipboardChanged screen_clipboard_changed = 143;
+    DeviceFsStat fs_stat = 144;
+    DeviceFsStatResult fs_stat_result = 145;
   }
 }

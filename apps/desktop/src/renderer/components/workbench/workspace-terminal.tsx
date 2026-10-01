@@ -24,6 +24,10 @@ import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
 import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
+import type { FileRuntime } from "@/components/workbench/file-runtime";
+import { fileTabTitle } from "@/components/workbench/file-tabs";
+import { FileView } from "@/components/workbench/file-view";
+import { FileTypeIcon } from "@/components/workbench/changes-file-icon";
 import { BrowserTabGlyph } from "@/components/workbench/browser-view";
 import { desktop } from "@/config";
 import type { TerminalAttach } from "@/components/workbench/terminal-attach";
@@ -35,6 +39,7 @@ import {
   groupBodyStyle,
   groupFrameStyle,
   isBrowserTabId,
+  isFileTabId,
   isScreenTabId,
   layoutGeometry,
   moveTabToGroup,
@@ -169,6 +174,8 @@ export type WorkspaceLayoutActions = {
   createScreenTab: (workspaceId: string, groupId: string) => void;
   /** A screen tab's close button / context menu: ends the remote session, no confirmation. */
   closeScreenTab: (workspaceId: string, tabId: string) => void;
+  /** A file tab's close button / context menu (plan 20261001-terminal-file-tab): removes the tab, no confirmation. */
+  closeFileTab: (workspaceId: string, tabId: string) => void;
 };
 
 type WorkspaceTerminalProps = {
@@ -195,6 +202,8 @@ type WorkspaceTerminalProps = {
   browser: BrowserRuntime;
   /** Remote screen tabs' records for their strip chips (plan 20260929-remote-desktop). */
   screens: ScreenRuntime;
+  /** File tabs' records and views (plan 20261001-terminal-file-tab). */
+  files: FileRuntime;
   /** Whether 屏幕 is offered in this workspace's ＋ menu: its device advertises the helper and is not this Mac. */
   canOpenScreen: boolean;
   /** The group whose ＋ menu is open, if it is in this workspace. */
@@ -379,6 +388,8 @@ type DragGhost = {
   browser: { favicon: string | null } | null;
   /** A screen tab's ghost shows the monitor glyph (plan 20260929-remote-desktop). */
   screen: boolean;
+  /** A file tab's ghost shows its file-type icon (plan 20261001-terminal-file-tab): the file's path. */
+  file: string | null;
   width: number;
   offsetX: number;
   offsetY: number;
@@ -520,6 +531,7 @@ export function WorkspaceTerminal({
   actions,
   browser,
   screens,
+  files,
   canOpenScreen,
   newTabMenuGroupId,
   agentTabs,
@@ -540,6 +552,7 @@ export function WorkspaceTerminal({
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
   const screenTabs = useStore(screens.tabs, (state) => state.tabs);
+  const fileTabs = useStore(files.tabs, (state) => state.tabs);
   const daemons = useStore(client.store, (state) => state.daemons);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
@@ -719,7 +732,7 @@ export function WorkspaceTerminal({
   }
 
   /** Native HTML5 drag of any tab (terminal or browser); its payload is not a file type. */
-  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], screenGhost = false) {
+  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], screenGhost = false, fileGhost: string | null = null) {
     return {
       draggable: true,
       onDragStart: (event: ReactDragEvent<HTMLDivElement>) => {
@@ -731,6 +744,7 @@ export function WorkspaceTerminal({
           title,
           browser: browserGhost,
           screen: screenGhost,
+          file: fileGhost,
           width: tabRect.width,
           offsetX: event.clientX - tabRect.left,
           offsetY: event.clientY - tabRect.top,
@@ -890,6 +904,79 @@ export function WorkspaceTerminal({
     );
   }
 
+  /**
+   * A file tab's chip (plan 20261001-terminal-file-tab): the file-type icon, the file name (the
+   * workspace-relative path in a tooltip, since names collide and truncate), a close button — the
+   * same chrome, drag and split behaviour as the other tabs. Closing needs no confirmation.
+   */
+  function renderFileTab(
+    group: LayoutGroup,
+    tabId: string,
+    isActive: boolean,
+    bright: boolean,
+    activeClass: string,
+    idleClass: string,
+    indicators: ReactNode,
+  ) {
+    const record = fileTabs[tabId];
+    const path = record?.path ?? "";
+    const label = path ? fileTabTitle(path) : "文件";
+    const canSplit = group.tabs.length > 1;
+    return (
+      <div
+        key={tabId}
+        data-tab-slot
+        className={cn("relative shrink-0", dragTaskId === tabId && "opacity-50")}
+        style={NO_DRAG_REGION_STYLE}
+        {...tabDragProps(tabId, label, null, false, path)}
+      >
+        <ContextMenu
+          label={`标签页「${label}」操作`}
+          size="sm"
+          items={[
+            { label: "复制路径", isDisabled: !path, onClick: () => desktop.writeClipboard(path) },
+            { type: "divider" },
+            {
+              label: "移到右侧新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "right")),
+            },
+            {
+              label: "移到下方新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "down")),
+            },
+            { type: "divider" },
+            { label: "关闭标签页", onClick: () => actions.closeFileTab(workspaceId, tabId) },
+          ]}
+        >
+          <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
+            <button className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left" onClick={() => actions.activateTab(workspaceId, tabId)}>
+              <FileTypeIcon path={path} className={bright ? "opacity-90" : "opacity-70"} />
+              {path ? (
+                <Tooltip content={path} placement="below">
+                  <span className="truncate">{label}</span>
+                </Tooltip>
+              ) : (
+                <span className="truncate">{label}</span>
+              )}
+            </button>
+            {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
+            <Tooltip content={bright ? `关闭标签页 ${modPrefix}W` : "关闭标签页"} placement="below">
+              <button
+                className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                onClick={() => actions.closeFileTab(workspaceId, tabId)}
+              >
+                <X className="size-3" />
+              </button>
+            </Tooltip>
+          </div>
+        </ContextMenu>
+        {indicators}
+      </div>
+    );
+  }
+
   function renderTab(group: LayoutGroup, taskId: string, index: number, groupFocused: boolean) {
     const isActive = group.activeTabId === taskId;
     // The focused group's active tab carries the full highlight; other groups' active tabs a weaker one.
@@ -926,6 +1013,7 @@ export function WorkspaceTerminal({
 
     if (isBrowserTabId(taskId)) return renderBrowserTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
     if (isScreenTabId(taskId)) return renderScreenTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
+    if (isFileTabId(taskId)) return renderFileTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
 
     const task = taskById.get(taskId);
     if (!task) return null;
@@ -1130,6 +1218,12 @@ export function WorkspaceTerminal({
             as a whole), so the empty state, the creating placeholder and the banners here still get clicks;
             banners are z-10, above the pane. */}
         <div className="relative min-h-0 min-w-0 flex-1 bg-terminal">
+          {/* A file tab's view (plan 20261001-terminal-file-tab) lives in the group body: no pane layer,
+              no webview. It remounts when its group's active tab changes; the runtime keeps what it
+              showed, so it comes back at once and only asks whether the file changed. */}
+          {group.activeTabId && isFileTabId(group.activeTabId) ? (
+            <FileView key={group.activeTabId} runtime={files} client={client} tabId={group.activeTabId} onScreen={active && !changesOpen} />
+          ) : null}
           {showsPending && pending ? (
             // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
             <div className="absolute inset-0 flex items-center justify-center">
@@ -1290,6 +1384,8 @@ export function WorkspaceTerminal({
               <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
             ) : dragGhost.screen ? (
               <Monitor className="size-3 shrink-0 opacity-90" />
+            ) : dragGhostRef.current.file !== null ? (
+              <FileTypeIcon path={dragGhostRef.current.file} />
             ) : (
               <SquareTerminal className="size-3 shrink-0 opacity-90" />
             )}

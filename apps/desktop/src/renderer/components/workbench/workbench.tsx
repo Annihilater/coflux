@@ -54,6 +54,8 @@ import { localPortUrl, normalizeIncomingUrl } from "@/components/workbench/brows
 import { ScreenViews, type ScreenViewEntry } from "@/components/workbench/screen-view";
 import { createScreenRuntime } from "@/components/workbench/screen-runtime";
 import { createScreenSessionId, createScreenTabId, readScreenTabRecords, restoreScreenTabs, type ScreenTabStore } from "@/components/workbench/screen-tabs";
+import { createFileRuntime } from "@/components/workbench/file-runtime";
+import { createFileTabId, findFileTab, readFileTabRecords, restoreFileTabs, type FileTabStore } from "@/components/workbench/file-tabs";
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
@@ -76,6 +78,7 @@ import {
   groupBodyStyle,
   groupOfTab,
   isBrowserTabId,
+  isFileTabId,
   isScreenTabId,
   isTaskTabId,
   layoutGeometry,
@@ -104,6 +107,7 @@ import {
   BROWSER_TABS_KEY,
   COMMAND_PALETTE_RECENT_KEY,
   DAEMON_ONBOARDING_DISMISSED_KEY,
+  FILE_TABS_KEY,
   SCREEN_TABS_KEY,
   TERMINAL_LAYOUTS_KEY,
   WORKSPACE_KEY,
@@ -180,6 +184,8 @@ const BROWSER_TAB_STORE: BrowserTabStore = { storage: localStorage, key: BROWSER
 const BROWSER_LIBRARY_STORE: BrowserLibraryStore = { storage: localStorage, key: BROWSER_LIBRARY_KEY };
 /** Remote screen tabs' records (plan 20260929-remote-desktop): workspace, device and remote session id per tab. */
 const SCREEN_TAB_STORE: ScreenTabStore = { storage: localStorage, key: SCREEN_TABS_KEY };
+/** File tabs' records (plan 20261001-terminal-file-tab): workspace, canonical path and line per tab. */
+const FILE_TAB_STORE: FileTabStore = { storage: localStorage, key: FILE_TABS_KEY };
 
 /** Nothing on screen: no workspace selected, or its changes overlay covers the groups. */
 const NO_SCREEN: { visible: ReadonlySet<string>; focused: string | null } = { visible: new Set(), focused: null };
@@ -419,12 +425,21 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const browserRestored = restoreBrowserTabs(readStoredLayouts(TERMINAL_LAYOUT_STORE), readBrowserTabRecords(BROWSER_TAB_STORE));
     // Screen tabs come back the same way (plan 20260929-remote-desktop): id without record dropped, and vice versa.
     const screenRestored = restoreScreenTabs(browserRestored.layouts, readScreenTabRecords(SCREEN_TAB_STORE));
-    return { layouts: screenRestored.layouts, records: browserRestored.records, screenRecords: screenRestored.records };
+    // File tabs too (plan 20261001-terminal-file-tab).
+    const fileRestored = restoreFileTabs(screenRestored.layouts, readFileTabRecords(FILE_TAB_STORE));
+    return {
+      layouts: fileRestored.layouts,
+      records: browserRestored.records,
+      screenRecords: screenRestored.records,
+      fileRecords: fileRestored.records,
+    };
   });
   const [layouts, setLayouts] = useState<Record<string, TerminalLayout>>(initialState.layouts);
   const layoutsRef = useRef<Record<string, TerminalLayout>>(initialState.layouts);
   // Remote screen tabs' runtime: records and the live sessions of mounted views.
   const [screens] = useState(() => createScreenRuntime({ desktop, tabStore: SCREEN_TAB_STORE, initialRecords: initialState.screenRecords }));
+  // File tabs' runtime (plan 20261001-terminal-file-tab): records, reveal requests, last shown content.
+  const [files] = useState(() => createFileRuntime({ tabStore: FILE_TAB_STORE, initialRecords: initialState.fileRecords }));
   // The screen tab in immersive mode (plan 20260929-remote-desktop): sidebar and tab strips hidden,
   // the window full screen, the picture filling it. ⌃⌥⌘F toggles it both ways; leaving full screen
   // by any other means ends it too (main reports it).
@@ -552,12 +567,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
     return screenOf(activeWorkspaceIdRef.current, changesOpenRef.current, layoutsRef.current);
   }
 
-  /** The focused group's active tab of the selected workspace when it is a browser tab on screen. */
+  /** The focused group's active tab of the selected workspace when it is a browser or file tab on screen. */
   function focusedBrowserTabId(): string | null {
     const workspaceId = activeWorkspaceIdRef.current;
     if (!workspaceId || changesOpenRef.current[workspaceId]) return null;
     const focused = focusedTabId(layoutOf(workspaceId));
-    return focused && isBrowserTabId(focused) ? focused : null;
+    return focused && (isBrowserTabId(focused) || isFileTabId(focused)) ? focused : null;
   }
 
   /**
@@ -568,6 +583,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   function focusTab(tabId: string) {
     if (isBrowserTabId(tabId)) browser.focus(tabId);
     else if (isScreenTabId(tabId)) screens.focus(tabId);
+    else if (isFileTabId(tabId)) files.focus(tabId);
     else if (isTaskTabId(tabId)) attach.focusTask(tabId);
   }
 
@@ -644,6 +660,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     }
     if (isScreenTabId(taskId)) {
       screens.focus(taskId);
+      return;
+    }
+    if (isFileTabId(taskId)) {
+      files.focus(taskId);
       return;
     }
     const task = client.store.getState().tasks.find((item) => item.id === taskId);
@@ -750,6 +770,50 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next = focusedTabId(layoutOf(workspaceId));
     if (next) focusTab(next);
   }
+
+  /**
+   * A terminal file link's ⌘+click or 打开文件 (plan 20261001-terminal-file-tab). `path` is the
+   * canonical workspace-relative path the device reported — the file's identity — so the same file
+   * of the same workspace reuses its tab: it is activated where it is and jumps to the new line.
+   * Otherwise a new file tab opens in the focused group, its record written before the layout.
+   */
+  function openFileTab(workspaceId: string, path: string, line?: number) {
+    setWorkspaceChangesOpen(workspaceId, false);
+    const existing = findFileTab(files.tabs.getState().tabs, workspaceId, path);
+    if (existing && groupOfTab(layoutOf(workspaceId), existing)) {
+      files.reveal(existing, line);
+      activateTaskByUser(workspaceId, existing);
+      return;
+    }
+    if (existing) files.removeTab(existing);
+    const tabId = createFileTabId(crypto.randomUUID());
+    files.createTab(tabId, line === undefined ? { workspaceId, path } : { workspaceId, path, line });
+    commitLayout(workspaceId, revealTab(layoutOf(workspaceId), tabId));
+    if (workspaceId === activeWorkspaceIdRef.current) files.focus(tabId);
+  }
+
+  /** Closing a file tab just removes it — no confirmation. The caret goes to the tab that takes its place. */
+  function closeFileTab(workspaceId: string, tabId: string) {
+    commitLayout(workspaceId, removeTab(layoutOf(workspaceId), tabId));
+    files.removeTab(tabId);
+    if (workspaceId !== activeWorkspaceIdRef.current) return;
+    const next = focusedTabId(layoutOf(workspaceId));
+    if (next) focusTab(next);
+  }
+
+  // A file tab whose workspace is gone is pruned, record and layout entry, once a snapshot says so
+  // (before the first one the workspace list is empty only because nothing has arrived).
+  useEffect(() => {
+    if (!snapshotReady) return;
+    const live = new Set(workspaces.map((workspace) => workspace.id));
+    for (const [tabId, record] of Object.entries(files.tabs.getState().tabs)) {
+      if (live.has(record.workspaceId)) continue;
+      const layout = layoutsRef.current[record.workspaceId];
+      if (layout && groupOfTab(layout, tabId)) commitLayout(record.workspaceId, removeTab(layout, tabId));
+      files.removeTab(tabId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaces, snapshotReady]);
 
   /** Immersive mode on or off: the window follows (full screen), the sidebar and strips hide with the state. */
   function setImmersive(tabId: string | null) {
@@ -1480,6 +1544,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
           closeScreenTab(workspaceId, taskId);
           return;
         }
+        if (taskId && isFileTabId(taskId)) {
+          closeFileTab(workspaceId, taskId);
+          return;
+        }
         const task = taskId ? client.store.getState().tasks.find((item) => item.id === taskId) : undefined;
         if (task) requestCloseTask(task);
       },
@@ -1547,6 +1615,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       openScreenTab(workspaceId, daemonId);
     },
     closeScreenTab,
+    closeFileTab,
     setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId } : null),
     focusActiveTab: (workspaceId) => {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
@@ -1707,6 +1776,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     actions={workspaceActions}
                     browser={browser}
                     screens={screens}
+                    files={files}
                     canOpenScreen={canOpenScreenOn(workspace.daemonId)}
                     newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
                     agentTabs={agentLaunches.records}
@@ -1724,6 +1794,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                 const target = normalizeIncomingUrl(url);
                 if (target) openBrowserTab(workspaceId, target);
               }}
+              onOpenFile={openFileTab}
               onPromptStart={agentLaunches.handlePromptStart}
               client={client}
               attach={attach}
