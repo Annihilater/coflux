@@ -1,6 +1,6 @@
 import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FileDiff, FolderGit2, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
@@ -902,8 +902,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     selectWorkspace(workspace.id);
     return true;
   }
-  const landOnTaskRef = useRef(landOnTask);
-  landOnTaskRef.current = landOnTask;
 
   /**
    * Collapse or expand the sidebar (plan 20260930-collapsible-sidebar). The button that was clicked
@@ -960,13 +958,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   // 点系统通知 → 主进程把窗口带到前台、键盘交还工作台页，回传工作区 id 与等待中的终端 → 落到那个终端；
   // 终端已不在则退回选中工作区（工作区也已删则安静忽略）。
-  useEffect(() => {
-    return desktop.onFocusWorkspace((target) => {
-      if (target.taskId && landOnTaskRef.current(target.taskId)) return;
-      if (client.store.getState().workspaces.some((workspace) => workspace.id === target.workspaceId)) selectWorkspace(target.workspaceId);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client]);
+  const focusFromNotification = useEffectEvent((target: { workspaceId: string; taskId?: string | null }) => {
+    if (target.taskId && landOnTask(target.taskId)) return;
+    if (client.store.getState().workspaces.some((workspace) => workspace.id === target.workspaceId)) selectWorkspace(target.workspaceId);
+  });
+  useEffect(() => desktop.onFocusWorkspace((target) => focusFromNotification(target)), [client]);
 
   function selectDevice(daemonId: string) {
     const next: WorkbenchSelection = { kind: "device", id: daemonId };
@@ -1011,10 +1007,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   // server 拒绝（error 广播）或工作区已出现时解除设备空态的 busy。
-  useEffect(() => {
+  // Adjusted during render when either of them changes (not when busy itself is set).
+  const [busyCheckedFor, setBusyCheckedFor] = useState({ lastError, activeWorkspaceId });
+  if (busyCheckedFor.lastError !== lastError || busyCheckedFor.activeWorkspaceId !== activeWorkspaceId) {
+    setBusyCheckedFor({ lastError, activeWorkspaceId });
     if (deviceTerminalBusy && (lastError || activeWorkspaceId)) setDeviceTerminalBusy(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastError, activeWorkspaceId]);
+  }
 
   // workspaceCreate 无请求-响应关联：记下发起时已知的工作区 id，
   // 广播中新出现的该项目工作区即本次创建的，自动切换过去（同终端创建的识别模式）。
@@ -1049,7 +1047,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     client.send({ case: "workspaceCreate", value: { projectId: project.id, name: branch, branch, createNew } });
   }
 
-  useEffect(() => {
+  const adoptCreatedWorkspace = useEffectEvent((workspaces: readonly Workspace[]) => {
     const pending = pendingWorkspaceCreateRef.current;
     if (!pending) return;
     const created = workspaces.find((workspace) => workspace.projectId === pending.projectId && !pending.knownIds.has(workspace.id));
@@ -1058,16 +1056,19 @@ export function Workbench({ client }: { client: CofluxClient }) {
       removePendingWorkspace(pending.pendingId);
       selectWorkspace(created.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    adoptCreatedWorkspace(workspaces);
   }, [workspaces]);
 
   // 创建失败（error 广播）时丢弃 pending，避免误认后续他端创建的工作区
-  useEffect(() => {
-    if (!lastError) return;
+  const dropPendingWorkspaceCreate = useEffectEvent(() => {
     const pending = pendingWorkspaceCreateRef.current;
     pendingWorkspaceCreateRef.current = null;
     if (pending) removePendingWorkspace(pending.pendingId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (lastError) dropPendingWorkspaceCreate();
   }, [lastError]);
 
   // 卸载时清掉未收敛的 pending 兜底定时器（同 workspace-terminal 的 pendingTabTimer 清理）。
@@ -1217,10 +1218,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
   screenEntries.sort((left, right) => (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0));
   // Immersive mode ends with its tab leaving the screen (closed, another workspace selected).
   const immersiveOnScreen = immersiveTabId !== null && screenEntries.some((entry) => entry.tabId === immersiveTabId && entry.visible);
+  // What setImmersive(null) does, split: the state during render, the window (full screen off) from
+  // an effect that runs once per such exit.
+  const [immersiveExits, setImmersiveExits] = useState(0);
+  if (immersiveTabId && !immersiveOnScreen) {
+    setImmersiveTabId(null);
+    setImmersiveExits((count) => count + 1);
+  }
   useEffect(() => {
-    if (immersiveTabId && !immersiveOnScreen) setImmersive(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [immersiveTabId, immersiveOnScreen]);
+    if (immersiveExits > 0) desktop.screenImmersive(false);
+  }, [immersiveExits]);
 
   // A create that reconcile answered: the task took the pending tab's place; start it as the old
   // container did — unless the user picked another tab in that group while waiting (settling never steals the choice).
@@ -1249,10 +1256,12 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // forcing. A user activation is already queued by then and makes this a no-op for its tab.
   // Switching workspace is a user action: the focused pane takes the caret even though the sidebar
   // entry that was clicked holds focus (the pane's own focus-on-`focused` yields to it).
-  useEffect(() => {
+  const focusShownTab = useEffectEvent(() => {
     const focused = screen.focused ?? focusedBrowserTabId();
     if (focused) focusTab(focused);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    focusShownTab();
   }, [activeWorkspaceId]);
 
   const shownTaskIdsRef = useRef<ReadonlySet<string>>(new Set());
@@ -1298,15 +1307,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }, []);
 
   // An error broadcast drops the in-flight optimistic creates (taskCreate failed); the attach machine clears its own launching state.
-  useEffect(() => {
-    if (!lastError) return;
+  const dropPendingCreates = useEffectEvent(() => {
     for (const [workspaceId, entry] of pendingCreateTimersRef.current) {
       window.clearTimeout(entry.timer);
       agentLaunches.discardCreate(entry.pendingId);
       updateLayout(workspaceId, (current) => dropPendingTab(current, entry.pendingId));
     }
     pendingCreateTimersRef.current.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (lastError) dropPendingCreates();
   }, [lastError]);
 
   useEffect(() => {
@@ -1322,11 +1332,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // the optimistic tab. Declared before the workspace-visit effect below so that on a workspace
   // switch the workspace still ends up in front, as it always did.
   const lookedAtTerminalKey = activeWorkspaceId && screen.focused ? `${activeWorkspaceId}:${screen.focused}` : null;
-  useEffect(() => {
+  const recordLookedAtTerminal = useEffectEvent(() => {
     const taskId = screen.focused;
-    if (!lookedAtTerminalKey || !taskId) return;
+    if (!taskId) return;
     if (client.store.getState().tasks.some((task) => task.id === taskId)) recordRecentPlace(RECENT_PLACES_STORE, terminalVisitKey(taskId));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (lookedAtTerminalKey) recordLookedAtTerminal();
   }, [lookedAtTerminalKey]);
 
   // The ⌘P recent list (plan 20260921) records the place the user is actually looking at, which
