@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, Check, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Plus, Rows2, Space, UnfoldVertical } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Pilcrow, Plus, Rows2, UnfoldVertical } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
@@ -226,7 +226,7 @@ function WhitespaceMenu({ whitespace, onChange }: { whitespace: WhitespaceMode; 
         button={{
           ref: anchorRef,
           label: `空白：${current.label}`,
-          icon: <Space className="size-3.5" />,
+          icon: <Pilcrow className="size-3.5" />,
           isIconOnly: true,
           variant: "ghost",
           size: "sm",
