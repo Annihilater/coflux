@@ -298,7 +298,7 @@ enum Resolved {
 }
 
 /// The canonical root a batch of paths is resolved against.
-fn real_root(root: &str) -> Option<PathBuf> {
+pub(crate) fn real_root(root: &str) -> Option<PathBuf> {
     std::fs::canonicalize(expand_home(root)?).ok()
 }
 

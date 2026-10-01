@@ -16,6 +16,7 @@ mod device;
 mod device_loopback;
 mod executor_host;
 mod executor_settings;
+mod file_index;
 mod gateway;
 mod git;
 mod handle;

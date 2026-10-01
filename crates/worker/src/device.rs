@@ -3406,6 +3406,43 @@ impl DeviceRuntime {
                     Err(_) => failed(request.request_id, "文件查询失败"),
                 }
             }
+            // Files view (plan 20261002-workspace-files-view): the whole workspace in one answer.
+            // The root comes from the workspace list; git or walk mode is the index's own check.
+            device_envelope::Payload::FsIndex(request) => {
+                let Some(root) = workspace_root(&services.state, &request.workspace_id) else {
+                    return device_error(
+                        Some(request.request_id),
+                        "workspace_unknown",
+                        "workspaceId 不属于本 daemon 当前清单",
+                    );
+                };
+                let result = match crate::file_index::index_workspace(&root).await {
+                    Ok(crate::file_index::IndexOutcome::Complete(entries)) => {
+                        wire::DeviceFsIndexResult {
+                            request_id: request.request_id,
+                            ok: true,
+                            error: None,
+                            entries,
+                            truncated: false,
+                        }
+                    }
+                    Ok(crate::file_index::IndexOutcome::Truncated) => wire::DeviceFsIndexResult {
+                        request_id: request.request_id,
+                        ok: true,
+                        error: None,
+                        entries: Vec::new(),
+                        truncated: true,
+                    },
+                    Err(error) => wire::DeviceFsIndexResult {
+                        request_id: request.request_id,
+                        ok: false,
+                        error: Some(error),
+                        entries: Vec::new(),
+                        truncated: false,
+                    },
+                };
+                device_envelope::Payload::FsIndexResult(result)
+            }
             device_envelope::Payload::FsWrite(request) => {
                 let Some(root) = workspace_root(&services.state, &request.workspace_id) else {
                     return device_error(
@@ -4661,6 +4698,7 @@ fn clear_request_id(payload: &mut device_envelope::Payload) {
         device_envelope::Payload::FsList(value) => value.request_id.clear(),
         device_envelope::Payload::FsRead(value) => value.request_id.clear(),
         device_envelope::Payload::FsStat(value) => value.request_id.clear(),
+        device_envelope::Payload::FsIndex(value) => value.request_id.clear(),
         device_envelope::Payload::FsWrite(value) => value.request_id.clear(),
         device_envelope::Payload::PortsRequest(value) => value.request_id.clear(),
         device_envelope::Payload::ChangesListRequest(value) => value.request_id.clear(),
@@ -4693,6 +4731,9 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::FsListed(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsReadResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsStatResult(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::FsIndexResult(value) => {
+            value.request_id = request_id.to_string()
+        }
         device_envelope::Payload::FsWriteResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::PortsResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::ChangesList(value) => value.request_id = request_id.to_string(),
@@ -4787,6 +4828,7 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::FsList(_)
         | device_envelope::Payload::FsRead(_)
         | device_envelope::Payload::FsStat(_)
+        | device_envelope::Payload::FsIndex(_)
         | device_envelope::Payload::FsWrite(_)
         | device_envelope::Payload::PortsRequest(_)
         | device_envelope::Payload::ChangesListRequest(_)
@@ -4857,6 +4899,7 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         | device_envelope::Payload::FsListed(_)
         | device_envelope::Payload::FsReadResult(_)
         | device_envelope::Payload::FsStatResult(_)
+        | device_envelope::Payload::FsIndexResult(_)
         | device_envelope::Payload::FsWriteResult(_)
         | device_envelope::Payload::PortsResult(_)
         | device_envelope::Payload::ChangesList(_)
@@ -4916,6 +4959,7 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::FsList(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsRead(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsStat(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::FsIndex(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsWrite(value) => Some(value.request_id.clone()),
         device_envelope::Payload::PortsRequest(value) => Some(value.request_id.clone()),
         device_envelope::Payload::ChangesListRequest(value) => Some(value.request_id.clone()),

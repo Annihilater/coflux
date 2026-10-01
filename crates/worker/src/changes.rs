@@ -164,7 +164,7 @@ fn parse_raw_numstat(output: &str) -> Vec<RawChange> {
     changes
 }
 
-async fn git_bytes(worktree: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+pub(crate) async fn git_bytes(worktree: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .arg("--literal-pathspecs")
         .arg("-C")

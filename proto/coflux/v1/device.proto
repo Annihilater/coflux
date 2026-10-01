@@ -578,6 +578,49 @@ message DeviceFsStatResult {
   repeated FsStatEntry entries = 4;
 }
 
+// Whole-workspace file index (plan 20261002-workspace-files-view), anchored and scoped like
+// DeviceFsRead (DEVICE_SCOPE_RPC). When the workspace root is the top level of a git worktree the
+// index is git's view: every tracked file plus every untracked file that is not ignored
+// (`git ls-files --cached --others --exclude-standard`), and every ignored entry at its top-most
+// ignored level (`git ls-files --others --ignored --exclude-standard --directory`). Otherwise it is
+// a walk of the root with no ignored entries. A worker that predates this payload decodes it as an
+// empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients attribute
+// that, arriving on the RPC lane, to their in-flight index requests (daemon outdated).
+message DeviceFsIndex {
+  string request_id = 1;
+  string workspace_id = 2;
+}
+
+message DeviceFsIndexResult {
+  string request_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  // Sorted by path. Empty when `truncated`: a partial index would make folders look complete.
+  repeated FsIndexEntry entries = 4;
+  // The worker stopped at its entry cap, response-size budget or time budget. The client then
+  // lists folders one at a time with DeviceFsList instead.
+  bool truncated = 5;
+}
+
+enum FsIndexEntryKind {
+  FS_INDEX_ENTRY_KIND_UNSPECIFIED = 0;
+  // A leaf: a regular file, a symlink (never followed) or anything else that is not a directory.
+  FS_INDEX_ENTRY_KIND_FILE = 1;
+  // A directory the index does not descend into: an ignored directory, an untracked nested
+  // repository, a submodule gitlink, a walk's `.git` or empty directory. Its contents are listed
+  // on demand with DeviceFsList.
+  FS_INDEX_ENTRY_KIND_DIRECTORY = 2;
+}
+
+message FsIndexEntry {
+  // Relative to the workspace root, "/"-separated, never with a trailing slash.
+  string path = 1;
+  FsIndexEntryKind kind = 2;
+  // Matched by the ignore rules (git mode only). Everything under an ignored directory is ignored
+  // too; a tracked file matched by .gitignore is not ignored.
+  bool ignored = 3;
+}
+
 // fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
 // path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
 message DeviceFsWrite {
@@ -1849,5 +1892,7 @@ message DeviceEnvelope {
     ScreenClipboardChanged screen_clipboard_changed = 143;
     DeviceFsStat fs_stat = 144;
     DeviceFsStatResult fs_stat_result = 145;
+    DeviceFsIndex fs_index = 146;
+    DeviceFsIndexResult fs_index_result = 147;
   }
 }
