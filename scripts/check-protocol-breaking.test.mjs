@@ -5,7 +5,7 @@ import { assertBreakingResult, checkProtocolBreaking } from "./check-protocol-br
 const retired = JSON.parse(readFileSync(new URL("../proto/breaking-allowlist.json", import.meta.url), "utf8"));
 const diagnostic = value => ({ status: 100, stdout: JSON.stringify(value), stderr: "" });
 test("only the exact reviewed FILE removals are exempt", () => {
-  assert.equal(retired.length, 28);
+  assert.equal(retired.length, 30);
   for (const entry of retired) {
     assert.doesNotThrow(() => assertBreakingResult(diagnostic(entry), true));
     for (const field of ["path", "type", "message"]) assert.throws(() => assertBreakingResult(diagnostic({ ...entry, [field]: entry[field] + "unrelated" }), true));
