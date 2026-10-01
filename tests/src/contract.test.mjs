@@ -4,7 +4,7 @@ import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { FsEntryKind } from "@coflux/protocol";
+import { FsEntryKind, FsReadStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 import { openNativeDevice } from "./device-harness.mjs";
 
@@ -239,6 +239,78 @@ test("fs：root 内指向 root 外的符号链接被拒（realpath 锚定）", a
   const read = await device.request("fsRead", "fsReadResult", { requestId: "sl", workspaceId: main.workspace.id, path: "link.txt" });
   assert.equal(read.ok, false, "指向 root 外的符号链接被拒");
   rmSync(outside, { recursive: true, force: true });
+  device.close();
+});
+
+// ===== fsStat and the conditional fsRead (plan 20261001-terminal-file-tab) =====
+
+test("fsStat: one entry per path, in order — file, missing, directory, escape, absolute inside the root", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+  const paths = ["./src/../src/a.txt", "src/missing.ts", "src", "../../../../etc/passwd", join(ws.path, "README.md")];
+  const stat = await device.request("fsStat", "fsStatResult", { workspaceId: ws.id, paths });
+  assert.equal(stat.ok, true);
+  assert.deepEqual(stat.entries.map((entry) => entry.path), paths, "entries echo the requested paths in order");
+  const [file, missing, dir, escape, absolute] = stat.entries;
+
+  assert.equal(file.exists, true);
+  assert.equal(file.isFile, true);
+  assert.equal(file.relativePath, "src/a.txt", "canonical workspace-relative path");
+  assert.ok(file.revision.length > 0, "a regular file carries a revision");
+
+  assert.equal(missing.exists, false);
+  assert.equal(missing.isFile, false);
+  assert.equal(missing.relativePath, "");
+
+  assert.equal(dir.exists, true);
+  assert.equal(dir.isFile, false, "a directory is not a file");
+  assert.equal(dir.revision, "");
+  assert.equal(dir.relativePath, "src");
+
+  assert.equal(escape.exists, false, "a path escaping the root does not exist for the workspace");
+  assert.equal(escape.relativePath, "");
+
+  assert.equal(absolute.exists, true);
+  assert.equal(absolute.isFile, true);
+  assert.equal(absolute.relativePath, "README.md", "an absolute path inside the root is made relative");
+
+  // The stat revision is the read revision.
+  const read = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: file.relativePath });
+  assert.equal(read.revision, file.revision);
+  device.close();
+});
+
+test("fsRead: typed status and revision; not-modified for a matching revision, full content after a change", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+  const first = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "src/a.txt" });
+  assert.equal(first.ok, true);
+  assert.equal(first.status, FsReadStatus.OK);
+  assert.equal(first.content, "AAA");
+  assert.ok(first.revision.length > 0, "an OK answer always carries a revision");
+
+  const same = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "src/a.txt", knownRevision: first.revision });
+  assert.equal(same.ok, true);
+  assert.equal(same.status, FsReadStatus.NOT_MODIFIED);
+  assert.equal(same.content, "", "not-modified carries no content");
+  assert.equal(same.revision, first.revision);
+
+  // A different length changes the revision even on a filesystem with coarse timestamps.
+  writeFileSync(join(ws.path, "src", "a.txt"), "BBBBBB");
+  const changed = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "src/a.txt", knownRevision: first.revision });
+  assert.equal(changed.ok, true);
+  assert.equal(changed.status, FsReadStatus.OK);
+  assert.equal(changed.content, "BBBBBB");
+  assert.notEqual(changed.revision, first.revision);
+
+  const missing = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "src/missing.ts" });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.status, FsReadStatus.NOT_FOUND);
+  const dir = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "src" });
+  assert.equal(dir.status, FsReadStatus.NOT_FILE);
+  writeFileSync(join(ws.path, "big.txt"), Buffer.alloc(2 * 1024 * 1024 + 1, 0x61));
+  const big = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: "big.txt" });
+  assert.equal(big.status, FsReadStatus.TOO_LARGE);
   device.close();
 });
 

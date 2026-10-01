@@ -209,8 +209,39 @@ pub struct FsReadResult {
     pub ok: bool,
     #[prost(string, tag="3")]
     pub content: ::prost::alloc::string::String,
+    /// Free-form, human-readable text. Clients decide every state from `status`, never from this.
     #[prost(string, optional, tag="4")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// Opaque revision of the file the answer describes (plan 20261001-terminal-file-tab), derived by
+    /// the worker from file metadata; clients only compare it for equality. A worker that knows this
+    /// field always sets it on OK and NOT_MODIFIED; an OK answer with an empty revision comes from a
+    /// worker that predates it.
+    #[prost(string, tag="5")]
+    pub revision: ::prost::alloc::string::String,
+    /// UNSPECIFIED only from a worker that predates the field.
+    #[prost(enumeration="FsReadStatus", tag="6")]
+    pub status: i32,
+}
+/// One entry of a DeviceFsStatResult, in request order (plan 20261001-terminal-file-tab).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsStatEntry {
+    /// Echo of the requested path, byte for byte.
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    /// The path resolves (links followed) to something inside the workspace root. False for a
+    /// missing path, a dangling link and a path that resolves outside the root.
+    #[prost(bool, tag="2")]
+    pub exists: bool,
+    /// The resolved target is a regular file.
+    #[prost(bool, tag="3")]
+    pub is_file: bool,
+    /// The file's revision, comparable with FsReadResult.revision; empty unless `is_file`.
+    #[prost(string, tag="4")]
+    pub revision: ::prost::alloc::string::String,
+    /// Set when `exists`: the canonical path relative to the canonicalised root ("~" expanded,
+    /// links and ".." resolved, absolute inputs made relative); empty for the root itself.
+    #[prost(string, tag="5")]
+    pub relative_path: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsWriteResult {
@@ -416,6 +447,54 @@ impl FsEntryKind {
             "FS_ENTRY_KIND_DIR" => Some(Self::Dir),
             "FS_ENTRY_KIND_SYMLINK" => Some(Self::Symlink),
             "FS_ENTRY_KIND_OTHER" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+/// The typed outcome of an fs read (plan 20261001-terminal-file-tab).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FsReadStatus {
+    Unspecified = 0,
+    /// `content` is the whole file (lossy UTF-8) and `revision` is its revision.
+    Ok = 1,
+    /// The request's `known_revision` equals the file's current revision; `content` is empty.
+    NotModified = 2,
+    /// The path does not exist (or a link in it is dangling).
+    NotFound = 3,
+    /// The path exists but is not a regular file.
+    NotFile = 4,
+    /// The file is larger than the worker's read cap (2 MB).
+    TooLarge = 5,
+    /// Anything else: the path resolves outside the workspace, an I/O failure.
+    Error = 6,
+}
+impl FsReadStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FS_READ_STATUS_UNSPECIFIED",
+            Self::Ok => "FS_READ_STATUS_OK",
+            Self::NotModified => "FS_READ_STATUS_NOT_MODIFIED",
+            Self::NotFound => "FS_READ_STATUS_NOT_FOUND",
+            Self::NotFile => "FS_READ_STATUS_NOT_FILE",
+            Self::TooLarge => "FS_READ_STATUS_TOO_LARGE",
+            Self::Error => "FS_READ_STATUS_ERROR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FS_READ_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "FS_READ_STATUS_OK" => Some(Self::Ok),
+            "FS_READ_STATUS_NOT_MODIFIED" => Some(Self::NotModified),
+            "FS_READ_STATUS_NOT_FOUND" => Some(Self::NotFound),
+            "FS_READ_STATUS_NOT_FILE" => Some(Self::NotFile),
+            "FS_READ_STATUS_TOO_LARGE" => Some(Self::TooLarge),
+            "FS_READ_STATUS_ERROR" => Some(Self::Error),
             _ => None,
         }
     }
@@ -1208,6 +1287,37 @@ pub struct DeviceFsRead {
     pub workspace_id: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub path: ::prost::alloc::string::String,
+    /// Conditional read (plan 20261001-terminal-file-tab): when set and equal to the file's current
+    /// revision, the worker answers FS_READ_STATUS_NOT_MODIFIED with empty content. A worker that
+    /// predates the field ignores it and answers the whole file.
+    #[prost(string, optional, tag="4")]
+    pub known_revision: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Batched existence check (plan 20261001-terminal-file-tab), anchored and scoped like DeviceFsRead
+/// (DEVICE_SCOPE_RPC). Each path is resolved against the workspace root like a read; the answer has
+/// one entry per requested path, in order. A worker that predates this payload decodes it as an
+/// empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients attribute
+/// that, arriving on the RPC lane, to their in-flight stat requests (daemon outdated).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceFsStat {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    /// At most 64 paths; a larger batch is refused with ok=false.
+    #[prost(string, repeated, tag="3")]
+    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceFsStatResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag="4")]
+    pub entries: ::prost::alloc::vec::Vec<FsStatEntry>,
 }
 /// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
 /// path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
@@ -2472,7 +2582,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -2655,6 +2765,10 @@ pub mod device_envelope {
         ScreenClipboardSet(super::ScreenClipboardSet),
         #[prost(message, tag="143")]
         ScreenClipboardChanged(super::ScreenClipboardChanged),
+        #[prost(message, tag="144")]
+        FsStat(super::DeviceFsStat),
+        #[prost(message, tag="145")]
+        FsStatResult(super::DeviceFsStatResult),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
