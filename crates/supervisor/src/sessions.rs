@@ -826,11 +826,17 @@ impl Sessions {
     }
 
     fn bump_snapshot_epoch(&self) {
-        let _ = self
-            .snapshot_epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
-                Some(epoch.saturating_add(1))
-            });
+        // A compare-exchange loop rather than `fetch_update`, deprecated in favour of `try_update`,
+        // which older stable toolchains lack.
+        let mut epoch = self.snapshot_epoch.load(Ordering::Acquire);
+        while let Err(current) = self.snapshot_epoch.compare_exchange_weak(
+            epoch,
+            epoch.saturating_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            epoch = current;
+        }
     }
 
     fn send_record(&self, record: Vec<u8>) -> bool {
