@@ -1,15 +1,15 @@
 /**
  * Coding agents the desktop can launch from the new-tab menu (plan 20261001-desktop-agents): the
- * fixed four-agent catalog and the per-agent `{ enabled, command }` configuration kept on this Mac.
+ * fixed four-agent catalog and the rules over the per-agent `{ enabled, command }` configuration.
  *
- * Pure apart from the injected storage, so the rules that would not show up as a visible failure —
- * "on + empty command is not effective", "garbage storage reads as all off" — are guarded by
- * node --test. The logos live in agent-logos.tsx (this module stays plain TS for the test runner);
- * the app's single store instance lives in agent-settings-store.ts, the only reader and writer of
- * the stored value.
+ * The configuration itself is the account's (plan 20261002-account-agent-settings): it lives on the
+ * center and reaches this desktop through `@coflux/client`'s store (`agentSettings`), which keeps
+ * any agent id the center holds. This module maps it onto the catalog — ids it does not know are
+ * ignored — and stays pure, so the rules that would not show up as a visible failure ("on + empty
+ * command is not effective", "unknown or malformed entries read as off") are guarded by node --test.
+ * The logos live in agent-logos.tsx (this module stays plain TS for the test runner); the client
+ * store views live in agent-settings-store.ts.
  */
-
-import { createStore, type StoreApi } from "zustand/vanilla";
 
 export type AgentId = "claude" | "codex" | "cursor" | "grok";
 
@@ -37,21 +37,25 @@ export type AgentSetting = {
 
 export type AgentSettings = Readonly<Record<AgentId, AgentSetting>>;
 
+/** The account's configuration as the client store holds it: agent id → setting, any id. */
+export type AccountAgentSettingsShape = Readonly<Record<string, { enabled: boolean; command: string } | undefined>>;
+
 /** An agent offered in the new-tab menu: switched on with a non-empty command. */
 export type EffectiveAgent = AgentDefinition & {
   /** The trimmed launch command. */
   command: string;
 };
 
-const STORAGE_VERSION = 1;
-/** A guard against a corrupted or runaway value, not a product limit. */
-const MAX_COMMAND_LENGTH = 1000;
+/** A guard against a runaway value, not a product limit. The center enforces the same cap. */
+export const MAX_COMMAND_LENGTH = 1000;
+
+const OFF: AgentSetting = Object.freeze({ enabled: false, command: "" });
 
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = Object.freeze({
-  claude: { enabled: false, command: "" },
-  codex: { enabled: false, command: "" },
-  cursor: { enabled: false, command: "" },
-  grok: { enabled: false, command: "" },
+  claude: OFF,
+  codex: OFF,
+  cursor: OFF,
+  grok: OFF,
 });
 
 export function isAgentId(value: unknown): value is AgentId {
@@ -63,38 +67,33 @@ export function agentDefinition(id: AgentId): AgentDefinition {
   return AGENT_CATALOG.find((agent) => agent.id === id) ?? AGENT_CATALOG[0]!;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/**
+ * A command as it is stored: one line (control characters, newlines included, are dropped — the
+ * center drops them too, so the echo of a write equals what was sent) and at most MAX_COMMAND_LENGTH.
+ */
+export function sanitizeAgentCommand(command: string): string {
+  // eslint-disable-next-line no-control-regex
+  return command.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, MAX_COMMAND_LENGTH);
 }
 
-/** One stored entry; anything unusable falls back to off with an empty command. */
-function parseSetting(value: unknown): AgentSetting {
-  if (!isRecord(value)) return { enabled: false, command: "" };
-  const command = typeof value.command === "string" ? value.command.replace(/[\r\n]/g, "").slice(0, MAX_COMMAND_LENGTH) : "";
-  return { enabled: value.enabled === true, command };
-}
-
-/** Parses a stored value. Missing or malformed storage reads as all off with empty commands. */
-export function parseAgentSettings(raw: string | null): AgentSettings {
-  if (!raw) return DEFAULT_AGENT_SETTINGS;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return DEFAULT_AGENT_SETTINGS;
-  }
-  if (!isRecord(parsed) || parsed.version !== STORAGE_VERSION || !isRecord(parsed.agents)) return DEFAULT_AGENT_SETTINGS;
-  const agents = parsed.agents;
+/** One account entry; anything unusable reads as off with an empty command. */
+function settingOf(value: unknown): AgentSetting {
+  if (typeof value !== "object" || value === null) return OFF;
+  const entry = value as { enabled?: unknown; command?: unknown };
   return {
-    claude: parseSetting(agents.claude),
-    codex: parseSetting(agents.codex),
-    cursor: parseSetting(agents.cursor),
-    grok: parseSetting(agents.grok),
+    enabled: entry.enabled === true,
+    command: typeof entry.command === "string" ? sanitizeAgentCommand(entry.command) : "",
   };
 }
 
-export function serializeAgentSettings(settings: AgentSettings): string {
-  return JSON.stringify({ version: STORAGE_VERSION, agents: settings });
+/** The account's configuration mapped onto the catalog: catalog agents it lacks are off, ids the catalog does not know are ignored. */
+export function agentSettingsFromAccount(account: AccountAgentSettingsShape): AgentSettings {
+  return {
+    claude: settingOf(account.claude),
+    codex: settingOf(account.codex),
+    cursor: settingOf(account.cursor),
+    grok: settingOf(account.grok),
+  };
 }
 
 /** The command to launch with, or null when the agent is not effective (off, or on with a blank command). */
@@ -112,61 +111,4 @@ export function effectiveAgents(settings: AgentSettings): EffectiveAgent[] {
     if (command !== null) result.push({ ...agent, command });
   }
   return result;
-}
-
-/** One agent changed; the others are kept as they are. Switching off keeps the typed command. */
-export function withAgentSetting(settings: AgentSettings, id: AgentId, patch: Partial<AgentSetting>): AgentSettings {
-  const current = settings[id];
-  const next: AgentSetting = {
-    enabled: patch.enabled ?? current.enabled,
-    command: patch.command !== undefined ? patch.command.replace(/[\r\n]/g, "").slice(0, MAX_COMMAND_LENGTH) : current.command,
-  };
-  if (next.enabled === current.enabled && next.command === current.command) return settings;
-  return { ...settings, [id]: next };
-}
-
-export type AgentSettingsStorage = {
-  /** Called on every read and write rather than captured once: accessing `localStorage` itself may throw. */
-  storage: () => Pick<Storage, "getItem" | "setItem">;
-  key: string;
-};
-
-export type AgentSettingsState = {
-  settings: AgentSettings;
-  /** Applies a change and writes it at once (no save button). A failed write keeps the change for this session. */
-  update: (id: AgentId, patch: Partial<AgentSetting>) => void;
-};
-
-export function readAgentSettings(store: AgentSettingsStorage): AgentSettings {
-  try {
-    return parseAgentSettings(store.storage().getItem(store.key));
-  } catch {
-    return DEFAULT_AGENT_SETTINGS;
-  }
-}
-
-export function writeAgentSettings(store: AgentSettingsStorage, settings: AgentSettings): boolean {
-  try {
-    store.storage().setItem(store.key, serializeAgentSettings(settings));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * A subscribable store over the stored configuration: Settings writes through it and the new-tab
- * menu reads it, so a change is reflected in the menu without a reload.
- */
-export function createAgentSettingsStore(store: AgentSettingsStorage): StoreApi<AgentSettingsState> {
-  return createStore<AgentSettingsState>((set, get) => ({
-    settings: readAgentSettings(store),
-    update: (id, patch) => {
-      const current = get().settings;
-      const next = withAgentSetting(current, id, patch);
-      if (next === current) return;
-      set({ settings: next });
-      writeAgentSettings(store, next);
-    },
-  }));
 }

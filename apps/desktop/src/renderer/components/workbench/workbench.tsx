@@ -40,8 +40,8 @@ import {
 } from "@/components/workbench/sidebar-collapse";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
-import { effectiveAgents, type EffectiveAgent } from "@/components/settings/agent-settings";
-import { agentSettingsStore } from "@/components/settings/agent-settings-store";
+import type { EffectiveAgent } from "@/components/settings/agent-settings";
+import { currentEffectiveAgents } from "@/components/settings/agent-settings-store";
 import { useAgentLaunches } from "@/components/workbench/use-agent-launches";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
@@ -1596,8 +1596,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
       createTerminalIn(workspaceId, null);
     },
     createAgentTerminal: (workspaceId, groupId, agentId) => {
-      // Read at the moment of choosing: the command typed is the one Settings holds now.
-      const agent = effectiveAgents(agentSettingsStore.getState().settings).find((item) => item.id === agentId);
+      // Read at the moment of choosing: the command is the one the account holds now.
+      const agent = currentEffectiveAgents(client).find((item) => item.id === agentId);
       if (!agent) return;
       updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
       createTerminalIn(workspaceId, null, agent);

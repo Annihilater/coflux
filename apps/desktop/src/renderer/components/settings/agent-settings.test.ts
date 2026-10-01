@@ -4,28 +4,12 @@ import test from "node:test";
 import {
   AGENT_CATALOG,
   DEFAULT_AGENT_SETTINGS,
-  createAgentSettingsStore,
+  MAX_COMMAND_LENGTH,
+  agentSettingsFromAccount,
   effectiveAgents,
   launchCommandOf,
-  parseAgentSettings,
-  serializeAgentSettings,
-  withAgentSetting,
+  sanitizeAgentCommand,
 } from "./agent-settings";
-
-function memoryStorage(initial: string | null = null) {
-  let value = initial;
-  return {
-    get value() {
-      return value;
-    },
-    storage: {
-      getItem: () => value,
-      setItem: (_key: string, next: string) => {
-        value = next;
-      },
-    },
-  };
-}
 
 test("the catalog is Claude Code, Codex, Cursor, Grok in that order", () => {
   assert.deepEqual(
@@ -34,20 +18,22 @@ test("the catalog is Claude Code, Codex, Cursor, Grok in that order", () => {
   );
 });
 
-test("missing or garbage storage reads as all off with empty commands", () => {
-  for (const raw of [null, "", "not json", "[]", "42", '{"version":2,"agents":{}}', '{"version":1}', '{"version":1,"agents":[]}']) {
-    assert.deepEqual(parseAgentSettings(raw), DEFAULT_AGENT_SETTINGS, String(raw));
-  }
-  assert.equal(effectiveAgents(parseAgentSettings("not json")).length, 0);
+test("an empty account configuration is all off", () => {
+  assert.deepEqual(agentSettingsFromAccount({}), DEFAULT_AGENT_SETTINGS);
+  assert.equal(effectiveAgents(agentSettingsFromAccount({})).length, 0);
 });
 
-test("a malformed entry falls back to off without affecting the others", () => {
-  const settings = parseAgentSettings(
-    JSON.stringify({ version: 1, agents: { claude: { enabled: "yes", command: 3 }, codex: { enabled: true, command: "codex" }, grok: null } }),
-  );
+test("ids the catalog does not know are ignored; malformed entries read as off without affecting the others", () => {
+  const settings = agentSettingsFromAccount({
+    claude: { enabled: "yes", command: 3 } as unknown as { enabled: boolean; command: string },
+    codex: { enabled: true, command: "codex" },
+    aider: { enabled: true, command: "aider" },
+    grok: undefined,
+  });
   assert.deepEqual(settings.claude, { enabled: false, command: "" });
   assert.deepEqual(settings.codex, { enabled: true, command: "codex" });
   assert.deepEqual(settings.grok, { enabled: false, command: "" });
+  assert.deepEqual(Object.keys(settings).sort(), ["claude", "codex", "cursor", "grok"]);
 });
 
 test("on with a blank command is not effective; off is never effective", () => {
@@ -58,10 +44,12 @@ test("on with a blank command is not effective; off is never effective", () => {
 });
 
 test("effective agents come in catalog order with trimmed commands, never the placeholder", () => {
-  let settings = DEFAULT_AGENT_SETTINGS;
-  settings = withAgentSetting(settings, "grok", { enabled: true, command: "grok" });
-  settings = withAgentSetting(settings, "claude", { enabled: true, command: " cc " });
-  settings = withAgentSetting(settings, "codex", { enabled: true });
+  const settings = agentSettingsFromAccount({
+    grok: { enabled: true, command: "grok" },
+    claude: { enabled: true, command: " cc " },
+    codex: { enabled: true, command: "" },
+    cursor: { enabled: false, command: "cursor-agent" },
+  });
   assert.deepEqual(
     effectiveAgents(settings).map((agent) => [agent.id, agent.command]),
     [
@@ -71,27 +59,8 @@ test("effective agents come in catalog order with trimmed commands, never the pl
   );
 });
 
-test("switching off keeps the typed command", () => {
-  let settings = withAgentSetting(DEFAULT_AGENT_SETTINGS, "cursor", { enabled: true, command: "cursor-agent" });
-  settings = withAgentSetting(settings, "cursor", { enabled: false });
-  assert.deepEqual(settings.cursor, { enabled: false, command: "cursor-agent" });
-  assert.deepEqual(parseAgentSettings(serializeAgentSettings(settings)), settings);
-});
-
-test("the store writes every change at once and survives a throwing storage", () => {
-  const memory = memoryStorage();
-  const store = createAgentSettingsStore({ storage: () => memory.storage, key: "k" });
-  store.getState().update("claude", { enabled: true });
-  store.getState().update("claude", { command: "claude" });
-  assert.deepEqual(parseAgentSettings(memory.value).claude, { enabled: true, command: "claude" });
-
-  const broken = createAgentSettingsStore({
-    storage: () => {
-      throw new Error("storage unavailable");
-    },
-    key: "k",
-  });
-  assert.deepEqual(broken.getState().settings, DEFAULT_AGENT_SETTINGS);
-  broken.getState().update("codex", { enabled: true, command: "codex" });
-  assert.equal(effectiveAgents(broken.getState().settings)[0]?.id, "codex");
+test("a command is one line and bounded", () => {
+  assert.equal(sanitizeAgentCommand("claude\r\n--resume\t"), "claude--resume");
+  assert.equal(sanitizeAgentCommand("x".repeat(MAX_COMMAND_LENGTH + 5)).length, MAX_COMMAND_LENGTH);
+  assert.equal(agentSettingsFromAccount({ codex: { enabled: true, command: "codex\n" } }).codex.command, "codex");
 });

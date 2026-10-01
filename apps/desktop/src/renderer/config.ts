@@ -53,11 +53,10 @@ export const FILE_TABS_KEY = `coflux_file_tabs:${SERVER_URL}`;
  */
 export const BROWSER_LIBRARY_KEY = "coflux_browser_library";
 /**
- * Which coding agents the new-tab menu offers and their launch commands (plan
- * 20261001-desktop-agents): a per-machine preference, unscoped like the sidebar width — the same
- * commands work whatever server this Mac is signed in to — and never synced.
+ * Where 2.14.0 kept the agent launch settings on this Mac (plan 20261001-desktop-agents). They are
+ * the account's now (plan 20261002-account-agent-settings); this key is only ever removed, never read.
  */
-export const AGENT_SETTINGS_KEY = "coflux_agents";
+export const LEGACY_AGENT_SETTINGS_KEY = "coflux_agents";
 /**
  * Which terminal tabs were opened as an agent (task id → agent id), for their tab icon. Scoped by
  * server address like the layouts: task ids mean nothing on another server.

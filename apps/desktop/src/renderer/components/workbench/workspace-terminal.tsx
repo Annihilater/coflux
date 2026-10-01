@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
@@ -19,7 +19,7 @@ import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/c
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
 import { AgentLogo, CodexLogo } from "@/components/settings/agent-logos";
-import { effectiveAgents, type AgentId } from "@/components/settings/agent-settings";
+import { effectiveAgents, type AgentId, type EffectiveAgent } from "@/components/settings/agent-settings";
 import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
@@ -230,6 +230,7 @@ function NewTabMenu({
   onOpenChange,
   busy,
   spinning,
+  agents,
   onTerminal,
   onAgent,
   onBrowser,
@@ -240,6 +241,8 @@ function NewTabMenu({
   onOpenChange: (open: boolean) => void;
   busy: boolean;
   spinning: boolean;
+  /** The account's effective agents in catalog order (plan 20261002-account-agent-settings). */
+  agents: readonly EffectiveAgent[];
   onTerminal: () => void;
   onAgent: (agentId: AgentId) => void;
   onBrowser: () => void;
@@ -248,7 +251,6 @@ function NewTabMenu({
   onRestoreFocus: () => void;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
-  const agents = effectiveAgents(useAgentSettings());
   // ⌘T with a long strip: the ＋ follows the last tab and may be scrolled out of view; the menu is
   // anchored to it, so bring it in first.
   useEffect(() => {
@@ -552,6 +554,10 @@ export function WorkspaceTerminal({
       state.tasks.filter((task) => task.workspaceId === workspaceId).sort((left, right) => left.createdAt - right.createdAt),
     ),
   );
+  // Agent ▸ lists the account's effective agents (plan 20261002-account-agent-settings); the hook
+  // selects the stored configuration and derives in render, never a fresh array from the selector.
+  const agentSettings = useAgentSettings(client);
+  const effectiveAgentList = useMemo(() => effectiveAgents(agentSettings), [agentSettings]);
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
   const screenTabs = useStore(screens.tabs, (state) => state.tabs);
@@ -1208,6 +1214,7 @@ export function WorkspaceTerminal({
               onOpenChange={(open) => actions.setNewTabMenu(workspaceId, open ? group.id : null)}
               busy={Boolean(pending)}
               spinning={holdsPending}
+              agents={effectiveAgentList}
               onTerminal={() => actions.createTerminal(workspaceId, group.id)}
               onAgent={(agentId) => actions.createAgentTerminal(workspaceId, group.id, agentId)}
               onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}

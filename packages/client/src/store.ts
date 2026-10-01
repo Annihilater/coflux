@@ -247,6 +247,18 @@ export type DeviceJoinKeyResult = { ok: true; key: string; expiresAt: number } |
 export type DirectoryWorkspaceResult = { ok: true; workspaceId: string } | { ok: false; error: string };
 const DEVICE_JOIN_KEY_TIMEOUT_MS = 15_000;
 
+/** One agent's launch setting as the account stores it (plan 20261002-account-agent-settings). The
+ * center does not know the agent catalog; the desktop maps the ids it knows and ignores the rest. */
+export type AccountAgentSetting = { enabled: boolean; command: string };
+/** The account's agent launch settings: agent id → setting. An id that is absent is off. */
+export type AccountAgentSettings = Readonly<Record<string, AccountAgentSetting>>;
+/** Answer to `setAgentSetting`: the center accepted the write (its broadcast has already replaced
+ * `agentSettings`), or it failed — refused by the center, or locally (not connected, the center does
+ * not support it, the configuration of this connection has not arrived, disconnected, timed out). */
+export type AgentSettingWriteResult = { ok: true } | { ok: false; error: string };
+const AGENT_SETTING_WRITE_TIMEOUT_MS = 15_000;
+const EMPTY_AGENT_SETTINGS: AccountAgentSettings = Object.freeze({});
+
 /** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
  * 中心缓存）；none = 没有任何可回放内容。 */
 export type TaskReadSource = "snapshot" | "checkpoint" | "none";
@@ -340,7 +352,24 @@ type OfflineCatalog = {
   tasks: Task[];
   ports: Record<string, PortPreview[]>;
   sessionAgents: Record<string, SessionAgentState>;
+  /** The account's agent launch settings (plan 20261002-account-agent-settings) and the account they
+   * belong to. Absent in a cache written before that plan: no agent configuration, all off. */
+  agentSettings?: { accountId: string; agents: AccountAgentSettings };
 };
+
+/** The agent settings saved with the offline catalog; anything malformed reads as none. */
+function restoreAgentSettings(value: unknown): { accountId: string; agents: AccountAgentSettings } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { accountId, agents } = value as { accountId?: unknown; agents?: unknown };
+  if (typeof accountId !== "string" || !accountId || !agents || typeof agents !== "object" || Array.isArray(agents)) return undefined;
+  const restored: Record<string, AccountAgentSetting> = {};
+  for (const [agentId, entry] of Object.entries(agents as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object") continue;
+    const { enabled, command } = entry as { enabled?: unknown; command?: unknown };
+    restored[agentId] = { enabled: enabled === true, command: typeof command === "string" ? command : "" };
+  }
+  return { accountId, agents: restored };
+}
 
 /** 离线缓存里的 presence 条目（plan 20260919）：plan 之前写下的缓存没有 agentSessionId，
  * TS 类型却照旧声称有。恢复时统一补齐成空串，调用方才不必到处 `?? ""`。 */
@@ -373,6 +402,8 @@ function parseOfflineCatalog(raw: string | null): OfflineCatalog | null {
       tasks: catalog.tasks as Task[],
       ports: catalog.ports && typeof catalog.ports === "object" ? catalog.ports : {},
       sessionAgents: restoreSessionAgents(catalog.sessionAgents),
+      // Same tolerance as loginName: a cache from before plan 20261002 just has no agent settings.
+      agentSettings: restoreAgentSettings(catalog.agentSettings),
     };
   } catch {
     return null;
@@ -409,6 +440,18 @@ export type CofluxState = {
   /** Browser annotation summaries (plan 20260929-browser-annotations): workspaceId → revision and
    * counts, replaced per device by annotationsSummaryUpdated. Live-only, like secretRequests. */
   annotationSummaries: Record<string, AnnotationSummaryState>;
+  /** The account's agent launch settings (plan 20261002-account-agent-settings), replaced whole by
+   * every `agentSettingsUpdated`. Kept across disconnects and saved with the offline catalog, so the
+   * last configuration this client received stays usable offline; reset only when the account
+   * changes (or the center does not support it). Never zeroed at authOk: until the first push of a
+   * connection arrives, it is the previous value — see `agentSettingsReceived`. */
+  agentSettings: AccountAgentSettings;
+  /** The center of the current connection serves agent settings (`AuthOk.agent_settings`). False
+   * before the first authOk and against an older center: there is nothing to edit there. */
+  agentSettingsSupported: boolean;
+  /** The account's configuration has arrived on this connection. Until then `agentSettings` may be
+   * stale, so it must not be edited: an edit based on it would be broadcast as the truth. */
+  agentSettingsReceived: boolean;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -497,6 +540,24 @@ export function createCofluxClient(options: CofluxClientOptions) {
     for (const requestId of [...pendingDirectoryWorkspaces.keys()]) settleDirectoryWorkspace(requestId, { ok: false, error });
   }
 
+  // Agent-setting writes in flight (plan 20261002-account-agent-settings), keyed by request id. They
+  // settle from the center's answer, or as failures on disconnect, logout and timeout — never hang.
+  // Failures are returned to the caller only: they never touch lastError.
+  let agentSettingRequest = 0;
+  const pendingAgentSettingWrites = new Map<string, { resolve: (result: AgentSettingWriteResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  function settleAgentSettingWrite(requestId: string, result: AgentSettingWriteResult): void {
+    const pending = pendingAgentSettingWrites.get(requestId);
+    if (!pending) return;
+    pendingAgentSettingWrites.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
+  function failAgentSettingWrites(error: string): void {
+    for (const requestId of [...pendingAgentSettingWrites.keys()]) settleAgentSettingWrite(requestId, { ok: false, error });
+  }
+  // The account `agentSettings` belongs to: a different account must never see, or launch, them.
+  let agentSettingsAccount = "";
+
   // Directory-workspace ensures in flight (plan 20260929-remote-desktop), keyed by request id like the join keys.
   let directoryWorkspaceRequest = 0;
   const pendingDirectoryWorkspaces = new Map<string, { resolve: (result: DirectoryWorkspaceResult) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -536,6 +597,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
     secretRequests: {},
     executorRuns: {},
     annotationSummaries: {},
+    agentSettings: EMPTY_AGENT_SETTINGS,
+    agentSettingsSupported: false,
+    agentSettingsReceived: false,
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -566,6 +630,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         tasks: state.tasks,
         ports: state.ports,
         sessionAgents: state.sessionAgents,
+        agentSettings: agentSettingsAccount ? { accountId: agentSettingsAccount, agents: state.agentSettings } : undefined,
       };
       try {
         offlineCatalog.storage.setItem(offlineCatalog.key, JSON.stringify(catalog));
@@ -616,6 +681,25 @@ export function createCofluxClient(options: CofluxClientOptions) {
       sessionAgents: catalog.sessionAgents,
       snapshotRevision: state.snapshotRevision + 1,
     }));
+  }
+
+  // The last agent configuration this client received (plan 20261002-account-agent-settings) is
+  // loaded up front, not only on an offline hydrate: it must survive a reconnect whose first push
+  // has not arrived yet, because every authOk persists the catalog from memory. The cache belongs to
+  // the stored token's account (it is cleared on logout, auth failure and explicit login), and authOk
+  // resets it anyway if the account turns out to differ.
+  if (offlineCatalog && token) {
+    let raw: string | null = null;
+    try {
+      raw = offlineCatalog.storage.getItem(offlineCatalog.key);
+    } catch {
+      /* no cache: nothing configured */
+    }
+    const cached = parseOfflineCatalog(raw)?.agentSettings;
+    if (cached) {
+      agentSettingsAccount = cached.accountId;
+      store.setState({ agentSettings: cached.agents });
+    }
   }
 
   const liveSessionIds = new Set<string>();
@@ -791,6 +875,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // 回应不会再来了：在飞的设备授权立即失败而不是挂到超时（plan 112）
         settleDeviceAuthorize({ ok: false, error: "与服务器的连接已断开，请重试" });
         failJoinKeys("与服务器的连接已断开，请重试");
+        // The configuration stays (the offline menu uses it); it just is no longer this connection's.
+        store.setState({ agentSettingsReceived: false });
+        failAgentSettingWrites("与服务器的连接已断开，修改没有保存");
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
@@ -876,6 +963,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState((state) => ({ notificationInbox: { ...state.notificationInbox, loading: notificationSupported,
           error: notificationSupported ? "" : "服务器尚不支持通知中心，请升级服务器" } }));
         if (notificationSupported) waitForNotificationPage();
+        // Agent settings: the configuration arrives after the subscribe snapshot. Until then the
+        // previous value stays (not zeroed: this authOk persists the offline catalog), unless it
+        // belongs to another account, or this center does not serve agent settings at all.
+        if (agentSettingsAccount !== value.accountId || !value.agentSettings) {
+          agentSettingsAccount = value.accountId;
+          store.setState({ agentSettings: EMPTY_AGENT_SETTINGS });
+        }
+        store.setState({ agentSettingsSupported: value.agentSettings, agentSettingsReceived: false });
         deviceRouter.setControlOnline(true);
         store.setState({ authState: "authed", loginError: "", loginName: value.loginName ?? "" });
         shouldRetry = true;
@@ -897,6 +992,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         token = "";
         options.tokenStorage.clear();
         clearOfflineCatalog();
+        agentSettingsAccount = "";
+        failAgentSettingWrites("登录已失效，修改没有保存");
+        store.setState({ agentSettings: EMPTY_AGENT_SETTINGS, agentSettingsSupported: false, agentSettingsReceived: false });
         // Show the server's own reason. This branch is reached by an expired session token, a
         // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
         // a hard-coded "wrong username or password" misnamed every one of them — the desktop's
@@ -1232,6 +1330,20 @@ export function createCofluxClient(options: CofluxClientOptions) {
           : { ok: true, key: value.key, expiresAt: value.expiresAt });
         break;
       }
+      case "agentSettingsUpdated": {
+        const value = payload.value;
+        // A rejected write: answered to the writer only, and its empty list is not the configuration.
+        if (value.error) {
+          settleAgentSettingWrite(value.requestId, { ok: false, error: value.error });
+          break;
+        }
+        const agents: Record<string, AccountAgentSetting> = {};
+        for (const agent of value.agents) agents[agent.agentId] = { enabled: agent.enabled, command: agent.command };
+        store.setState({ agentSettings: agents, agentSettingsReceived: true });
+        // After the state: a writer awaiting its result sees the configuration it produced.
+        if (value.requestId) settleAgentSettingWrite(value.requestId, { ok: true });
+        break;
+      }
       case "directoryWorkspaceEnsured": {
         const value = payload.value;
         settleDirectoryWorkspace(value.requestId, value.ok && value.workspaceId
@@ -1267,6 +1379,25 @@ export function createCofluxClient(options: CofluxClientOptions) {
       const timer = setTimeout(() => settleJoinKey(requestId, { ok: false, error: "生成密钥超时，请重试" }), DEVICE_JOIN_KEY_TIMEOUT_MS);
       pendingJoinKeys.set(requestId, { resolve, timer });
       send({ case: "deviceJoinKeyCreate", value: { requestId, replaces } });
+    });
+  }
+
+  /**
+   * Replace one agent's launch setting on the account (plan 20261002-account-agent-settings). Only
+   * while connected to a center that serves agent settings and after this connection's configuration
+   * arrived; otherwise it fails at once. On success every subscribed client of the account, this one
+   * included, has received the new configuration. Failures never touch lastError.
+   */
+  function setAgentSetting(agentId: string, setting: AccountAgentSetting): Promise<AgentSettingWriteResult> {
+    const state = store.getState();
+    if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "与服务器的连接未就绪，修改没有保存" });
+    if (!state.agentSettingsSupported) return Promise.resolve({ ok: false, error: "服务器版本过旧，不支持在账号上保存 agent 设置" });
+    if (!state.agentSettingsReceived) return Promise.resolve({ ok: false, error: "还没收到账号里的 agent 设置，请稍候再改" });
+    const requestId = `${notificationRequestPrefix}-agent-${++agentSettingRequest}`;
+    return new Promise<AgentSettingWriteResult>((resolve) => {
+      const timer = setTimeout(() => settleAgentSettingWrite(requestId, { ok: false, error: "保存超时，修改没有保存" }), AGENT_SETTING_WRITE_TIMEOUT_MS);
+      pendingAgentSettingWrites.set(requestId, { resolve, timer });
+      send({ case: "agentSettingSet", value: { requestId, agentId, enabled: setting.enabled, command: setting.command } });
     });
   }
 
@@ -1325,6 +1456,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "已登出" });
     failJoinKeys("已登出");
+    failAgentSettingWrites("已登出");
+    agentSettingsAccount = "";
     pendingTaskRemovals.clear();
     clearOfflineTimer();
     clearOfflineCatalog();
@@ -1350,6 +1483,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
       secretRequests: {},
       executorRuns: {},
       annotationSummaries: {},
+      agentSettings: EMPTY_AGENT_SETTINGS,
+      agentSettingsSupported: false,
+      agentSettingsReceived: false,
     });
   }
 
@@ -1698,6 +1834,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     failJoinKeys("客户端已断开");
+    failAgentSettingWrites("客户端已断开");
     clearOfflineTimer();
     deviceRouter.destroy();
     connection.stop();
@@ -1762,6 +1899,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     sendFsWrite,
     authorizeDevice,
     createDeviceJoinKey,
+    setAgentSetting,
     ensureDirectoryWorkspace,
     holdsTaskTerminal,
     typeIntoHeldTerminal,

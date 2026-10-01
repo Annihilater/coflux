@@ -3793,7 +3793,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -3866,6 +3866,8 @@ pub mod client_to_server {
         DeviceJoinKeyCreate(super::DeviceJoinKeyCreate),
         #[prost(message, tag="48")]
         DirectoryWorkspaceEnsure(super::DirectoryWorkspaceEnsure),
+        #[prost(message, tag="49")]
+        AgentSettingSet(super::AgentSettingSet),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -3886,6 +3888,11 @@ pub struct AuthOk {
     pub login_name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, tag="5")]
     pub notification_inbox: bool,
+    /// This center stores the account's agent launch settings (plan 20261002-account-agent-settings):
+    /// it sends AgentSettingsUpdated after the subscribe snapshot and accepts AgentSettingSet. False
+    /// (an older center) tells the client "not supported" apart from "nothing configured yet".
+    #[prost(bool, tag="7")]
+    pub agent_settings: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -4084,7 +4091,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4161,6 +4168,8 @@ pub mod server_to_client {
         ExecutorRunsUpdated(super::ExecutorRunsUpdated),
         #[prost(message, tag="48")]
         DirectoryWorkspaceEnsured(super::DirectoryWorkspaceEnsured),
+        #[prost(message, tag="49")]
+        AgentSettingsUpdated(super::AgentSettingsUpdated),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4243,6 +4252,45 @@ pub struct NotificationChanged {
     #[prost(string, tag="8")]
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag="9")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Account-level agent launch settings (plan 20261002-account-agent-settings): which coding agents the
+/// desktop's new-tab menu offers and the command typed to launch each. One record per agent id; the
+/// center does not know the agent catalog and treats `agent_id` as an opaque bounded token.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentSetting {
+    #[prost(string, tag="1")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub enabled: bool,
+    #[prost(string, tag="3")]
+    pub command: ::prost::alloc::string::String,
+}
+/// Replace one agent's record for the signed-in account (last write wins, per agent). Answered with
+/// AgentSettingsUpdated carrying the same request_id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentSettingSet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub enabled: bool,
+    #[prost(string, tag="4")]
+    pub command: ::prost::alloc::string::String,
+}
+/// The account's full agent configuration. Sent to every subscribed client of the account right after
+/// the subscribe snapshot (empty request_id) and after every accepted AgentSettingSet (request_id of
+/// that write, broadcast to all subscribed clients and also sent to an unsubscribed writer). A
+/// non-empty `error` answers a rejected write, goes only to the writer and carries no configuration:
+/// the client must not treat its empty `agents` as the account's configuration.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentSettingsUpdated {
+    #[prost(message, repeated, tag="1")]
+    pub agents: ::prost::alloc::vec::Vec<AgentSetting>,
+    #[prost(string, tag="2")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
     pub error: ::prost::alloc::string::String,
 }
 // ===== Daemon → Server 载荷 =====

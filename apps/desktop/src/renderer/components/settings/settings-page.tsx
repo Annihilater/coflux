@@ -164,7 +164,7 @@ export function SettingsPage(props: SettingsPageProps) {
               </VStack>
 
               {section.id === "general" ? <GeneralSection client={props.client} /> : null}
-              {section.id === "agents" ? <AgentsSection /> : null}
+              {section.id === "agents" ? <AgentsSection client={props.client} /> : null}
               {section.id === "machine" ? (
                 props.daemonState ? (
                   <MachineSection
