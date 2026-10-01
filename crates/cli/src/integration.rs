@@ -15,6 +15,7 @@ mod workspace;
 pub use workspace::enter as enter_workspace;
 
 const SKILL: &str = include_str!("../../../packages/cli/skills/coflux/SKILL.md");
+const SECRET_SKILL: &str = include_str!("../../../packages/cli/skills/coflux-secret/SKILL.md");
 const EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -69,6 +70,7 @@ fn prepare() -> Result<PathBuf, String> {
     let root = parent.join(&id);
     let assets = [
         ("skills/coflux/SKILL.md", SKILL.to_string()),
+        ("skills/coflux-secret/SKILL.md", SECRET_SKILL.to_string()),
         (".claude-plugin/plugin.json", json!({"name":"coflux", "version":env!("CARGO_PKG_VERSION"), "description":"Coflux terminal integration"}).to_string()),
         ("hooks/hooks.json", claude_hooks(&root).to_string()),
         ("integration.json", json!({"schemaVersion":1,"id":id,"cliVersion":env!("CARGO_PKG_VERSION")}).to_string()),
@@ -231,6 +233,28 @@ fn handle_lines(device: &str, project: &str, workspace: &str, terminal: &str) ->
     format!("\n{}", lines.join("\n"))
 }
 
+/// The full `<coflux-session>` block. Besides the coordinates it always carries the secret
+/// reminder with the absolute path of the `coflux-secret` skill: a Codex session started with a
+/// profile registers no extra skill roots and reaches skills only through these file paths.
+#[allow(clippy::too_many_arguments)]
+fn session_context(
+    root: &Path,
+    device: &str,
+    project: &str,
+    workspace: &str,
+    terminal: &str,
+    session: &str,
+    handles: &str,
+    selection: &str,
+) -> String {
+    format!(
+        "<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {device}\nProject: {project}\nWorkspace: {workspace}\nTerminal: {terminal}\nSession: {session}{handles}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{selection}\nWhen you need a sensitive value from the user (API key, token, password, private key), use `coflux secret` (read {secret_skill}); never ask them to paste it into the chat.\nIntegration: {integration}\nRead {skill} for the complete Coflux skill.\n</coflux-session>",
+        secret_skill = root.join("skills/coflux-secret/SKILL.md").display(),
+        integration = root.file_name().unwrap_or_default().to_string_lossy(),
+        skill = root.join("skills/coflux/SKILL.md").display(),
+    )
+}
+
 fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
     let workspace_id = workspace["workspaceId"].as_str().unwrap_or_default();
     if let Some(path) = status_file() {
@@ -257,7 +281,16 @@ fn emit_context(root: &Path, workspace: &Value, host: &str, event: &str) {
         workspace_id,
         &env("COFLUX_TASK_ID"),
     );
-    let context = format!("<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {}\nProject: {}\nWorkspace: {}\nTerminal: {}\nSession: {}{}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{}\nIntegration: {}\nRead {} for the complete Coflux skill.\n</coflux-session>",env("COFLUX_DEVICE_ID"),env("COFLUX_PROJECT_ID"),workspace_id,env("COFLUX_TASK_ID"),env("COFLUX_SESSION_ID"),handles,selection,root.file_name().unwrap_or_default().to_string_lossy(),root.join("skills/coflux/SKILL.md").display());
+    let context = session_context(
+        root,
+        &env("COFLUX_DEVICE_ID"),
+        &env("COFLUX_PROJECT_ID"),
+        workspace_id,
+        &env("COFLUX_TASK_ID"),
+        &env("COFLUX_SESSION_ID"),
+        &handles,
+        &selection,
+    );
     if event == "SessionStart" {
         println!("{context}");
     } else if host == "claude" || host == "codex" {
@@ -493,5 +526,35 @@ mod tests {
         assert!(lines.contains("Device handle: coflux:device:b6767697"), "{lines}");
         assert!(lines.contains("Workspace handle: coflux:workspace:3f2a1b7c"), "{lines}");
         assert_eq!(handle_lines("", "", "", ""), "", "一个坐标都没有就整块不印");
+    }
+
+    /// Every block carries the secret reminder and the absolute path of the `coflux-secret`
+    /// skill, which is how a Codex profile session (no extra skill roots) can reach it at all.
+    #[test]
+    fn session_block_reminds_about_coflux_secret_with_its_skill_path() {
+        let root = Path::new("/home/u/.coflux/agent-integrations/abc123");
+        let block = session_context(root, "d", "p", "w", "t", "s", "", "");
+        assert!(block.starts_with("<coflux-session>\n"), "{block}");
+        assert!(block.ends_with("\n</coflux-session>"), "{block}");
+        assert!(
+            block.contains("use `coflux secret`")
+                && block.contains("never ask them to paste it into the chat"),
+            "{block}"
+        );
+        assert!(
+            block.contains(
+                "/home/u/.coflux/agent-integrations/abc123/skills/coflux-secret/SKILL.md"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("/home/u/.coflux/agent-integrations/abc123/skills/coflux/SKILL.md"),
+            "{block}"
+        );
+        assert!(block.contains("\nIntegration: abc123\n"), "{block}");
+        assert!(
+            block.contains("Device: d\nProject: p\nWorkspace: w\nTerminal: t\nSession: s\n"),
+            "{block}"
+        );
     }
 }

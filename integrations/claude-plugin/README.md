@@ -12,8 +12,8 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
   app bundle (`Contents/Resources/daemon/claude-plugin`) and hands that absolute path to the machine's daemon
   through the child process variable `COFLUX_CLAUDE_PLUGIN_DIR`; the supervisor's shell integration turns it into
   `claude --plugin-dir <dir>` for terminals coflux opens (desktop app, `coflux terminal new`, iOS, the center's
-  CLI). Loading is per session, not an installation: the hooks, the `coflux` skill and account CLI commands are
-  all in effect and visible under `/hooks`, while `/plugin` does not list the plugin. The copy travels
+  CLI). Loading is per session, not an installation: the hooks, the `coflux` and `coflux-secret` skills and account
+  CLI commands are all in effect and visible under `/hooks`, while `/plugin` does not list the plugin. The copy travels
   with the app, so it updates when Coflux.app updates; `~/.claude` is never written to and active sessions retain a stable plugin copy under the runtime directory. A session-loaded plugin fully shadows a marketplace-installed copy of the same name, so
   users who already installed `coflux@plugins` need to do nothing and hooks never fire twice. If the variable is
   unset or empty, or the directory it names is gone, `claude` starts exactly as it would without coflux — that is
@@ -57,7 +57,12 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
 - **skills/coflux/** — documents, for an agent running inside a coflux terminal, the terminals the user can see and
   take over, the progress / notify channels and preview URLs, and when each is worth using. One rule for the split: **anything
   that closes locally uses the zero-credential local commands** (`coflux terminal/progress/notify/ports`); only
-  use the account CLI across workspaces/devices..
+  use the account CLI across workspaces/devices.
+- **skills/coflux-secret/** — tells the agent to get any value the user would not want in the transcript (API keys,
+  tokens, passwords, private keys, personal data) through `coflux secret`: the user enters it in a masked card on
+  their Coflux desktop or iOS app and the agent never sees it. Its description is written around the situations
+  that call for it, including the user offering to paste a secret into the chat. The `<coflux-session>` block
+  carries a one-sentence reminder pointing at it.
 ## Runtime requirements
 
 - The [`cofluxd`](https://www.npmjs.com/package/cofluxd) CLI installed globally (`npm i -g cofluxd`) and
@@ -86,9 +91,10 @@ wasted work).
 
 ## Maintenance
 
-- The skill's single source is `packages/cli/skills/coflux/SKILL.md` in the repository (shipped in the npm package
-  for Codex users); sync it here with `node scripts/sync-claude-plugin.mjs`, and CI checks that the two copies
-  match.
+- The skills' single source is the `packages/cli/skills/` tree in the repository (shipped in the npm package and
+  embedded in the `coflux` binary); `skills/` here mirrors that whole tree. Sync it with
+  `node scripts/sync-claude-plugin.mjs`; CI runs it with `--check`, which fails on a missing, extra or differing
+  file.
 - Any change in this directory bumps `version` in `.claude-plugin/plugin.json` (strict SemVer increase). Commit
   and push, then update `origin.sha` in plugins-builder's `catalog/plugins/coflux.json` and release through its
   flow.

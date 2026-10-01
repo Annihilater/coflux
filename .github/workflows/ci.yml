@@ -150,9 +150,10 @@ jobs:
       - name: Git diff 格式检查
         run: git diff --check "$CI_DIFF_BASE" HEAD
 
-      # Claude 插件交付目录（integrations/claude-plugin）由 myWsq/plugins 市场按 commit SHA 整目录收集，
-      # 里面的 SKILL 是 npm 包那份唯一源的拷贝（契约禁止符号链接），两份不许漂移。
-      - name: Claude 插件交付目录与 npm SKILL 一致
+      # The Claude plugin delivery directory (integrations/claude-plugin) is collected whole by the
+      # myWsq/plugins marketplace at a pinned commit SHA. Its skills/ tree mirrors packages/cli/skills,
+      # the single source (the contract forbids symlinks); the two must not drift.
+      - name: Claude plugin skills mirror packages/cli/skills
         run: node scripts/sync-claude-plugin.mjs --check
 
       - name: server 类型检查

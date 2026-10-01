@@ -28,10 +28,10 @@ terminal or use the explicit launch command. Once the wrapper is installed, an
 already-open shell selects subsequent CLI updates on its next agent invocation.
 An active agent is never restarted to update integration.
 
-Each launch hashes the full native executable (which embeds the shared skill),
+Each launch hashes the full native executable (which embeds the shared skills),
 validates or creates an immutable directory under `agent-integrations/<sha256>`, and
 pins both hooks and business CLI calls to that directory. Generated manifests,
-hooks, executable bytes and the skill are checked before reuse. A damaged bundle
+hooks, executable bytes and the skills are checked before reuse. A damaged bundle
 produces an unavailable message and the agent starts normally. The launcher never
 modifies a bundle already referenced by another process.
 
@@ -44,8 +44,9 @@ PID liveness is diagnostic, not proof that a reused PID is the original agent.
 
 ## Adapters and readiness
 
-Claude uses a session plugin directory with a discoverable skill. Codex uses
-session configuration hooks and an absolute pointer to the immutable skill. Both
+Claude uses a session plugin directory with discoverable skills (`coflux` and
+`coflux-secret`). Codex uses session configuration hooks and absolute pointers to
+the immutable skills. Both
 execute the native CLI directly; no Node or Python interpreter is required on the
 device. Python is used only by developer acceptance probes.
 
