@@ -315,7 +315,7 @@ pub(super) fn launch(base: &Command, root: &Path, args: &[String]) -> Result<i32
             || arg.starts_with("--profile=")
             || (arg.starts_with("-p") && arg.len() > 2)
         {
-            eprintln!("Coflux: Codex profiles keep their native runtime. Hooks remain active; the Coflux skill is available through the session context's file path, not /skills.");
+            eprintln!("Coflux: Codex profiles keep their native runtime. Hooks remain active; the Coflux skills are available through the session context's file paths, not /skills.");
             let mut native = Command::new(base.get_program());
             copy_env(base, &mut native);
             native.args(base.get_args()).args(args);
@@ -510,16 +510,19 @@ fn register(socket: &Path, stopped: &AtomicBool, server: &mut Child) -> Result<(
         stopped,
         deadline,
     )?;
-    let expected = skills.join("coflux/SKILL.md");
-    let found = listed["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
-        .any(|skill| skill["path"].as_str() == expected.to_str());
-    // Discovery must succeed, but the user's native enable/disable choice wins.
-    if !found {
-        return Err("Codex did not discover the Coflux skill".into());
+    // Every skill the integration ships must be discovered.
+    for name in ["coflux", "coflux-secret"] {
+        let expected = skills.join(name).join("SKILL.md");
+        let found = listed["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+            .any(|skill| skill["path"].as_str() == expected.to_str());
+        // Discovery must succeed, but the user's native enable/disable choice wins.
+        if !found {
+            return Err(format!("Codex did not discover the Coflux skill {name}"));
+        }
     }
     let _ = ws.close(None);
     Ok(())

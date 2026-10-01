@@ -1,7 +1,7 @@
 {
   "name": "coflux",
-  "version": "0.20.0",
-  "description": "Connect Claude Code to Coflux: hooks report turn states and session coordinates, and the skill documents local and account CLI commands for terminals across workspaces and devices.",
+  "version": "0.21.0",
+  "description": "Connect Claude Code to Coflux: hooks report turn states and session coordinates, the coflux skill documents local and account CLI commands for terminals across workspaces and devices, and the coflux-secret skill gets secrets from the user without the value entering the conversation.",
   "author": {
     "name": "Shuaiqi Wang",
     "email": "wsq961@outlook.com",

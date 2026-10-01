@@ -1,5 +1,6 @@
 import CofluxClientCore
 import SwiftUI
+import UIKit
 
 /// Agent secret request cards (plan 20260926-ios-secret-input), anchored at the top of the
 /// requesting terminal page below the status strip: the page is immune to the keyboard, so a card at
@@ -12,6 +13,12 @@ import SwiftUI
 /// in the card's own `@State` — never in the input area's draft, the compose overlay, dictation, the
 /// store or the pasteboard — until it is sent once to the device's worker over the end-to-end Device
 /// channel; it is cleared when the card closes.
+///
+/// Multi-line values (plan 20261002-secret-skill): `SecureField` is single-line, so a paste button
+/// beside it reads the pasteboard and applies `SecretPaste`. A value with an inner line break is
+/// kept as a masked summary (line count only, never the text) instead of the field; anything else
+/// lands in the field as before. Values that reach the field by the system paste menu go through the
+/// same rule, so a line break never sneaks in unnormalized.
 struct SecretRequestCards: View {
     let client: CofluxClient
     let requests: [SecretRequestInfo]
@@ -38,6 +45,8 @@ private struct SecretRequestCard: View {
     let source: String
     let deviceName: String
     @State private var value = ""
+    /// The value holds an inner line break: the field is replaced by a masked summary.
+    @State private var multiline = false
     @State private var phase: SecretCardPhase = .pending
 
     private var isClosed: Bool {
@@ -156,7 +165,19 @@ private struct SecretRequestCard: View {
         .background(Theme.secondarySurface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    @ViewBuilder
     private var field: some View {
+        if multiline {
+            multilineSummary
+        } else {
+            HStack(spacing: 8) {
+                singleLineField
+                pasteButton
+            }
+        }
+    }
+
+    private var singleLineField: some View {
         // Own @State binding: voice results and the terminal input area never reach this field.
         // No auto-focus: the keyboard comes up only when the user taps in.
         SecureField("粘贴或输入 \(request.name)", text: $value)
@@ -165,6 +186,11 @@ private struct SecretRequestCard: View {
             .autocorrectionDisabled()
             .submitLabel(.send)
             .onSubmit { submit(.provide(value)) }
+            .onChange(of: value) { _, newValue in
+                // Whatever the system paste menu let through, line breaks follow the same rule.
+                guard newValue.unicodeScalars.contains(where: { $0 == "\n" || $0 == "\r" }) else { return }
+                accept(newValue)
+            }
             .privacySensitive()
             .disabled(isSubmitting)
             .font(Theme.Fonts.body)
@@ -172,6 +198,71 @@ private struct SecretRequestCard: View {
             .frame(height: 42)
             .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
             .accessibilityLabel("\(request.name) 的值")
+    }
+
+    /// Reads the pasteboard straight into the card's state: the only way a multi-line value gets in.
+    private var pasteButton: some View {
+        Button {
+            guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+            accept(text)
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+                .font(Theme.Fonts.body)
+                .foregroundStyle(Theme.foreground)
+                .frame(width: 42, height: 42)
+                .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isSubmitting)
+        .opacity(isSubmitting ? 0.5 : 1)
+        .accessibilityLabel("粘贴 \(request.name)")
+    }
+
+    /// A multi-line value is never shown, not even masked glyph by glyph: only its line count.
+    private var multilineSummary: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.doc")
+                .font(Theme.Fonts.body)
+                .foregroundStyle(Theme.mutedForeground)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("已粘贴多行值 · \(SecretPaste.lineCount(value)) 行")
+                    .font(Theme.Fonts.label.weight(.semibold))
+                    .foregroundStyle(Theme.foreground)
+                Text("内容已遮蔽，换行原样保留")
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+            }
+            Spacer(minLength: 0)
+            Button {
+                value = ""
+                multiline = false
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(Theme.Fonts.body)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isSubmitting)
+            .accessibilityLabel("清除粘贴的值")
+        }
+        .privacySensitive()
+        .padding(.horizontal, 12)
+        .frame(minHeight: 42)
+        .background(Theme.input, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(request.name) 的值，多行，已遮蔽")
+    }
+
+    private func accept(_ text: String) {
+        if let pasted = SecretPaste.multiline(text) {
+            value = pasted
+            multiline = true
+        } else {
+            value = SecretPaste.singleLine(text)
+        }
     }
 
     private var footer: some View {
@@ -231,5 +322,39 @@ private struct SecretRequestCard: View {
             if case .closed = next { value = "" }
             phase = next
         }
+    }
+}
+
+/// The paste rule shared with the desktop card (`multilineSecretFromPaste` in
+/// apps/desktop/src/renderer/components/workbench/secret-request.ts, which carries the tests). A line
+/// break is LF, CRLF or a lone CR. Line breaks only at the start or end — a key copied with a
+/// trailing newline — keep the value single-line, with those line breaks dropped. A line break left
+/// between content switches to multi-line, and the value is the pasted text with every CRLF and lone
+/// CR normalized to LF and nothing else changed, trailing newline included.
+enum SecretPaste {
+    /// The multi-line value for a paste, or nil when it stays single-line.
+    static func multiline(_ text: String) -> String? {
+        // Foundation matches on UTF-16, so "\r\n" is found even though Swift treats it as one Character.
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let scalars = normalized.unicodeScalars
+        guard let first = scalars.firstIndex(where: { $0 != "\n" }),
+              let last = scalars.lastIndex(where: { $0 != "\n" })
+        else { return nil }
+        return scalars[first...last].contains("\n") ? normalized : nil
+    }
+
+    /// A single-line paste: its surrounding line breaks dropped, as the password field does.
+    static func singleLine(_ text: String) -> String {
+        var kept = String.UnicodeScalarView()
+        kept.append(contentsOf: text.unicodeScalars.lazy.filter { $0 != "\n" && $0 != "\r" })
+        return String(kept)
+    }
+
+    /// Lines in an LF-normalized value; a trailing newline does not start another line.
+    static func lineCount(_ value: String) -> Int {
+        let breaks = value.unicodeScalars.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        return value.hasSuffix("\n") ? breaks : breaks + 1
     }
 }

@@ -96,5 +96,6 @@ printf '%s\n' \
   'Rule: in the current workspace use local `coflux terminal new|list|read|wait|send`, `coflux progress`, `coflux notify` and `coflux ports`. Across workspaces or devices use account CLI: `coflux workspace list/new`, `coflux terminal new --workspace <id>` and `coflux terminal read/send/wait <id> --remote`.' \
   'The workspace id above is where this terminal belongs right now. Enter a git worktree and coflux follows you: the terminal moves under that worktree in the sidebar, registering it as a child workspace if needed. Plain `cd` does not move it, but the local commands still act on the workspace your cwd is in: `coflux workspace` prints both.' \
   'Delete a workspace with `coflux workspace remove <id>`, or let Claude Code clean up its own worktree; never delete worktrees manually.' \
+  'When you need a sensitive value from the user (API key, token, password, private key), use `coflux secret` (the `coflux-secret` skill); never ask them to paste it into the chat.' \
   'Load the `coflux` skill for the full playbook.' \
   '</coflux-session>'
