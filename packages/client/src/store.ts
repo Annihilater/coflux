@@ -1607,6 +1607,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /** Whether this client itself holds the terminal of `taskId`: open here, attached, not taken over
+   * by another client. Input typed then reaches the shell as the user's own. */
+  function holdsTaskTerminal(taskId: string): boolean {
+    const task = store.getState().tasks.find((item) => item.id === taskId);
+    return Boolean(task?.sessionId && deviceRouter.holdsSession(task.daemonId, task.sessionId));
+  }
+
+  /** Types `text` into a terminal this client holds, as the user's own keystrokes (one write).
+   * False when it is not held here or the input could not be queued. */
+  function typeIntoHeldTerminal(taskId: string, text: string): boolean {
+    const task = store.getState().tasks.find((item) => item.id === taskId);
+    if (!task?.sessionId || !deviceRouter.holdsSession(task.daemonId, task.sessionId)) return false;
+    return deviceRouter.sendInput(task.daemonId, task.sessionId, new TextEncoder().encode(text));
+  }
+
   /** 本地失败（exec/checkout 等非服务端错误）汇入同一个全局错误提示通道 */
   function reportLocalError(message: string) {
     errorSequence += 1;
@@ -1715,6 +1730,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     authorizeDevice,
     createDeviceJoinKey,
     ensureDirectoryWorkspace,
+    holdsTaskTerminal,
+    typeIntoHeldTerminal,
     reportLocalError,
     disconnect,
   };

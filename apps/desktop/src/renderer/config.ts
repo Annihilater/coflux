@@ -46,5 +46,16 @@ export const SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
  * it — and never synced.
  */
 export const BROWSER_LIBRARY_KEY = "coflux_browser_library";
+/**
+ * Which coding agents the new-tab menu offers and their launch commands (plan
+ * 20261001-desktop-agents): a per-machine preference, unscoped like the sidebar width — the same
+ * commands work whatever server this Mac is signed in to — and never synced.
+ */
+export const AGENT_SETTINGS_KEY = "coflux_agents";
+/**
+ * Which terminal tabs were opened as an agent (task id → agent id), for their tab icon. Scoped by
+ * server address like the layouts: task ids mean nothing on another server.
+ */
+export const AGENT_TABS_KEY = `coflux_agent_tabs:${SERVER_URL}`;
 
 export type { AuthCredential } from "@coflux/client";

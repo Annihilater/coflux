@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
-import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
+import { DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { ChangesView } from "@/components/workbench/changes-view";
@@ -18,6 +18,9 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
+import { AgentLogo, CodexLogo } from "@/components/settings/agent-logos";
+import { effectiveAgents, type AgentId } from "@/components/settings/agent-settings";
+import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
 import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
@@ -51,8 +54,8 @@ import { shouldActivateChangesView } from "@/components/workbench/workbench-stat
 
 /** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
  * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成 gym 第 0 帧站姿。
- * 其余 agent 用 lucide 机器人轮廓，保留状态警示色（approval/question→warning、
- * done→success，与侧栏语义一致）。 */
+ * Codex shows its logo (plan 20261001-desktop-agents) and any other agent the lucide robot, both
+ * with the state tints (approval/question→warning, done→success, as in the sidebar). */
 function AgentGlyph({
   agent,
   state,
@@ -77,6 +80,7 @@ function AgentGlyph({
     return <ClawdGlyph pose={pose} className={className} />;
   }
   const tone = state === "approval" || state === "question" ? "text-warning" : state === "done" ? "text-success" : "";
+  if (agent === "codex") return <CodexLogo className={cn("size-3 shrink-0", tone, className)} />;
   return <Bot className={cn("size-3 shrink-0", tone, className)} />;
 }
 
@@ -144,6 +148,11 @@ export type WorkspaceLayoutActions = {
   moveTab: (workspaceId: string, taskId: string, change: (layout: TerminalLayout) => TerminalLayout) => void;
   /** ＋ in a group (or the empty state): focuses that group, then opens a terminal there. */
   createTerminal: (workspaceId: string, groupId: string) => void;
+  /**
+   * ＋ menu's Agent ▸ (plan 20261001-desktop-agents): focuses that group, then opens a terminal there
+   * titled with the agent's name, which types the agent's launch command once the shell is ready.
+   */
+  createAgentTerminal: (workspaceId: string, groupId: string, agentId: AgentId) => void;
   /** ＋ menu's 浏览器: focuses that group, then opens a blank browser tab there. */
   createBrowserTab: (workspaceId: string, groupId: string) => void;
   /**
@@ -190,6 +199,8 @@ type WorkspaceTerminalProps = {
   canOpenScreen: boolean;
   /** The group whose ＋ menu is open, if it is in this workspace. */
   newTabMenuGroupId: string | null;
+  /** Terminal tabs opened as an agent (task id → agent id): their brand logo when no agent is detected. */
+  agentTabs: Readonly<Record<string, AgentId>>;
 };
 
 /**
@@ -200,6 +211,10 @@ type WorkspaceTerminalProps = {
  * created the terminal item waits (one create at a time) and the trigger spins in the group that
  * holds it; a browser tab can still be opened. Tooltip per docs/design-guidelines.md: a sibling
  * after the menu, suppressed while it is open.
+ *
+ * Agent ▸ (plan 20261001-desktop-agents) sits right below 终端 only while at least one agent is
+ * effective in Settings; its flyout (hover, or → on it) lists those agents in catalog order. Each
+ * opens a terminal, so each waits while a create is in flight, like 终端.
  */
 function NewTabMenu({
   open,
@@ -207,6 +222,7 @@ function NewTabMenu({
   busy,
   spinning,
   onTerminal,
+  onAgent,
   onBrowser,
   onScreen,
   onRestoreFocus,
@@ -216,12 +232,14 @@ function NewTabMenu({
   busy: boolean;
   spinning: boolean;
   onTerminal: () => void;
+  onAgent: (agentId: AgentId) => void;
   onBrowser: () => void;
   /** 屏幕 (plan 20260929-remote-desktop); absent where the device does not offer it. */
   onScreen: (() => void) | null;
   onRestoreFocus: () => void;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
+  const agents = effectiveAgents(useAgentSettings());
   // ⌘T with a long strip: the ＋ follows the last tab and may be scrolled out of view; the menu is
   // anchored to it, so bring it in first.
   useEffect(() => {
@@ -283,6 +301,19 @@ function NewTabMenu({
           isDisabled={busy}
           onClick={onTerminal}
         />
+        {agents.length > 0 ? (
+          <DropdownMenuSubMenu icon={<Sparkles className="size-3.5" />} label="Agent">
+            {agents.map((agent) => (
+              <DropdownMenuItem
+                key={agent.id}
+                icon={<AgentLogo agent={agent.id} className="size-3.5" />}
+                label={agent.name}
+                isDisabled={busy}
+                onClick={() => onAgent(agent.id)}
+              />
+            ))}
+          </DropdownMenuSubMenu>
+        ) : null}
         <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
         {onScreen ? <DropdownMenuItem icon={<Monitor className="size-3.5" />} label="屏幕" onClick={onScreen} /> : null}
       </DropdownMenu>
@@ -485,6 +516,7 @@ export function WorkspaceTerminal({
   screens,
   canOpenScreen,
   newTabMenuGroupId,
+  agentTabs,
 }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
@@ -865,6 +897,9 @@ export function WorkspaceTerminal({
     if (!task) return null;
     const state = stateOf(task);
     const agentEntry = task.sessionId ? sessionAgents[task.sessionId] : undefined;
+    // Opened as an agent from the ＋ menu: its logo whenever presence detection reports nothing, so
+    // the brand identity comes back once the agent exits (detection overlays it while it runs).
+    const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
     if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
@@ -926,6 +961,8 @@ export function WorkspaceTerminal({
                 <Unplug className="size-3 shrink-0 text-warning" />
               ) : agentEntry ? (
                 <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={seenDone} className={bright ? "opacity-90" : "opacity-70"} />
+              ) : launchedAgent ? (
+                <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
               ) : (
                 <SquareTerminal className={cn("size-3 shrink-0", bright ? "opacity-90" : "opacity-50")} />
               )}
@@ -1054,6 +1091,7 @@ export function WorkspaceTerminal({
               busy={Boolean(pending)}
               spinning={holdsPending}
               onTerminal={() => actions.createTerminal(workspaceId, group.id)}
+              onAgent={(agentId) => actions.createAgentTerminal(workspaceId, group.id, agentId)}
               onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}
               onScreen={canOpenScreen ? () => actions.createScreenTab(workspaceId, group.id) : null}
               onRestoreFocus={() => actions.focusActiveTab(workspaceId)}
