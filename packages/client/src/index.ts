@@ -19,6 +19,7 @@ export {
   type ChangedFileStatus,
   type ChangesListResult,
   type ChangeFileResult,
+  type ChangesOption,
   type DeviceAuthorizeResult,
   type DeviceJoinKeyResult,
   type TaskReadResult,

@@ -488,7 +488,18 @@ export type DesktopBridge = {
   /** Immersive mode: the window goes full screen (true) or back (false). */
   screenImmersive(on: boolean): void;
   onScreenEvent(listener: (event: DesktopScreenEvent) => void): () => void;
+  /**
+   * Changes view file menu (plan 20261001-changes-review-polish), offered only for workspaces on
+   * this machine's own device. `root` is the workspace's absolute path and `path` a file relative
+   * to it, never pre-joined: main refuses a relative path that is absolute or has `..`, a result
+   * outside the root, and anything that is not an existing regular file.
+   */
+  revealWorkspaceFile(root: string, path: string): Promise<DesktopWorkspaceFileResult>;
+  /** Opens the file with its default app. Also refuses executables, bundles and launcher files. */
+  openWorkspaceFile(root: string, path: string): Promise<DesktopWorkspaceFileResult>;
 };
+
+export type DesktopWorkspaceFileResult = { ok: true } | { ok: false; error: string };
 
 /** 一个自定义端点的定义。**不含凭据**——它单独走 `apiKey` 字段，且只往主进程去。 */
 export type DesktopExecutorCustomProvider = {

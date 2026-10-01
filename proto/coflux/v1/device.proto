@@ -996,19 +996,26 @@ message DeviceChangedFile {
 message DeviceChangesListRequest {
   string request_id = 1;
   string workspace_id = 2;
+  // false (the default, and all an older client sends): the branch scope described below.
+  // true: only uncommitted changes — `base` is HEAD (plan 20261001-changes-review-polish).
+  // A worker that predates this field ignores it, answers the branch scope and never echoes it.
+  bool uncommitted = 3;
 }
 
 // worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
-// file; the totals equal the workspace's diff stat.
+// file; in the branch scope the totals equal the workspace's diff stat.
 message DeviceChangesList {
   string request_id = 1;
   bool ok = 2;
   optional string error = 3;
-  // The commit every per-file request must compare against: merge-base of the default branch and
-  // HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
-  // untracked files are listed.
+  // The commit every per-file request must compare against. Branch scope: merge-base of the default
+  // branch and HEAD, falling back to HEAD. Uncommitted scope: HEAD. Empty when HEAD does not
+  // resolve (an unborn branch): then only untracked files are listed.
   string base = 4;
   repeated DeviceChangedFile files = 5;
+  // Echo of the request's `uncommitted`, set on every response including `ok: false`. A client that
+  // asked for true and reads false is talking to a worker too old to honour the scope.
+  bool uncommitted = 6;
 }
 
 // client→worker (RPC): the content of one changed file.
@@ -1020,10 +1027,13 @@ message DeviceChangesFileRequest {
   string path = 4;
   // The base-side path of a rename.
   optional string old_path = 5;
+  // Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
+  bool ignore_whitespace = 6;
 }
 
 // worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
+// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
 message DeviceChangesFile {
   string request_id = 1;
   bool ok = 2;
@@ -1035,6 +1045,9 @@ message DeviceChangesFile {
   string patch = 8;
   // Either side contains NUL; contents are then left empty.
   bool binary = 9;
+  // Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
+  // (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+  bool ignore_whitespace = 10;
 }
 
 // ===== Browser annotations (plan 20260929-browser-annotations) =====
@@ -1137,6 +1150,32 @@ message AnnotationFollowUp {
   double created_at = 3;
 }
 
+// Which side of a diff a code comment's lines are on (plan 20261001-changes-review-comments).
+enum AnnotationCodeSide {
+  ANNOTATION_CODE_SIDE_UNSPECIFIED = 0;
+  // The comparison base: the commit the changes view compared against (`base_commit`).
+  ANNOTATION_CODE_SIDE_BASE = 1;
+  // The workspace's working tree.
+  ANNOTATION_CODE_SIDE_WORKING_TREE = 2;
+}
+
+// Where a code comment sits: lines of one file of the workspace, as the changes view showed them
+// (plan 20261001-changes-review-comments). An annotation carries either this or page targets.
+message AnnotationCodeAnchor {
+  // Worktree-relative path on that side (a rename's old path for a base-side anchor).
+  string path = 1;
+  AnnotationCodeSide side = 2;
+  // First and last commented line, 1-based and inclusive, on that side. A hint: the desktop
+  // re-finds the lines by `excerpt` when the file has changed since.
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+  // The commented lines' text when the comment was written, one line per line (capped by the
+  // worker).
+  string excerpt = 5;
+  // For a base-side anchor, the commit the lines were read from; empty for the working tree.
+  string base_commit = 6;
+}
+
 message Annotation {
   // Assigned by the worker on creation.
   string annotation_id = 1;
@@ -1156,12 +1195,15 @@ message Annotation {
   double created_at = 12;
   double updated_at = 13;
   double resolved_at = 14;
-  // The elements the annotation points at, at least one. Target 0 is the anchor: the clicked
+  // The elements the annotation points at, at least one unless `code` is set. Target 0 is the anchor: the clicked
   // element, the first of a shift-click selection, or the element containing `region`. For a
   // region annotation the other targets are the top-level elements inside the region.
   repeated AnnotationTarget targets = 15;
   // Set when the user dragged a region instead of picking elements.
   AnnotationRegion region = 16;
+  // A code comment written in the changes view (plan 20261001-changes-review-comments): set
+  // instead of `targets` (an annotation has one or the other). An edit that sends none keeps it.
+  AnnotationCodeAnchor code = 17;
 }
 
 // An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
@@ -1172,7 +1214,7 @@ message AnnotationImageUpload {
 }
 
 // Create (empty annotation_id) or edit an annotation. On edit only the comment, the targets, the
-// region and the images change; status and numbering are the worker's.
+// region, the code anchor and the images change; status and numbering are the worker's.
 message AnnotationPut {
   Annotation annotation = 1;
   repeated AnnotationImageUpload add_images = 2;
@@ -1213,6 +1255,10 @@ message DeviceAnnotationsListed {
   string error = 3;
   uint32 revision = 4;
   repeated Annotation annotations = 5;
+  // Set by every worker that stores code anchors (plan 20261001-changes-review-comments), on every
+  // response including `ok: false`: it means "this worker decodes Annotation.code", not that the
+  // store is healthy. Without it the changes view offers no code comments.
+  bool code_comments = 6;
 }
 
 // client→worker (SESSION_CONTROL): one change to the workspace's annotations.

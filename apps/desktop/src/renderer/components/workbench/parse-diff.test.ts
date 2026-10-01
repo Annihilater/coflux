@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildDiffRows, buildSegments, gapId, parseHunkRanges, splitLines } from "./parse-diff";
+import { buildDiffRows, buildSegments, changeBlocks, gapId, parseHunkRanges, splitLines } from "./parse-diff";
 
 test("-U0 headers: omitted counts are 1 and empty ranges name the line before them", () => {
   const patch = [
@@ -81,4 +81,21 @@ test("short stretches between changes are never folded", () => {
   ]);
   const rows = buildDiffRows(segments, "inline", new Set());
   assert.equal(rows.filter((row) => row.kind === "gap").length, 0);
+});
+
+test("change blocks: one per run of changed rows, the same count in split and inline", () => {
+  // Line 2 becomes two lines; one line is inserted after line 15.
+  const segments = buildSegments(20, 22, [
+    { oldStart: 2, oldCount: 1, newStart: 2, newCount: 2 },
+    { oldStart: 15, oldCount: 0, newStart: 17, newCount: 1 },
+  ]);
+  for (const mode of ["split", "inline"] as const) {
+    const rows = buildDiffRows(segments, mode, new Set());
+    const { blockOfRow, starts } = changeBlocks(rows);
+    assert.equal(starts.length, 2, mode);
+    for (const [block, start] of starts.entries()) {
+      assert.equal(blockOfRow[start], block);
+      assert.equal(start === 0 ? -1 : blockOfRow[start - 1], -1, "a block starts after a non-change row");
+    }
+  }
 });

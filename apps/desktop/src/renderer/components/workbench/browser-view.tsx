@@ -58,6 +58,8 @@ import {
   annotationTitle,
   dataUrlToImage,
   HAND_OFF_INSTRUCTION,
+  isResolved,
+  pageAnnotations,
   pageKey,
   pinsForPage,
   type CardBox,
@@ -71,6 +73,7 @@ import {
   AnnotationsPanel,
   draftIsDirty,
   prepareReferenceImage,
+  useAnnotationUndo,
   useAnnotatorPalette,
   type AnnotationDraft,
   type PanelNotice,
@@ -147,8 +150,6 @@ type Failure =
   | { kind: "certificate"; url: string; host: string; certificate: DesktopBrowserCertificate | null }
   | { kind: "crashed"; url: string };
 
-/** How long a deletion's 「撤销」 toast stays; the worker keeps deletions restorable for a minute. */
-const UNDO_TOAST_MS = 8000;
 
 /** Chromium net error codes the error pages distinguish. */
 const NET_ERR_ABORTED = -3;
@@ -316,7 +317,12 @@ function BrowserView({
   // ---- browser annotations (plans 20260929-browser-annotations, 20260929-annotation-polish) ----
   const annotationsModel = annotationsModelFor(client);
   const annotationsEntry = useWorkspaceAnnotations(client, workspaceId, visible && (isWebUrl(url) || panelOpen));
-  const annotations = annotationsEntry.annotations;
+  // The panel, the pins and the count show page annotations only: code comments belong to the
+  // changes view (plan 20261001-changes-review-comments), though they share the store and numbering.
+  const loadedAnnotations = annotationsEntry.annotations;
+  const annotations = useMemo(() => (loadedAnnotations ? pageAnnotations(loadedAnnotations) : null), [loadedAnnotations]);
+  const panelEntry = useMemo(() => ({ ...annotationsEntry, annotations }), [annotationsEntry, annotations]);
+  const offerUndo = useAnnotationUndo(annotationsModel, workspaceId, annotationFailureText);
   const annotationNotice: PanelNotice =
     annotationsEntry.status === "unsupported" ? "unsupported" : annotationsEntry.status === "unreachable" ? (daemonOnline ? "unreachable" : "offline") : null;
   const annotationsReadOnly = annotationNotice !== null;
@@ -503,36 +509,6 @@ function BrowserView({
     setDraft((latest) => (latest?.key === current.key ? { ...latest, saving: false, error: annotationFailureText(result, "保存") } : latest));
   }
 
-  async function restoreAnnotations(annotationIds: string[]) {
-    const result = await annotationsModel.change(workspaceId, { kind: "restore", annotationIds });
-    if (!result.ok) showToast({ body: annotationFailureText(result, "撤销"), type: "error" });
-  }
-
-  /**
-   * The deletion already happened everywhere (the worker keeps the records restorable for a while);
-   * 「撤销」 restores exactly the ids it removed.
-   */
-  function offerUndo(body: string, annotationIds: string[]) {
-    if (annotationIds.length === 0) return;
-    let dismiss: (() => void) | null = null;
-    dismiss = showToast({
-      body,
-      type: "info",
-      autoHideDuration: UNDO_TOAST_MS,
-      endContent: (
-        <Button
-          label="撤销"
-          variant="secondary"
-          size="sm"
-          onClick={() => {
-            dismiss?.();
-            void restoreAnnotations(annotationIds);
-          }}
-        />
-      ),
-    });
-  }
-
   /** Deletes a pending annotation, or confirms a resolved one; both can be undone for a while. */
   async function removeAnnotation(annotation: Annotation, confirming: boolean) {
     const id = annotation.annotationId;
@@ -552,8 +528,12 @@ function BrowserView({
     return result.ok;
   }
 
+  /** 「清除全部已完成」: the resolved page annotations, by id — the worker's clear-resolved would
+   * also remove resolved code comments. */
   async function clearResolved() {
-    const result = await annotationsModel.change(workspaceId, { kind: "clear-resolved" });
+    const annotationIds = (annotations ?? []).filter(isResolved).map((annotation) => annotation.annotationId);
+    if (annotationIds.length === 0) return;
+    const result = await annotationsModel.change(workspaceId, { kind: "delete", annotationIds });
     if (!result.ok) {
       showToast({ body: annotationFailureText(result, "清除"), type: "error" });
       return;
@@ -1422,7 +1402,7 @@ function BrowserView({
 
       {panelOpen ? (
         <AnnotationsPanel
-          entry={annotationsEntry}
+          entry={panelEntry}
           currentUrl={isWebUrl(url) ? url : ""}
           missing={pageMissing}
           notice={annotationNotice}

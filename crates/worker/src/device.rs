@@ -2158,6 +2158,9 @@ impl DeviceRuntime {
             error,
             revision,
             annotations,
+            // Plan 20261001-changes-review-comments: this worker stores code anchors. Set on every
+            // response, failures included — it describes the worker, not the store.
+            code_comments: true,
         })
     }
 
@@ -3393,7 +3396,13 @@ impl DeviceRuntime {
                         "workspaceId 不属于本 daemon 当前清单",
                     );
                 };
-                match crate::changes::list_changes(&root, &default_branch).await {
+                let listed =
+                    crate::changes::list_changes(&root, &default_branch, request.uncommitted)
+                        .await;
+                match listed {
+                    // `uncommitted` is echoed on every list response, failures included
+                    // (plan 20261001-changes-review-polish): it tells the client this worker
+                    // honoured the scope.
                     Ok((base, files)) => {
                         device_envelope::Payload::ChangesList(wire::DeviceChangesList {
                             request_id: request.request_id,
@@ -3401,6 +3410,7 @@ impl DeviceRuntime {
                             error: None,
                             base,
                             files,
+                            uncommitted: request.uncommitted,
                         })
                     }
                     Err(error) => device_envelope::Payload::ChangesList(wire::DeviceChangesList {
@@ -3409,6 +3419,7 @@ impl DeviceRuntime {
                         error: Some(error),
                         base: String::new(),
                         files: Vec::new(),
+                        uncommitted: request.uncommitted,
                     }),
                 }
             }

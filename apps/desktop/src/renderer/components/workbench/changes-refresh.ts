@@ -6,6 +6,13 @@ export type ChangesRefreshObservation = {
   deletions: number;
   /** 用户点击刷新时递增；让“内容变了但行数统计没变”也有显式失效入口。 */
   manualRevision: number;
+  /**
+   * The comparison scope (plan 20261001-changes-review-polish): switching it refetches. The
+   * additions/deletions above are always the branch scope's, so a commit — which leaves them
+   * unchanged — does not refresh 「未提交」 on its own; reopening, the refresh button and a scope
+   * switch do.
+   */
+  uncommitted: boolean;
 };
 
 /**
@@ -24,6 +31,7 @@ export function shouldRefreshChanges(
     previous.defaultBranch !== current.defaultBranch ||
     previous.additions !== current.additions ||
     previous.deletions !== current.deletions ||
-    previous.manualRevision !== current.manualRevision
+    previous.manualRevision !== current.manualRevision ||
+    previous.uncommitted !== current.uncommitted
   );
 }

@@ -1,7 +1,8 @@
 //! `coflux annotations list | watch | resolve` (plan 20260929-browser-annotations).
 //!
-//! The user annotates elements of the workspace's page in Coflux's built-in browser; the worker of
-//! the workspace's device keeps them. These commands are local agent actions on `/agent`, resolved
+//! The user annotates elements of the workspace's page in Coflux's built-in browser, or comments on
+//! lines of the workspace's diff in the desktop's changes view (plan
+//! 20261001-changes-review-comments); the worker of the workspace's device keeps both kinds. These commands are local agent actions on `/agent`, resolved
 //! to the caller's **effective** workspace like every other local command: `list` prints the
 //! pending ones as markdown (or `--json`), `watch` blocks until there are some, and `resolve`
 //! records what the agent changed so the user can confirm it or reopen it.
@@ -240,6 +241,50 @@ fn render_targets(annotation: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// A fenced block that survives backtick runs inside the value.
+fn fenced(value: &str, out: &mut Vec<String>) {
+    let mut longest = 0;
+    let mut run = 0;
+    for character in value.chars() {
+        if character == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    out.push(fence.clone());
+    for line in value.lines() {
+        out.push(line.to_string());
+    }
+    out.push(fence);
+}
+
+/// A code comment's location and the lines it was written on.
+fn render_code(anchor: &Value, out: &mut Vec<String>) {
+    let path = text(anchor, "path");
+    let start = number(anchor, "startLine");
+    let end = number(anchor, "endLine").max(start);
+    let location = if end > start { format!("{path}:{start}-{end}") } else { format!("{path}:{start}") };
+    if text(anchor, "side") == "base" {
+        let commit = text(anchor, "baseCommit");
+        let at = if commit.is_empty() { String::new() } else { format!(" at commit {}", code(commit)) };
+        out.push(format!(
+            "- Code: {} on the base side of the diff (the version{at} that the changes are compared against, not the working tree)",
+            code(&location)
+        ));
+    } else {
+        out.push(format!("- Code: {} in the working tree", code(&location)));
+    }
+    let lines = text(anchor, "lines");
+    if !lines.is_empty() {
+        out.push("- Commented lines (as they were when the comment was written):".into());
+        out.push(String::new());
+        fenced(lines, out);
+    }
+}
+
 /// One annotation as a markdown section.
 pub fn render_annotation(annotation: &Value) -> String {
     let mut out = Vec::new();
@@ -265,6 +310,10 @@ pub fn render_annotation(annotation: &Value) -> String {
             }
             out.push(format!("- The user reopened it: \"{reply}\""));
         }
+    }
+    if let Some(code) = annotation.get("code").filter(|code| code.is_object()) {
+        render_code(code, &mut out);
+        return out.join("\n");
     }
     let page = annotation.get("page").cloned().unwrap_or(Value::Null);
     let url = text(&page, "url");
@@ -300,20 +349,26 @@ pub fn render_list(result: &Value) -> String {
         .unwrap_or_default();
     let resolved = number(result, "resolvedCount");
     if annotations.is_empty() {
-        let mut line = format!("No pending browser annotations in workspace {workspace}.");
+        let mut line = format!("No pending annotations in workspace {workspace}.");
         if resolved > 0 {
             line.push_str(&format!(" {resolved} resolved one(s) are waiting for the user to review."));
         }
         return line;
     }
-    let mut out = vec![
-        format!("# Browser annotations · workspace {workspace}"),
-        String::new(),
-        format!(
-            "{} pending. The user marked these elements in Coflux's built-in browser; one annotation can cover several elements selected together, or a dragged region with the elements inside it. For each one: find the code (component names and source locations are the best leads; the selector and DOM path describe the element in the page), make the change, then run `coflux annotations resolve <id> --note \"<what you changed>\"`. Map raw values such as colors, sizes and spacing to the project's design system (its tokens and components) instead of hard-coding them. Images are files on this machine: read them to see the current state and the user's references.",
-            annotations.len()
-        ),
-    ];
+    let is_code = |annotation: &Value| annotation.get("code").is_some_and(Value::is_object);
+    let code_count = annotations.iter().filter(|annotation| is_code(*annotation)).count();
+    let page_count = annotations.len() - code_count;
+    let mut intro = format!(
+        "{} pending. For each one: make the change, then run `coflux annotations resolve <id> --note \"<what you changed>\"`.",
+        annotations.len()
+    );
+    if page_count > 0 {
+        intro.push_str(" Browser annotations: the user marked elements in Coflux's built-in browser; one annotation can cover several elements selected together, or a dragged region with the elements inside it. Find the code (component names and source locations are the best leads; the selector and DOM path describe the element in the page). Map raw values such as colors, sizes and spacing to the project's design system (its tokens and components) instead of hard-coding them. Images are files on this machine: read them to see the current state and the user's references.");
+    }
+    if code_count > 0 {
+        intro.push_str(" Code comments: the user commented on lines of this workspace's diff in Coflux's changes view. The file and line range are where the lines were when the comment was written; if the file has changed since, find the commented lines by their text.");
+    }
+    let mut out = vec![format!("# Annotations · workspace {workspace}"), String::new(), intro];
     for annotation in &annotations {
         out.push(String::new());
         out.push(render_annotation(annotation));
@@ -370,7 +425,7 @@ pub fn run(args: &ParsedArgs) {
                 }
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     crate::die(&format!(
-                        "no pending browser annotations in workspace {} within {timeout}s",
+                        "no pending annotations in workspace {} within {timeout}s",
                         workspace_label(&result)
                     ));
                 }
@@ -502,8 +557,46 @@ mod tests {
         let rendered = render_list(&json!({ "ref": "coflux:workspace:aa", "annotations": [], "resolvedCount": 2 }));
         assert_eq!(
             rendered,
-            "No pending browser annotations in workspace coflux:workspace:aa. 2 resolved one(s) are waiting for the user to review."
+            "No pending annotations in workspace coflux:workspace:aa. 2 resolved one(s) are waiting for the user to review."
         );
+    }
+
+    #[test]
+    fn code_comments_render_their_location_and_lines() {
+        let result = json!({
+            "ref": "coflux:workspace:aa",
+            "resolvedCount": 0,
+            "annotations": [
+                {
+                    "id": "ann-7", "number": 7, "kind": "code", "comment": "Use the shared helper here",
+                    "page": { "url": "", "title": "" }, "targets": [], "region": null, "images": [],
+                    "code": { "path": "src/lib.rs", "side": "working-tree", "startLine": 12, "endLine": 14,
+                        "lines": "fn total() {\n    a + b\n}", "baseCommit": null }
+                },
+                {
+                    "id": "ann-8", "number": 8, "kind": "code", "comment": "Why was this removed?",
+                    "targets": [], "region": null,
+                    "code": { "path": "src/old.rs", "side": "base", "startLine": 3, "endLine": 3,
+                        "lines": "let s = \"```\";", "baseCommit": "0a1b2c3d" }
+                }
+            ]
+        });
+        let rendered = render_list(&result);
+        for phrase in [
+            "# Annotations · workspace coflux:workspace:aa",
+            "Code comments: the user commented on lines",
+            "## #7 · `ann-7`",
+            "> Use the shared helper here",
+            "- Code: `src/lib.rs:12-14` in the working tree",
+            "```\nfn total() {\n    a + b\n}\n```",
+            "- Code: `src/old.rs:3` on the base side of the diff (the version at commit `0a1b2c3d`",
+            "````\nlet s = \"```\";\n````",
+        ] {
+            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
+        }
+        // No page-annotation guidance or page lines for a code-only list.
+        assert!(!rendered.contains("Browser annotations:"));
+        assert!(!rendered.contains("- Page:"));
     }
 
     #[test]

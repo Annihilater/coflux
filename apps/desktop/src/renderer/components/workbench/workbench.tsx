@@ -1361,7 +1361,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       const focused = document.activeElement;
-      if (focused instanceof Element && focused.closest('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], dialog')) return;
+      // `data-owns-escape`: an element that handles Esc itself — the changes view's comment
+      // composer cancels on Esc and must not close the overlay (plan 20261001-changes-review-comments).
+      if (focused instanceof Element && focused.closest('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], dialog, [data-owns-escape]')) return;
       event.preventDefault();
       event.stopPropagation();
       setWorkspaceChangesOpenRef.current(workspaceId, false);

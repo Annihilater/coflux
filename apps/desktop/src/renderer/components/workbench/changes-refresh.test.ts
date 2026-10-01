@@ -11,9 +11,15 @@ function observation(overrides: Partial<ChangesRefreshObservation> = {}): Change
     additions: 3,
     deletions: 2,
     manualRevision: 0,
+    uncommitted: false,
     ...overrides,
   };
 }
+
+test("switching the comparison scope refetches; a commit alone does not (plan 20261001-changes-review-polish)", () => {
+  assert.equal(shouldRefreshChanges(observation(), observation({ uncommitted: true })), true);
+  assert.equal(shouldRefreshChanges(observation({ uncommitted: true }), observation({ uncommitted: true })), false);
+});
 
 test("首次激活与重新进入 tab 都刷新，即使 additions/deletions 没变", () => {
   const active = observation();

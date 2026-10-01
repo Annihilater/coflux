@@ -5,8 +5,10 @@ import type { Annotation } from "@coflux/protocol";
 import type { AnnotationChange, AnnotationMutateResult, CofluxClient } from "@coflux/client";
 
 /**
- * Browser annotations of each workspace as this renderer last loaded them (plans
- * 20260929-browser-annotations, 20260929-annotation-polish). One model per client, shared by every browser tab of a workspace.
+ * Annotations of each workspace as this renderer last loaded them (plans
+ * 20260929-browser-annotations, 20260929-annotation-polish). One model per client, shared by every
+ * browser tab and the changes view of a workspace; each surface filters its own kind (page
+ * annotations, or code comments — plan 20261001-changes-review-comments).
  * The content comes from the workspace device's worker over the Device channel and lives only in
  * memory here — which is also the read-only list shown while the device is offline.
  *
@@ -20,6 +22,8 @@ export type WorkspaceAnnotations = {
   /** null until the first successful load. */
   annotations: Annotation[] | null;
   revision: number | null;
+  /** Whether the device's worker stores code comments; null until the first successful load. */
+  codeComments: boolean | null;
   loading: boolean;
   status: WorkspaceAnnotationsStatus;
   error: string;
@@ -33,7 +37,7 @@ export type AnnotationsModel = {
   imageUrl: (workspaceId: string, annotationId: string, imageId: string) => Promise<string | null>;
 };
 
-const EMPTY: WorkspaceAnnotations = { annotations: null, revision: null, loading: false, status: "ok", error: "" };
+const EMPTY: WorkspaceAnnotations = { annotations: null, revision: null, codeComments: null, loading: false, status: "ok", error: "" };
 
 const models = new WeakMap<CofluxClient, AnnotationsModel>();
 
@@ -54,7 +58,14 @@ export function annotationsModelFor(client: CofluxClient): AnnotationsModel {
     patch(workspaceId, { loading: true });
     const promise = client.listAnnotations(workspaceId).then((result) => {
       if (result.ok) {
-        patch(workspaceId, { annotations: result.annotations, revision: result.revision, loading: false, status: "ok", error: "" });
+        patch(workspaceId, {
+          annotations: result.annotations,
+          revision: result.revision,
+          codeComments: result.codeComments,
+          loading: false,
+          status: "ok",
+          error: "",
+        });
       } else {
         // The list already loaded stays: it is what the offline panel shows, read-only.
         patch(workspaceId, { loading: false, status: result.reason === "refused" ? "error" : result.reason, error: result.error });
@@ -72,6 +83,17 @@ export function annotationsModelFor(client: CofluxClient): AnnotationsModel {
       if (result.removedIds.length > 0) {
         const current = store.getState().workspaces[workspaceId]?.annotations;
         if (current) patch(workspaceId, { annotations: current.filter((annotation) => !result.removedIds.includes(annotation.annotationId)) });
+      }
+      // A saved or reopened one shows at once, without waiting for the refetch below.
+      const saved = result.annotation;
+      if (saved) {
+        const current = store.getState().workspaces[workspaceId]?.annotations;
+        if (current) {
+          const known = current.some((annotation) => annotation.annotationId === saved.annotationId);
+          patch(workspaceId, {
+            annotations: known ? current.map((annotation) => (annotation.annotationId === saved.annotationId ? saved : annotation)) : [...current, saved],
+          });
+        }
       }
       await (inflight.get(workspaceId) ?? Promise.resolve());
       void refresh(workspaceId);

@@ -102,6 +102,30 @@ export type SplitRow = {
 export type InlineRow = { kind: "inline"; type: "context" | "del" | "add"; oldLine: number | null; newLine: number | null };
 export type DiffRow = GapRow | SplitRow | InlineRow;
 
+/** Whether a display row shows changed lines (a gap or a context row does not). */
+export function isChangeRow(row: DiffRow): boolean {
+  if (row.kind === "gap") return false;
+  if (row.kind === "split") return Boolean(row.left?.changed || row.right?.changed);
+  return row.type !== "context";
+}
+
+/**
+ * Change blocks of the display rows, for F7 stepping (plan 20261001-changes-review-polish): each
+ * run of consecutive changed rows is one block. Returns the block index of every row (-1 outside
+ * any block) and the row index each block starts at. Split and inline rows of the same segments
+ * yield the same number of blocks.
+ */
+export function changeBlocks(rows: readonly DiffRow[]): { blockOfRow: Int32Array; starts: number[] } {
+  const blockOfRow = new Int32Array(rows.length).fill(-1);
+  const starts: number[] = [];
+  rows.forEach((row, index) => {
+    if (!isChangeRow(row)) return;
+    if (index === 0 || blockOfRow[index - 1] === -1) starts.push(index);
+    blockOfRow[index] = starts.length - 1;
+  });
+  return { blockOfRow, starts };
+}
+
 /** A stable id for an equal stretch, so its expanded state survives re-rendering. */
 export function gapId(segment: { oldStart: number; newStart: number }): string {
   return `${segment.oldStart}:${segment.newStart}`;

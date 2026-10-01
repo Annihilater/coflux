@@ -5,7 +5,6 @@ import {
   CONTROL_PROTOCOL_VERSION,
   SecretAnswerKind,
   SecretAnswerStatus,
-  DeviceChangeStatus,
   type AccountNotification,
   type Annotation,
   type AnnotationPut,
@@ -117,7 +116,9 @@ export type AnnotationSummaryState = {
  * reply, never a timeout); `unreachable` = the device could not be reached or did not answer;
  * `refused` = the worker answered and refused (the message says why). */
 export type AnnotationFailure = { ok: false; reason: "unsupported" | "unreachable" | "refused"; error: string };
-export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[] } | AnnotationFailure;
+/** `codeComments`: the device's worker stores code comments (annotations with a code anchor, plan
+ * 20261001-changes-review-comments); an older worker lists only page annotations. */
+export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[]; codeComments: boolean } | AnnotationFailure;
 /** `removedIds`: for a delete or clear-resolved, exactly the ids it removed — what one 「撤销」
  * (`restore`) brings back within the worker's undo window (plan 20260929-annotation-polish). */
 export type AnnotationMutateResult = { ok: true; revision: number; annotation?: Annotation; removedIds: string[] } | AnnotationFailure;
@@ -210,7 +211,6 @@ import {
   ANNOTATION_FRAME_TOO_LARGE,
   ANNOTATIONS_UNSUPPORTED,
   createDeviceRouter,
-  DAEMON_OUTDATED_CODE,
   type DeviceInputState,
   type DeviceRouter,
   type DeviceTransportState,
@@ -227,60 +227,10 @@ export type FsListResult = { ok: boolean; entries: FsEntry[]; error: string; pat
 export type ExecResult = { ok: boolean; exitCode: number; stdout: string; stderr: string; error: string };
 export type FsWriteResult = { ok: boolean; path?: string; error: string };
 
-/* Workspace changes (plan 20260929-changes-file-tree). */
-export type ChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
-export type ChangedFile = {
-  /** Worktree-relative path in the working tree (the new path of a rename). */
-  path: string;
-  /** Base-side path; set only for renames. */
-  oldPath?: string;
-  status: ChangedFileStatus;
-  additions: number;
-  deletions: number;
-  binary: boolean;
-  /** The larger of the two sides in bytes. */
-  size: number;
-};
-/** `daemonOutdated`: the device's worker predates the changes RPCs and must be updated. */
-export type ChangesFailure = { ok: false; error: string; daemonOutdated: boolean };
-/** `base` is the commit every per-file request must compare against (empty on an unborn branch). */
-export type ChangesListResult = { ok: true; base: string; files: ChangedFile[] } | ChangesFailure;
-export type ChangeFileResult =
-  | {
-      ok: true;
-      oldExists: boolean;
-      newExists: boolean;
-      oldContent: string;
-      newContent: string;
-      /** `git diff -U0` of the pair; empty when a side is missing or both are equal. */
-      patch: string;
-      binary: boolean;
-    }
-  | ChangesFailure;
-
-function changedFileStatus(status: DeviceChangeStatus): ChangedFileStatus {
-  switch (status) {
-    case DeviceChangeStatus.ADDED:
-      return "added";
-    case DeviceChangeStatus.DELETED:
-      return "deleted";
-    case DeviceChangeStatus.RENAMED:
-      return "renamed";
-    case DeviceChangeStatus.UNTRACKED:
-      return "untracked";
-    default:
-      return "modified";
-  }
-}
-
-function changesFailure(error: unknown): ChangesFailure {
-  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-  return {
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-    daemonOutdated: code === DAEMON_OUTDATED_CODE,
-  };
-}
+/* Workspace changes (plans 20260929-changes-file-tree, 20261001-changes-review-polish): the shapes
+ * and the response mapping live in ./changes. */
+import { changesFailure, toChangeFileResult, toChangesListResult, type ChangeFileResult, type ChangesListResult } from "./changes";
+export type { ChangedFile, ChangedFileStatus, ChangesFailure, ChangesListResult, ChangeFileResult, ChangesOption } from "./changes";
 /** 设备授权兑现结果（plan 112；与桌面版 plan 113 的契约）：失败文案来自服务端 `deviceAuthorizeInfo{ ok:false }`
  * 或本地（未登录 / 连接未就绪 / 断连 / 超时）。 */
 export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
@@ -1501,47 +1451,40 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
-  /** Every changed file of a workspace against the diff-stat base, in one device round trip. */
-  async function listWorkspaceChanges(workspaceId: string): Promise<ChangesListResult> {
+  /**
+   * Every changed file of a workspace in one device round trip. Default: the branch scope (the
+   * diff-stat base); `uncommitted`: against HEAD. An old worker that ignores the scope is reported
+   * as `daemonOutdated` with `outdatedOption`, never as the wrong list.
+   */
+  async function listWorkspaceChanges(workspaceId: string, options: { uncommitted?: boolean } = {}): Promise<ChangesListResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
     if (!workspace) return { ok: false, error: "工作区不存在", daemonOutdated: false };
+    const uncommitted = options.uncommitted === true;
     try {
-      const result = await deviceRouter.changesList(workspace.daemonId, workspaceId);
-      if (!result.ok) return { ok: false, error: result.error || "获取变更失败", daemonOutdated: false };
-      return {
-        ok: true,
-        base: result.base,
-        files: result.files.map((file) => ({
-          path: file.path,
-          oldPath: file.oldPath,
-          status: changedFileStatus(file.status),
-          additions: file.additions,
-          deletions: file.deletions,
-          binary: file.binary,
-          size: Number(file.size),
-        })),
-      };
+      const result = await deviceRouter.changesList(workspace.daemonId, workspaceId, uncommitted);
+      return toChangesListResult(result, uncommitted);
     } catch (error) {
       return changesFailure(error);
     }
   }
 
-  /** One changed file's two sides, against the `base` a previous `listWorkspaceChanges` returned. */
-  async function readWorkspaceChangeFile(workspaceId: string, base: string, path: string, oldPath?: string): Promise<ChangeFileResult> {
+  /**
+   * One changed file's two sides, against the `base` a previous `listWorkspaceChanges` returned.
+   * `ignoreWhitespace` asks for a `-w` patch; an old worker that ignores it is `daemonOutdated`.
+   */
+  async function readWorkspaceChangeFile(
+    workspaceId: string,
+    base: string,
+    path: string,
+    oldPath?: string,
+    options: { ignoreWhitespace?: boolean } = {},
+  ): Promise<ChangeFileResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
     if (!workspace) return { ok: false, error: "工作区不存在", daemonOutdated: false };
+    const ignoreWhitespace = options.ignoreWhitespace === true;
     try {
-      const result = await deviceRouter.changesFile(workspace.daemonId, workspaceId, base, path, oldPath);
-      if (!result.ok) return { ok: false, error: result.error || "读取文件失败", daemonOutdated: false };
-      return {
-        ok: true,
-        oldExists: result.oldExists,
-        newExists: result.newExists,
-        oldContent: result.oldContent,
-        newContent: result.newContent,
-        patch: result.patch,
-        binary: result.binary,
-      };
+      const result = await deviceRouter.changesFile(workspace.daemonId, workspaceId, base, path, oldPath, ignoreWhitespace);
+      return toChangeFileResult(result, ignoreWhitespace);
     } catch (error) {
       return changesFailure(error);
     }
@@ -1592,7 +1535,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     try {
       const result = await deviceRouter.listAnnotations(daemonId, workspaceId);
       if (!result.ok) return { ok: false, reason: "refused", error: result.error };
-      return { ok: true, revision: result.revision, annotations: result.annotations };
+      return { ok: true, revision: result.revision, annotations: result.annotations, codeComments: result.codeComments };
     } catch (error) {
       return annotationFailure(error);
     }

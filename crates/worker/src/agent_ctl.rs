@@ -164,7 +164,8 @@ pub enum AgentAction {
     /// 取消一条 run（幂等）。
     ExecutorCancel { run_id: String },
     /// `coflux annotations list` (plan 20260929-browser-annotations): the effective workspace's
-    /// pending browser annotations. Purely local.
+    /// pending annotations: browser ones and code comments from the changes view (plan
+    /// 20261001-changes-review-comments). Purely local.
     AnnotationsList,
     /// `coflux annotations watch`: one bounded round that answers as soon as the effective
     /// workspace has pending annotations (the CLI loops until its own deadline).
