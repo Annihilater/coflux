@@ -31,6 +31,9 @@ export type PtydStatus = {
 
 export const PTYD_SOCKET = "ptyd.sock";
 
+/** Upper bound for a starting supervisor to answer; session recovery grows with the number of live terminals. */
+const RUNTIME_START_TIMEOUT_MS = 60_000;
+
 /** ptyd record：`[u32 总长][u32 header_len][header JSON][raw]`（与 crates/protocol/src/ptyd.rs 一致）。 */
 function encodePtydRecord(header: Record<string, unknown>): Buffer {
   const json = Buffer.from(JSON.stringify(header), "utf8");
@@ -193,7 +196,7 @@ export function runtimeRequest(socketPath: string, request: { op: "status" | "st
       if (error) reject(error); else resolve(value);
     };
     socket.setEncoding("utf8");
-    socket.setTimeout(3000, () => finish(new Error("本机运行组件未响应，请稍后重试")));
+    socket.setTimeout(3000, () => finish(Object.assign(new Error("本机运行组件未响应，请稍后重试"), { code: "ERR_RUNTIME_TIMEOUT" })));
     socket.once("error", (error) => finish(error));
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: string) => {
@@ -292,8 +295,9 @@ export async function startRuntime(home: string, directory: string, runtimeId: s
   const logFd = openSync(logFile, "a", 0o600);
   let launchError: Error | undefined;
   let exited = false;
+  let child: ReturnType<typeof spawn>;
   try {
-    const child = spawn(join(directory, "coflux-supervisor"), [], {
+    child = spawn(join(directory, "coflux-supervisor"), [], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
       env: { ...process.env, TMPDIR: temporaryHome, COFLUX_HOME: home, COFLUX_RUNTIME_CONTROL: "1", COFLUX_RUNTIME_ID: runtimeId,
@@ -305,12 +309,22 @@ export async function startRuntime(home: string, directory: string, runtimeId: s
     child.once("exit", () => { exited = true; });
     child.unref();
   } finally { closeSync(logFd); }
-  for (let i = 0; i < 200; i++) {
-    const status = await runtimeStatus(home);
+  // The supervisor binds runtime.sock before it re-attaches the sessions left in ptyd, and only
+  // answers once that is done; with a few dozen terminals that takes seconds. A status request that
+  // times out while our child is still alive means "still starting", not "failed" — treating it as a
+  // failure rolled back updates that were in fact coming up.
+  const deadline = Date.now() + RUNTIME_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    let status: RuntimeStatus | null = null;
+    try { status = await runtimeStatus(home); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ERR_RUNTIME_TIMEOUT" || exited) throw error; }
     if (status) return status;
     if (launchError) throw launchError;
     if (exited) throw new Error("本机运行组件启动失败，请查看 Coflux 日志");
     await delay(50);
   }
+  // Give up on this instance for good, so a rollback that starts the previous version cannot
+  // mistake it, answering a moment later, for the one it started.
+  if (!exited) child.kill("SIGTERM");
   throw new Error("本机运行组件启动超时，请稍后重试");
 }
