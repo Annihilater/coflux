@@ -37,8 +37,9 @@ export type TerminalAttach = {
   /** 横幅「重新打开」（plan 097）：在同一个 Tab 里起新 shell。 */
   reopenTask: (taskId: string) => void;
   /** Panes on screen = the active tab of every group of the selected workspace while the changes
-   * overlay is closed. The attach gate reads it, so Workbench writes it synchronously during render
-   * and in every layout commit (the same synchronous-read contract as before, now a set). */
+   * overlay is closed. The attach gate reads it, so Workbench writes it synchronously on every layout
+   * or overlay change and in a layout effect after every commit, before any pane's passive effect
+   * runs (the same synchronous-read contract as before, now a set). */
   setVisibleTaskIds: (taskIds: ReadonlySet<string>) => void;
   handleTerminalReady: (taskId: string, controller: TerminalController) => void;
   handleTerminalDispose: (taskId: string, controller: TerminalController) => void;

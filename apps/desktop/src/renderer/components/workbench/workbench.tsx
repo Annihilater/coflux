@@ -1,6 +1,6 @@
 import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
-import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, FileDiff, FolderGit2, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
@@ -111,7 +111,7 @@ import {
 } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
-import { isDirWorkspace, type CofluxClient } from "@coflux/client";
+import { isDirWorkspace, type CofluxClient, type CofluxState } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPanes）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
@@ -190,6 +190,70 @@ function workspaceTaskIds(tasks: readonly Task[], workspaceId: string): string[]
     .filter((task) => task.workspaceId === workspaceId)
     .sort((left, right) => left.createdAt - right.createdAt)
     .map((task) => task.id);
+}
+
+/**
+ * Stored layouts are neither reconciled nor persisted before the first snapshot: until then the
+ * task list is empty because nothing has arrived, not because everything was closed.
+ */
+function isSnapshotReady(state: Pick<CofluxState, "snapshotRevision" | "authState">): boolean {
+  return state.snapshotRevision > 0 && state.authState === "authed";
+}
+
+/** On screen: the active tab of every group of the selected workspace; nothing while its changes overlay is open. */
+function screenOf(
+  workspaceId: string | null,
+  changesOpen: Readonly<Record<string, boolean>>,
+  layouts: Readonly<Record<string, TerminalLayout>>,
+): { visible: ReadonlySet<string>; focused: string | null } {
+  if (!workspaceId || changesOpen[workspaceId]) return NO_SCREEN;
+  const layout = layouts[workspaceId] ?? EMPTY_LAYOUT;
+  // Terminals only: the pending tab and browser tabs never reach the attach machine.
+  const visible = new Set(activeTabIds(layout).filter(isTaskTabId));
+  const focused = focusedTabId(layout);
+  return { visible, focused: focused && visible.has(focused) ? focused : null };
+}
+
+/**
+ * The layouts with every mounted workspace's reconciled against the task list (plan
+ * 20260923-terminal-split-groups). The same object when nothing changed, so the caller can compare
+ * by identity; a workspace without a stored layout gets an entry only once reconcile changes it.
+ */
+function reconcileMountedLayouts(
+  layouts: Record<string, TerminalLayout>,
+  workspaceIds: readonly string[],
+  tasks: readonly Task[],
+  snapshotReady: boolean,
+): Record<string, TerminalLayout> {
+  let next = layouts;
+  for (const workspaceId of workspaceIds) {
+    const stored = layouts[workspaceId];
+    const reconciled = effectiveLayout(stored, snapshotReady ? workspaceTaskIds(tasks, workspaceId) : [], { snapshotReady });
+    if (reconciled !== (stored ?? EMPTY_LAYOUT)) next = { ...next, [workspaceId]: reconciled };
+  }
+  return next;
+}
+
+/**
+ * Tasks whose pane is mounted (plan 104): a pane's life is decoupled from its workspace container,
+ * so a terminal moved into a workspace that was never visited keeps its pane. Every task that has
+ * been in a mounted workspace keeps one for as long as it is in the snapshot. The same set when
+ * nothing changed.
+ */
+function retainPaneTaskIds(previous: ReadonlySet<string>, tasks: readonly Task[], isMounted: (workspaceId: string) => boolean): ReadonlySet<string> {
+  const live = new Set(tasks.map((task) => task.id));
+  let next: Set<string> | null = null;
+  for (const taskId of previous) {
+    if (live.has(taskId)) continue;
+    next ??= new Set(previous);
+    next.delete(taskId);
+  }
+  for (const task of tasks) {
+    if (!isMounted(task.workspaceId) || (next ?? previous).has(task.id)) continue;
+    next ??= new Set(previous);
+    next.add(task.id);
+  }
+  return next ?? previous;
 }
 
 /** 接入引导点过「暂不」（plan 113）：之后不再自动弹，只从账号菜单再进。localStorage 不可用时按没点过。 */
@@ -331,19 +395,23 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [pendingWorkspaces, setPendingWorkspaces] = useState<PendingWorkspace[]>([]);
   const pendingWorkspaceTimersRef = useRef(new Map<string, number>());
   const pendingWorkspaceSeqRef = useRef(0);
-  // Command handle of the selected workspace only, rebuilt during render (see terminalHandleFor):
+  // Command handle of the selected workspace only, rebuilt on every commit (see terminalHandleFor):
   // kept-alive hidden workspaces never get one, so global shortcuts only ever reach the selected one.
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
   const [notificationOpen, setNotificationOpen] = useState(false);
   // The ＋ menu that is open (a group's tab strip), whether a click or ⌘T opened it.
   const [newTabMenu, setNewTabMenu] = useState<{ workspaceId: string; groupId: string } | null>(null);
+  // The selected workspace as of the last commit, or as the store subscription has just moved it:
+  // handlers, the store subscription and the attach gate read it synchronously.
   const activeWorkspaceIdRef = useRef<string | null>(null);
   // 已挂过面板的 task：面板寿命与工作区容器解耦，终端被搬到没访问过的工作区也不重建。
-  const paneTaskIdsRef = useRef(new Set<string>());
+  const [paneTaskIds, setPaneTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   // Terminal editor groups (plan 20260923-terminal-split-groups). Every workspace's layout lives
-  // here, and the ref is the source of truth: shortcuts, the store subscription and the attach gate
-  // all read "now" values before React re-renders (the reason the old activeTabs had a ref mirror
-  // too). `layoutVersion` only asks for a render. Stored layouts are read once and left
+  // in two places: `layouts` is what a render draws, and `layoutsRef` is what handlers, the store
+  // subscription and the attach gate read and write synchronously, before React re-renders (the
+  // reason the old activeTabs had a ref mirror too). Every write to the ref hands the whole object to
+  // the state; a render reconciles the mounted workspaces' layouts against the task list into the
+  // state; and each commit copies the state back into the ref. Stored layouts are read once and left
   // unreconciled — before the first snapshot there is nothing to reconcile them against.
   // Browser tabs come back with the layouts: a browser id without a stored record is dropped, and so
   // is a record no layout references (plan 20260924-desktop-browser-tab).
@@ -353,6 +421,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const screenRestored = restoreScreenTabs(browserRestored.layouts, readScreenTabRecords(SCREEN_TAB_STORE));
     return { layouts: screenRestored.layouts, records: browserRestored.records, screenRecords: screenRestored.records };
   });
+  const [layouts, setLayouts] = useState<Record<string, TerminalLayout>>(initialState.layouts);
   const layoutsRef = useRef<Record<string, TerminalLayout>>(initialState.layouts);
   // Remote screen tabs' runtime: records and the live sessions of mounted views.
   const [screens] = useState(() => createScreenRuntime({ desktop, tabStore: SCREEN_TAB_STORE, initialRecords: initialState.screenRecords }));
@@ -360,28 +429,24 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // the window full screen, the picture filling it. ⌃⌥⌘F toggles it both ways; leaving full screen
   // by any other means ends it too (main reports it).
   const [immersiveTabId, setImmersiveTabId] = useState<string | null>(null);
-  const immersiveTabIdRef = useRef<string | null>(null);
-  immersiveTabIdRef.current = immersiveTabId;
   // Whether a screen picture holds keyboard focus: the global shortcuts yield to it (ref: read per key).
   const screenFocusedRef = useRef(false);
   // Built-in browser tabs' runtime: what each tab shows, the library, prepared partitions, guests.
   const [browser] = useState(() =>
     createBrowserRuntime({ desktop, tabStore: BROWSER_TAB_STORE, libraryStore: BROWSER_LIBRARY_STORE, initialRecords: initialState.records }),
   );
-  const [, setLayoutVersion] = useState(0);
   const lastWrittenLayoutsRef = useRef<string | null>(null);
   // Debounced persisting (see flushLayoutPersist): the layouts object last looked at, the pending
-  // write, whether a sash drag is in progress, and the snapshot gate as of the last render.
+  // write, and whether a sash drag is in progress.
   const checkedLayoutsRef = useRef<Record<string, TerminalLayout> | null>(null);
   const layoutPersistTimerRef = useRef<number | undefined>(undefined);
   const transientLayoutRef = useRef(false);
-  const snapshotReadyRef = useRef(false);
   // The changes overlay, open per workspace; it survives switching away and back, as the old
   // per-container view did. Ref mirror for the same synchronous-read reason.
   const [changesOpen, setChangesOpenState] = useState<Record<string, boolean>>({});
   const changesOpenRef = useRef(changesOpen);
   // Optimistic terminal creates (plan 078) are layout entries now: this holds each workspace's
-  // fallback timer, and `settledCreatesRef` the creates a reconcile answered during render, which an
+  // fallback timer, and `settledCreatesRef` the creates the store subscription answered, which an
   // effect then starts.
   const pendingCreateTimersRef = useRef(new Map<string, { pendingId: string; timer: number }>());
   const pendingCreateSeqRef = useRef(0);
@@ -400,6 +465,30 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const lastError = useStore(client.store, (state) => state.lastError);
   const snapshotRevision = useStore(client.store, (state) => state.snapshotRevision);
 
+  // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
+  // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。
+  // 乐观条目（plan 078）天然不在 workspaces 里：pending 期间视为有效，否则
+  // "点击后立即切换过去"会在同一帧被这里撤销，表现为点了没反应。
+  // Adjusted during render, so an invalid selection is never drawn; writing it to storage runs
+  // from an effect.
+  const selectionResolution =
+    snapshotRevision === 0
+      ? null
+      : resolveWorkbenchSelection({
+          selection,
+          pendingWorkspaceIds: new Set(pendingWorkspaces.map((item) => item.id)),
+          projects,
+          workspaces,
+          daemons,
+        });
+  if (selectionResolution?.changed) setSelection(selectionResolution.selection);
+  // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
+  // 校准判定 invalid 回退自愈，无害。pending 期间跳过 persist，只是不再重复写假 id。
+  const persistableSelection = selectionResolution?.shouldPersist ? selectionResolution.selection : undefined;
+  useEffect(() => {
+    if (persistableSelection !== undefined) persistSelection(persistableSelection);
+  }, [persistableSelection]);
+
   // 设备详情的载体（plan 048）：该设备的 canonical 目录工作区 = isDirWorkspace 且
   // daemonId 匹配、createdAt 最早。与 server 侧 terminalCreate 幂等复用规则同构。
   const canonicalDirWorkspaceOf = (daemonId: string, from: readonly Workspace[] = workspaces): Workspace | null =>
@@ -417,27 +506,36 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // pending 期间继续持有目标设备的 route：创建往返要走它，松开再重连只会更慢。
   const selectedDaemonId = selection?.kind === "device" ? selection.id : (selectedWorkspace?.daemonId ?? pendingSelected?.daemonId);
 
-  // 选中工作区的同步镜像：面板可见性判定由渲染期与上报回调共用，直接闭包捕获会读到过期值。
-  activeWorkspaceIdRef.current = activeWorkspaceId;
-
   // 接管状态机（plan 104）：与面板一起提升到本层，按 task id 记账、不认工作区。
   const attach = useTerminalAttach(client, { tasks });
-  // Stored layouts are neither reconciled nor persisted before the first snapshot: until then the
-  // task list is empty because nothing has arrived, not because everything was closed.
-  const snapshotReady = snapshotRevision > 0 && authState === "authed";
+  const snapshotReady = isSnapshotReady({ snapshotRevision, authState });
   // Agents launched from the ＋ menu (plan 20261001-desktop-agents): pending launch commands, the
   // typing of each one once, and the tab → agent records for tab icons.
   const agentLaunches = useAgentLaunches(client, { tasks, snapshotReady });
 
+  /** A workspace's layout as of now (handlers and effects only; a render reads `layouts`). */
   function layoutOf(workspaceId: string): TerminalLayout {
     return layoutsRef.current[workspaceId] ?? EMPTY_LAYOUT;
   }
 
+  function selectWorkspace(workspaceId: string) {
+    const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
+    setSelection(next);
+    persistSelection(next);
+  }
+
+  function selectDevice(daemonId: string) {
+    const next: WorkbenchSelection = { kind: "device", id: daemonId };
+    setSelection(next);
+    persistSelection(next);
+    setDeviceTerminalError(null);
+  }
+
   /**
    * Reconciles one workspace's layout against a task list straight into the ref — synchronously,
-   * because both the render and the store subscription need the result before anything is drawn
-   * (a reconcile one frame late would let the visible set reference a vanished task or miss a new
-   * one). A pending create this answers is queued for activation.
+   * because the store subscription needs the result before anything is drawn (a reconcile one frame
+   * late would let the visible set reference a vanished task or miss a new one). A pending create
+   * this answers is queued for activation. The caller hands the result to the state.
    */
   function reconcileWorkspaceLayout(workspaceId: string, allTasks: readonly Task[], ready: boolean, follow: string | null = null): TerminalLayout {
     const stored = layoutsRef.current[workspaceId];
@@ -448,18 +546,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (created && stored?.pending) settledCreatesRef.current.push({ workspaceId, taskId: created, pendingId: stored.pending.id });
     return next;
   }
-  const reconcileWorkspaceLayoutRef = useRef(reconcileWorkspaceLayout);
-  reconcileWorkspaceLayoutRef.current = reconcileWorkspaceLayout;
 
-  /** On screen: the active tab of every group of the selected workspace; nothing while its changes overlay is open. */
+  /** What is on screen as of now (handlers and effects only; a render derives `screen` from its own state). */
   function currentScreen(): { visible: ReadonlySet<string>; focused: string | null } {
-    const workspaceId = activeWorkspaceIdRef.current;
-    if (!workspaceId || changesOpenRef.current[workspaceId]) return NO_SCREEN;
-    const layout = layoutOf(workspaceId);
-    // Terminals only: the pending tab and browser tabs never reach the attach machine.
-    const visible = new Set(activeTabIds(layout).filter(isTaskTabId));
-    const focused = focusedTabId(layout);
-    return { visible, focused: focused && visible.has(focused) ? focused : null };
+    return screenOf(activeWorkspaceIdRef.current, changesOpenRef.current, layoutsRef.current);
   }
 
   /** The focused group's active tab of the selected workspace when it is a browser tab on screen. */
@@ -481,18 +571,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
     else if (isTaskTabId(tabId)) attach.focusTask(tabId);
   }
 
-  /** Writes the visible set into the attach gate's mirror: once during render, again on every layout or overlay commit. */
+  /** Writes the visible set into the attach gate's mirror: on every layout or overlay change, and again after every commit. */
   function syncVisible() {
     attach.setVisibleTaskIds(currentScreen().visible);
   }
-  const syncVisibleRef = useRef(syncVisible);
-  syncVisibleRef.current = syncVisible;
 
   function commitLayout(workspaceId: string, next: TerminalLayout) {
     if (layoutOf(workspaceId) === next) return;
     layoutsRef.current = { ...layoutsRef.current, [workspaceId]: next };
     syncVisible();
-    setLayoutVersion((version) => version + 1);
+    setLayouts(layoutsRef.current);
   }
 
   function updateLayout(workspaceId: string, change: (layout: TerminalLayout) => TerminalLayout, options: { transient?: boolean } = {}) {
@@ -500,11 +588,28 @@ export function Workbench({ client }: { client: CofluxClient }) {
     commitLayout(workspaceId, change(layoutOf(workspaceId)));
   }
 
+  // Persisting: only after the first snapshot, only when the layouts object changed since the last
+  // look (every change replaces it, so an identity check is enough to skip unrelated renders), and
+  // debounced so a burst of changes is one write. Sash drags commit transient layouts on every
+  // pointermove and do not schedule a write at all; the drag's end flushes.
+  function flushLayoutPersist() {
+    if (layoutPersistTimerRef.current !== undefined) window.clearTimeout(layoutPersistTimerRef.current);
+    layoutPersistTimerRef.current = undefined;
+    const serialized = planLayoutPersist({
+      snapshotReady: isSnapshotReady(client.store.getState()),
+      layouts: layoutsRef.current,
+      lastWritten: lastWrittenLayoutsRef.current,
+    });
+    if (serialized === null) return;
+    lastWrittenLayoutsRef.current = serialized;
+    writeStoredLayouts(TERMINAL_LAYOUT_STORE, serialized);
+  }
+
   /** End of a sash drag: the transient sizes become the stored ones, written now. */
   function persistLayoutsNow() {
     transientLayoutRef.current = false;
     checkedLayoutsRef.current = layoutsRef.current;
-    flushLayoutPersistRef.current();
+    flushLayoutPersist();
   }
 
   function setWorkspaceChangesOpen(workspaceId: string, open: boolean) {
@@ -522,8 +627,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
       if (focused) focusTab(focused);
     }
   }
-  const setWorkspaceChangesOpenRef = useRef(setWorkspaceChangesOpen);
-  setWorkspaceChangesOpenRef.current = setWorkspaceChangesOpen;
 
   /**
    * A user action on one tab: click, shortcut, drop, palette or notification jump, the banner's
@@ -640,7 +743,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   /** Closing a screen tab ends its remote session: the virtual display goes away and the remote's arrangement is restored. */
   function closeScreenTab(workspaceId: string, tabId: string) {
-    if (immersiveTabIdRef.current === tabId) setImmersive(null);
+    if (immersiveTabId === tabId) setImmersive(null);
     commitLayout(workspaceId, removeTab(layoutOf(workspaceId), tabId));
     screens.removeTab(tabId);
     if (workspaceId !== activeWorkspaceIdRef.current) return;
@@ -655,7 +758,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (tabId) screens.focus(tabId);
   }
   function toggleImmersive(tabId: string) {
-    setImmersive(immersiveTabIdRef.current === tabId ? null : tabId);
+    setImmersive(immersiveTabId === tabId ? null : tabId);
   }
   // Leaving full screen by the OS's own gesture ends immersive mode too. Full screen is also
   // tracked for the left dock, which needs no room for the traffic lights there.
@@ -664,7 +767,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
       desktop.onScreenEvent((event) => {
         if (event.kind !== "fullscreen") return;
         setWindowFullScreen(event.on);
-        if (!event.on && immersiveTabIdRef.current) setImmersiveTabId(null);
+        // Already null when immersive mode was off: React bails out of the equal update.
+        if (!event.on) setImmersiveTabId(null);
       }),
     [],
   );
@@ -699,35 +803,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     openScreenTab(ensured.workspaceId, daemonId);
   }
 
-  // Main-process browser events that change the layout: a click into a page focuses its group; a
-  // page's popup opens beside it. Read through refs so the subscription is made once.
-  const browserGuestFocusRef = useRef((tabId: string) => {
-    void tabId;
-  });
-  browserGuestFocusRef.current = (tabId: string) => {
-    const workspaceId = activeWorkspaceIdRef.current;
-    if (!workspaceId || changesOpenRef.current[workspaceId]) return;
-    if (browser.tabs.getState().tabs[tabId]?.workspaceId !== workspaceId) return;
-    focusPaneGroup(tabId);
-  };
-  const browserPopupRef = useRef((tabId: string, url: string) => {
-    void tabId;
-    void url;
-  });
-  browserPopupRef.current = (tabId: string, url: string) => {
-    const target = normalizeIncomingUrl(url);
-    const workspaceId = browser.tabs.getState().tabs[tabId]?.workspaceId;
-    if (!target || !workspaceId || !groupOfTab(layoutOf(workspaceId), tabId)) return;
-    openBrowserTab(workspaceId, target, tabId);
-  };
-  useEffect(() => {
-    browser.setWorkbenchHandlers({
-      onGuestFocus: (tabId) => browserGuestFocusRef.current(tabId),
-      onPopup: (tabId, url) => browserPopupRef.current(tabId, url),
-    });
-    return browser.start();
-  }, [browser]);
-
   /** A pointer went down inside a pane: its group becomes the focused one (the pane layer sits above the chrome). */
   function focusPaneGroup(taskId: string) {
     const workspaceId = activeWorkspaceIdRef.current;
@@ -737,34 +812,73 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (group && group.id !== layout.focusedGroupId) commitLayout(workspaceId, focusGroup(layout, group.id));
   }
 
-  // A terminal moved to another workspace (plan 104): when it is the one the user is watching (the
-  // focused group's active tab of the selected workspace), the selection follows it, and it lands in
-  // the new workspace's focused group as its active tab. This has to be settled before React renders:
-  // the store subscription fires synchronously inside setState and batches with this render, so both
-  // workspaces' layouts are moved right here and the render already reads the final result — the new
-  // workspace never first falls back to attaching another tab, and the moved terminal never flickers.
+  // Main-process browser events that change the layout: a click into a page focuses its group; a
+  // page's popup opens beside it. Effect events, so the subscription is made once.
+  const focusBrowserGuestGroup = useEffectEvent((tabId: string) => {
+    const workspaceId = activeWorkspaceIdRef.current;
+    if (!workspaceId || changesOpenRef.current[workspaceId]) return;
+    if (browser.tabs.getState().tabs[tabId]?.workspaceId !== workspaceId) return;
+    focusPaneGroup(tabId);
+  });
+  const openBrowserPopup = useEffectEvent((tabId: string, url: string) => {
+    const target = normalizeIncomingUrl(url);
+    const workspaceId = browser.tabs.getState().tabs[tabId]?.workspaceId;
+    if (!target || !workspaceId || !groupOfTab(layoutOf(workspaceId), tabId)) return;
+    openBrowserTab(workspaceId, target, tabId);
+  });
   useEffect(() => {
-    return client.store.subscribe((state, previous) => {
-      if (state.tasks === previous.tasks || state.snapshotRevision === 0) return;
-      const workspaceId = activeWorkspaceIdRef.current;
-      if (!workspaceId) return;
-      const watched = focusedTabId(layoutsRef.current[workspaceId] ?? EMPTY_LAYOUT);
-      if (!watched || !isTaskTabId(watched)) return;
-      const next = resolveSelectionAfterTaskMove({ activeWorkspaceId: workspaceId, activeTaskId: watched, tasks: state.tasks });
-      if (!next) return;
-      reconcileWorkspaceLayoutRef.current(workspaceId, state.tasks, true);
-      reconcileWorkspaceLayoutRef.current(next.id, state.tasks, true, watched);
-      if (changesOpenRef.current[next.id]) {
-        changesOpenRef.current = { ...changesOpenRef.current, [next.id]: false };
-        setChangesOpenState(changesOpenRef.current);
-      }
-      activeWorkspaceIdRef.current = next.id;
-      setSelection(next);
-      persistSelection(next);
-      syncVisibleRef.current();
-      setLayoutVersion((version) => version + 1);
+    browser.setWorkbenchHandlers({
+      onGuestFocus: (tabId) => focusBrowserGuestGroup(tabId),
+      onPopup: (tabId, url) => openBrowserPopup(tabId, url),
     });
-  }, [client]);
+    return browser.start();
+  }, [browser]);
+
+  /**
+   * A terminal moved to another workspace (plan 104): when it is the one the user is watching (the
+   * focused group's active tab of the selected workspace), the selection follows it, and it lands in
+   * the new workspace's focused group as its active tab. Returns whether it moved.
+   */
+  function followMovedTerminal(allTasks: readonly Task[]): boolean {
+    const workspaceId = activeWorkspaceIdRef.current;
+    if (!workspaceId) return false;
+    const watched = focusedTabId(layoutOf(workspaceId));
+    if (!watched || !isTaskTabId(watched)) return false;
+    const next = resolveSelectionAfterTaskMove({ activeWorkspaceId: workspaceId, activeTaskId: watched, tasks: allTasks });
+    if (!next) return false;
+    reconcileWorkspaceLayout(workspaceId, allTasks, true);
+    reconcileWorkspaceLayout(next.id, allTasks, true, watched);
+    if (changesOpenRef.current[next.id]) {
+      changesOpenRef.current = { ...changesOpenRef.current, [next.id]: false };
+      setChangesOpenState(changesOpenRef.current);
+    }
+    activeWorkspaceIdRef.current = next.id;
+    setSelection(next);
+    persistSelection(next);
+    return true;
+  }
+
+  // Task-list changes that have to be settled before React renders: the store subscription fires
+  // synchronously inside setState and batches with this render, so the layouts are changed right here
+  // and the render already reads the final result.
+  // - An optimistic create (plan 078) the change answers: the created task takes the pending tab's
+  //   place, and the create is queued for the effect that starts it.
+  // - A moved terminal the user is watching (see followMovedTerminal): the new workspace never first
+  //   falls back to attaching another tab, and the moved terminal never flickers.
+  const settleClientState = useEffectEvent((state: CofluxState, previous: CofluxState) => {
+    const ready = isSnapshotReady(state);
+    const tasksChanged = state.tasks !== previous.tasks;
+    if (!tasksChanged && ready === isSnapshotReady(previous)) return;
+    const before = layoutsRef.current;
+    for (const [workspaceId, layout] of Object.entries(before)) {
+      if (layout.pending) reconcileWorkspaceLayout(workspaceId, state.tasks, ready);
+    }
+    const moved = tasksChanged && state.snapshotRevision !== 0 && followMovedTerminal(state.tasks);
+    if (!moved && layoutsRef.current === before) return;
+    syncVisible();
+    setLayouts(layoutsRef.current);
+  });
+  useEffect(() => client.store.subscribe((state, previous) => settleClientState(state, previous)), [client]);
 
   // 自动接入不依赖对话框打开；仍通过已登录客户端兑现一次性设备授权。
   const localAuthToken = daemonState?.status === "pending-auth" ? daemonState.authToken : undefined;
@@ -789,25 +903,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
   useEffect(() => {
     if (snapshotRevision > 0 || authState === "need-login" || authState === "auth-failed") dismissBootOverlay();
   }, [snapshotRevision, authState]);
-
-  // 快照后校准选中项：无效选择回退到首项目 main workspace（或任一工作区）。
-  // device 选中以设备仍在 daemons 为有效判据（离线设备仍可进详情看现场）。
-  // 乐观条目（plan 078）天然不在 workspaces 里：pending 期间视为有效，否则
-  // "点击后立即切换过去"会在同一帧被这里撤销，表现为点了没反应。
-  useEffect(() => {
-    if (snapshotRevision === 0) return;
-    const resolution = resolveWorkbenchSelection({
-      selection,
-      pendingWorkspaceIds: new Set(pendingWorkspaces.map((item) => item.id)),
-      projects,
-      workspaces,
-      daemons,
-    });
-    // 假 id 其实已落盘过一次（selectWorkspace 内部即 persist）：刷新后 pendingWorkspaces 为空，
-    // 本 effect 判定 invalid 回退自愈，无害。pending 期间跳过 persist，只是不再重复写假 id。
-    if (resolution.changed) setSelection(resolution.selection);
-    if (resolution.shouldPersist) persistSelection(resolution.selection);
-  }, [snapshotRevision, projects, workspaces, daemons, selection, pendingWorkspaces]);
 
   // 浏览器标签页标题跟随当前选中：项目工作区用项目名，设备详情用设备名。
   useEffect(() => {
@@ -855,12 +950,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     held.releases.clear();
     held.client = null;
   }, []);
-
-  function selectWorkspace(workspaceId: string) {
-    const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
-    setSelection(next);
-    persistSelection(next);
-  }
 
   /**
    * ⌘P (plan 20260921). Opening the palette closes the settings page first: settings owns Escape
@@ -927,7 +1016,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
 
   /** The two buttons, ⌘B and 「视图 → 显示/隐藏侧边栏」. A no-op in immersive mode, where the sidebar is gone regardless. */
   function toggleSidebar() {
-    if (immersiveTabIdRef.current) return;
+    if (immersiveTabId) return;
     setSidebarCollapsed(!sidebarCollapsedRef.current, { refocus: true });
   }
 
@@ -963,13 +1052,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (client.store.getState().workspaces.some((workspace) => workspace.id === target.workspaceId)) selectWorkspace(target.workspaceId);
   });
   useEffect(() => desktop.onFocusWorkspace((target) => focusFromNotification(target)), [client]);
-
-  function selectDevice(daemonId: string) {
-    const next: WorkbenchSelection = { kind: "device", id: daemonId };
-    setSelection(next);
-    persistSelection(next);
-    setDeviceTerminalError(null);
-  }
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1139,35 +1221,39 @@ export function Workbench({ client }: { client: CofluxClient }) {
     });
   }
 
-  useEffect(() => {
-    if (!activeWorkspaceId) return;
-    setVisitedWorkspaceIds((prev) => (prev.has(activeWorkspaceId) ? prev : new Set(prev).add(activeWorkspaceId)));
-  }, [activeWorkspaceId]);
+  // The selected workspace joins the visited ones (adjusted during render).
+  if (activeWorkspaceId && !visitedWorkspaceIds.has(activeWorkspaceId)) setVisitedWorkspaceIds(new Set(visitedWorkspaceIds).add(activeWorkspaceId));
 
-  // 已删除的工作区随 workspaces 过滤自动卸载；含 activeWorkspaceId 是避免等 visited 效果多一帧空白。
+  // 已删除的工作区随 workspaces 过滤自动卸载；含 activeWorkspaceId 是避免等 visited 更新多一轮渲染。
   const terminalWorkspaces = workspaces.filter((workspace) => visitedWorkspaceIds.has(workspace.id) || workspace.id === activeWorkspaceId);
 
   // 面板寿命与工作区容器解耦（plan 104）：终端被搬进从没访问过的工作区时容器可能压根没挂载过，
   // 面板必须原样留在原地。挂过面板的 task 只要还在快照里就一直挂着，只有真的被删才收回。
-  const liveTaskIds = new Set(tasks.map((task) => task.id));
-  for (const taskId of paneTaskIdsRef.current) {
-    if (!liveTaskIds.has(taskId)) paneTaskIdsRef.current.delete(taskId);
-  }
+  // The set is kept in state and adjusted during render.
+  const mountedPaneTaskIds = retainPaneTaskIds(
+    paneTaskIds,
+    tasks,
+    (workspaceId) => visitedWorkspaceIds.has(workspaceId) || workspaceId === activeWorkspaceId,
+  );
+  if (mountedPaneTaskIds !== paneTaskIds) setPaneTaskIds(mountedPaneTaskIds);
   const paneTasks = tasks
-    .filter((task) => {
-      if (visitedWorkspaceIds.has(task.workspaceId) || task.workspaceId === activeWorkspaceId) paneTaskIdsRef.current.add(task.id);
-      return paneTaskIdsRef.current.has(task.id);
-    })
+    .filter((task) => mountedPaneTaskIds.has(task.id))
     // 顺序必须稳定：快照会整体替换 tasks，按 createdAt/id 排一遍，已挂载的面板就不会被 React
     // 搬位置（搬位置＝重新插入 DOM，xterm 的 open(host) 绑定与 WebGL 上下文都可能受影响）。
     .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
-  // Layouts of every mounted workspace, reconciled during render (never in an effect one frame late),
-  // then the visible set written straight into the attach gate.
-  const workspaceLayouts = new Map<string, TerminalLayout>();
-  for (const workspace of terminalWorkspaces) workspaceLayouts.set(workspace.id, reconcileWorkspaceLayout(workspace.id, tasks, snapshotReady));
-  const screen = currentScreen();
-  attach.setVisibleTaskIds(screen.visible);
-  const selectedLayout = activeWorkspaceId ? layoutOf(activeWorkspaceId) : EMPTY_LAYOUT;
+  // Layouts of every mounted workspace, reconciled during render (never in an effect one frame late):
+  // the state is adjusted right away, so nothing un-reconciled is ever drawn, and the commit hands
+  // the result to the ref and the visible set to the attach gate (see the layout effects below).
+  const renderLayouts = reconcileMountedLayouts(
+    layouts,
+    terminalWorkspaces.map((workspace) => workspace.id),
+    tasks,
+    snapshotReady,
+  );
+  if (renderLayouts !== layouts) setLayouts(renderLayouts);
+  const renderLayoutOf = (workspaceId: string): TerminalLayout => renderLayouts[workspaceId] ?? EMPTY_LAYOUT;
+  const screen = screenOf(activeWorkspaceId, changesOpen, renderLayouts);
+  const selectedLayout = activeWorkspaceId ? renderLayoutOf(activeWorkspaceId) : EMPTY_LAYOUT;
   // Each visible pane sits on its group's body, in percentages the browser lays out in the same frame.
   const paneFrames = new Map<string, CSSProperties>();
   for (const { group, rect } of layoutGeometry(selectedLayout).groups) {
@@ -1180,7 +1266,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // never changes: React then never moves a view's DOM node, and a moved <webview> would reload.
   const browserEntries: BrowserViewEntry[] = [];
   for (const workspace of terminalWorkspaces) {
-    const layout = workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id);
+    const layout = renderLayoutOf(workspace.id);
     const onScreen = workspace.id === activeWorkspaceId && !changesOpen[workspace.id];
     // Browser state is the project's (every worktree shares it), or the device's on the device view
     // (plan 20260929-browser-scope-partitions); derived here, never stored with the tab.
@@ -1205,7 +1291,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // Screen views (plan 20260929-remote-desktop): the same layer discipline as browser views.
   const screenEntries: ScreenViewEntry[] = [];
   for (const workspace of terminalWorkspaces) {
-    const layout = workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id);
+    const layout = renderLayoutOf(workspace.id);
     const onScreen = workspace.id === activeWorkspaceId && !changesOpen[workspace.id];
     for (const { group, rect } of layoutGeometry(layout).groups) {
       for (const tabId of group.tabs) {
@@ -1229,7 +1315,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (immersiveExits > 0) desktop.screenImmersive(false);
   }, [immersiveExits]);
 
-  // A create that reconcile answered: the task took the pending tab's place; start it as the old
+  // A create the store subscription answered: the task took the pending tab's place; start it as the old
   // container did — unless the user picked another tab in that group while waiting (settling never steals the choice).
   // Declared before the visible-set effect below so the user-action path is queued first.
   useEffect(() => {
@@ -1271,34 +1357,17 @@ export function Workbench({ client }: { client: CofluxClient }) {
     for (const taskId of screen.visible) if (!previous.has(taskId)) attach.ensureVisible(taskId);
   });
 
-  // Persisting: only after the first snapshot, only when the layouts object changed since the last
-  // look (every change replaces it, so an identity check is enough to skip unrelated renders), and
-  // debounced so a burst of changes is one write. Sash drags commit transient layouts on every
-  // pointermove and do not schedule a write at all; the drag's end flushes.
-  snapshotReadyRef.current = snapshotReady;
-  function flushLayoutPersist() {
-    if (layoutPersistTimerRef.current !== undefined) window.clearTimeout(layoutPersistTimerRef.current);
-    layoutPersistTimerRef.current = undefined;
-    const serialized = planLayoutPersist({
-      snapshotReady: snapshotReadyRef.current,
-      layouts: layoutsRef.current,
-      lastWritten: lastWrittenLayoutsRef.current,
-    });
-    if (serialized === null) return;
-    lastWrittenLayoutsRef.current = serialized;
-    writeStoredLayouts(TERMINAL_LAYOUT_STORE, serialized);
-  }
-  const flushLayoutPersistRef = useRef(flushLayoutPersist);
-  flushLayoutPersistRef.current = flushLayoutPersist;
+  // Persisting (see flushLayoutPersist), scheduled after every commit that changed the layouts.
+  const flushLayoutPersistLater = useEffectEvent(() => flushLayoutPersist());
   useEffect(() => {
     if (!snapshotReady || transientLayoutRef.current || checkedLayoutsRef.current === layoutsRef.current) return;
     checkedLayoutsRef.current = layoutsRef.current;
     if (layoutPersistTimerRef.current !== undefined) window.clearTimeout(layoutPersistTimerRef.current);
-    layoutPersistTimerRef.current = window.setTimeout(() => flushLayoutPersistRef.current(), LAYOUT_PERSIST_DELAY_MS);
+    layoutPersistTimerRef.current = window.setTimeout(() => flushLayoutPersistLater(), LAYOUT_PERSIST_DELAY_MS);
   });
   // A write still waiting when the window goes away (quit, reload) happens right then.
   useEffect(() => {
-    const flush = () => flushLayoutPersistRef.current();
+    const flush = () => flushLayoutPersistLater();
     window.addEventListener("pagehide", flush);
     return () => {
       window.removeEventListener("pagehide", flush);
@@ -1367,6 +1436,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     renameDevice !== null ||
     renameProject !== null ||
     daemonDialog !== null;
+  const closeChangesOverlay = useEffectEvent((workspaceId: string) => setWorkspaceChangesOpen(workspaceId, false));
   useEffect(() => {
     if (!selectedChangesOpen || overlayEscapeBlocked || !activeWorkspaceId) return;
     const workspaceId = activeWorkspaceId;
@@ -1378,14 +1448,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
       if (focused instanceof Element && focused.closest('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], dialog, [data-owns-escape]')) return;
       event.preventDefault();
       event.stopPropagation();
-      setWorkspaceChangesOpenRef.current(workspaceId, false);
+      closeChangesOverlay(workspaceId);
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [selectedChangesOpen, overlayEscapeBlocked, activeWorkspaceId]);
 
   // The single entry point for workbench commands (global shortcuts and the native menu): built for
-  // the selected workspace only, during render, so a hidden workspace can never receive one.
+  // the selected workspace only, on every commit, so a hidden workspace can never receive one.
   function terminalHandleFor(workspaceId: string): WorkspaceTerminalHandle {
     return {
       toggleNewTabMenu: () => {
@@ -1433,7 +1503,19 @@ export function Workbench({ client }: { client: CofluxClient }) {
       },
     };
   }
-  activeTerminalRef.current = activeWorkspaceId ? terminalHandleFor(activeWorkspaceId) : null;
+
+  // What handlers, the store subscription and the attach gate read synchronously, brought up to this
+  // commit before any passive effect runs — the panes' own (a pane that just mounted asks the attach
+  // gate whether it is visible), this component's, and every listener's after them. No child layout
+  // effect reads any of it. Between commits, handlers and the store subscription keep them current.
+  useLayoutEffect(() => {
+    layoutsRef.current = layouts;
+  }, [layouts]);
+  useLayoutEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId;
+    attach.setVisibleTaskIds(screen.visible);
+    activeTerminalRef.current = activeWorkspaceId ? terminalHandleFor(activeWorkspaceId) : null;
+  });
 
   const workspaceActions: WorkspaceLayoutActions = {
     update: updateLayout,
@@ -1502,7 +1584,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     onToggleImmersive: () => {
       const workspaceId = activeWorkspaceIdRef.current;
       const focused = workspaceId ? focusedTabId(layoutOf(workspaceId)) : null;
-      if (immersiveTabIdRef.current) setImmersive(null);
+      if (immersiveTabId) setImmersive(null);
       else if (focused && isScreenTabId(focused)) toggleImmersive(focused);
     },
   });
@@ -1618,7 +1700,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     client={client}
                     onCloseTask={requestCloseTask}
                     attach={attach}
-                    layout={workspaceLayouts.get(workspace.id) ?? layoutOf(workspace.id)}
+                    layout={renderLayoutOf(workspace.id)}
                     changesOpen={Boolean(changesOpen[workspace.id])}
                     dockWidth={dockWidth}
                     leftDockReserve={reservedLeft}
