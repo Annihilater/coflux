@@ -153,6 +153,16 @@ const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
 /// machine's cache file, where the desktop main process reads it. Paired with
 /// DAEMON_CAPABILITY_EXECUTOR_SETTINGS in apps/server.
 const CAPABILITY_EXECUTOR_SETTINGS: &str = "executor_settings_v1";
+/// This daemon's lifecycle belongs to Coflux Desktop (plan 20261002-runtime-follows-app): the app
+/// moves the runtime onto its bundled version by itself, so the centre must not hot-push a worker
+/// into it — neither the automatic sweep nor a client's upgrade request. Paired with
+/// DAEMON_CAPABILITY_DESKTOP_MANAGED in apps/server.
+const CAPABILITY_DESKTOP_MANAGED: &str = "desktop_managed";
+
+/// Set by the desktop app on the supervisor it starts (`desktop-runtime.ts`), which passes its
+/// environment through to every worker, hot-upgraded ones included. The supervisor reads the same
+/// variable to serve runtime control; nothing else sets it.
+const DESKTOP_RUNTIME_CONTROL_ENV: &str = "COFLUX_RUNTIME_CONTROL";
 
 /// The remote screen bridge (plan 20260929-remote-desktop), when this worker has one. Read by
 /// every server handshake so the capability follows the helper's hello, not the worker version.
@@ -167,6 +177,9 @@ fn daemon_capabilities() -> Vec<String> {
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());
+    }
+    if std::env::var(DESKTOP_RUNTIME_CONTROL_ENV).as_deref() == Ok("1") {
+        capabilities.push(CAPABILITY_DESKTOP_MANAGED.to_string());
     }
     // Advertised only while the helper answered its hello on a live connection: clients offer
     // the 「屏幕」 tab for this device on exactly that condition.

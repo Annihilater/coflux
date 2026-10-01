@@ -115,6 +115,9 @@ export class AutoUpdater {
   private latest: LatestRelease | null = null;
   /** 每个「daemonId:version」的累计派发次数；时间流逝不会回补已经用掉的配额。 */
   private attempts = new Map<string, { count: number; gaveUp: boolean }>();
+  /** 「daemonId:version」 pairs already logged as skipped for being desktop-managed: the skip is
+   * the observable outcome, but every sweep hits the same daemons, so say it once per version. */
+  private skippedDesktopManaged = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private hub: Hub) {}
@@ -172,11 +175,22 @@ export class AutoUpdater {
     for (const d of this.hub.listOnlineDaemonsForUpdate()) this.maybeUpgrade(d);
   }
 
-  private maybeUpgrade(d: { daemonId: string; workerVersion: string; platform: string; arch: string }): void {
+  private maybeUpgrade(d: { daemonId: string; workerVersion: string; platform: string; arch: string; desktopManaged: boolean }): void {
     const latest = this.latest;
     if (!latest) return;
     if (!d.workerVersion) return;
     if (d.workerVersion === latest.version) return;
+    // A desktop-hosted daemon's version is the app's bundled one (plan 20261002-runtime-follows-app):
+    // pushing GitHub's latest into it would race the app's own replacement — and the comparison
+    // above is "not equal", so a lagging app would be pushed forward only to be moved back.
+    if (d.desktopManaged) {
+      const key = `${d.daemonId}:${latest.version}`;
+      if (!this.skippedDesktopManaged.has(key)) {
+        this.skippedDesktopManaged.add(key);
+        log.info("auto upgrade skipped: daemon is desktop-managed", { daemonId: d.daemonId, version: latest.version, workerVersion: d.workerVersion });
+      }
+      return;
+    }
     const target = rustTarget(d.platform, d.arch);
     if (!target) return;
     const entry = latest.workers[target];
