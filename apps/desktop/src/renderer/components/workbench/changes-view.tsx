@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { AlertCircle, Check, FileDiff, LoaderCircle, RefreshCw } from "lucide-react";
 
@@ -199,8 +199,9 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }, [shownList]);
 
   /** `opening`: the overlay was just opened. A vanished selection then falls back to the first file;
-   * during a refresh while open it moves to its neighbour in tree order instead. */
-  async function loadList(opening: boolean, scopeUncommitted: boolean) {
+   * during a refresh while open it moves to its neighbour in tree order instead. Started only by the
+   * refresh effect below, as an effect event: it reads the workspace and client of that render. */
+  const loadList = useEffectEvent(async (opening: boolean, scopeUncommitted: boolean) => {
     const generation = ++generationRef.current;
     listInFlightRef.current = true;
     setListLoading(true);
@@ -227,7 +228,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
         setListLoading(false);
       }
     }
-  }
+  });
 
   /** Unfolds the folders around a selection that sits in a folded one. */
   function revealInTree(nodes: ReturnType<typeof buildChangesTree>, path: string) {
@@ -244,7 +245,6 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     // A scope switch drops the other scope's error; its list is hidden by `shownList` until replaced.
     if (previous && previous.uncommitted !== uncommitted) setListError(null);
     void loadList(!previous?.active, uncommitted);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision, uncommitted]);
 
   const wantedKey =
@@ -253,10 +253,11 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   // Only the selected file is fetched, and only while the view is active: a background workspace
   // never fetches. A refresh of the same file keeps its current content on screen until the new
   // one arrives, so the pane keeps its scroll position.
-  useEffect(() => {
-    if (!wantedKey || !shownList || !selectedFile || listInFlightRef.current) return;
+  // The fetch reads the list, file and options of the render it runs in; it runs when the wanted key
+  // changes or the content revision is bumped (after a list load, or a retry).
+  const fetchContent = useEffectEvent((key: string): (() => void) | undefined => {
+    if (!shownList || !selectedFile || listInFlightRef.current) return;
     let cancelled = false;
-    const key = wantedKey;
     const whitespace = ignoreWhitespace;
     setContent((current) => (current?.key === key && current.status === "ready" ? current : { key, status: "loading" }));
     void client
@@ -279,7 +280,10 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (!wantedKey) return;
+    return fetchContent(wantedKey);
   }, [wantedKey, contentRevision]);
 
   function requestRefresh() {
