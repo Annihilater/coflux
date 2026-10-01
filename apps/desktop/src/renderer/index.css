@@ -112,6 +112,28 @@
   --sidebar: #151514;
   --terminal: #0a0a0a;
   --radius: 0.375rem;
+
+  /* File-type icons of the changes view (plan 20261001-changes-review-polish): the vendored
+   * Catppuccin set (assets/file-icons/) colours every stroke with one of these sixteen names. They
+   * are Catppuccin Mocha pulled toward this palette at low saturation, so ts / rs / json stay
+   * distinguishable at a glance while the status colour of a file name remains the dominant
+   * signal. `text` / `overlay1` (plain files, folders) sit on the warm grey ramp above. */
+  --vscode-ctp-rosewater: #c5a8a2;
+  --vscode-ctp-flamingo: #c6a1a1;
+  --vscode-ctp-pink: #cb9dbe;
+  --vscode-ctp-mauve: #a78bc7;
+  --vscode-ctp-red: #be7b8e;
+  --vscode-ctp-maroon: #bb8891;
+  --vscode-ctp-peach: #c39578;
+  --vscode-ctp-yellow: #cbb991;
+  --vscode-ctp-green: #8db589;
+  --vscode-ctp-teal: #81b2aa;
+  --vscode-ctp-sky: #7aaeb7;
+  --vscode-ctp-sapphire: #6d9eb4;
+  --vscode-ctp-blue: #7a96c4;
+  --vscode-ctp-lavender: #929bd1;
+  --vscode-ctp-text: #93938b;
+  --vscode-ctp-overlay1: #66665f;
 }
 
 @theme inline {

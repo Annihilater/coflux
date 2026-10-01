@@ -54,3 +54,9 @@ Use `ActivityDots` for the four workspace activity states, matching assistant-ui
 ## Icons: lucide-react, with consistent semantics across clients
 
 Use corresponding icon families for the same meaning on desktop and iOS. Map desktop lucide icons to the nearest iOS SF Symbols, such as `GitBranch` ↔ `arrow.branch` and `Folder` ↔ `folder`. Before adding an icon, check existing imports in `sidebar.tsx` for a reusable choice.
+
+## File and folder icons: the vendored Catppuccin set, nothing else
+
+A file-type or folder icon — a row naming a file or folder of a repository, such as the changes tree and the diff header — comes from the vendored Catppuccin VS Code Icons set (`FileTypeIcon` / `FolderIcon` in `components/workbench/changes-file-icon.tsx`); every other icon, including actions about files (copy, reveal, open), stays lucide. The set lives in `assets/file-icons/`, produced by `scripts/vendor-file-icons.mjs` from a pinned release and committed; never fetch it at runtime or edit the generated files. Its colours are the `--vscode-ctp-*` variables in `index.css`, kept at low saturation so a file name's status colour stays the dominant signal; add a missing file or folder name to the local override table in `changes-file-icons.ts`, not to the generated mapping.
+
+Rationale: lucide has no file-type vocabulary, and one set of icons per meaning keeps a glance at ts / rs / json consistent wherever files are listed.

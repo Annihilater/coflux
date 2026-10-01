@@ -85,6 +85,13 @@ export const IPC = {
   screenPort: "desktop:screen-port",
   /** 主进程 → 渲染层: screen events (the window left full screen). */
   screenEvent: "desktop:screen-event",
+  /**
+   * Changes view file menu (plan 20261001-changes-review-polish): a file of a workspace on this
+   * machine, as (workspace root, relative path); main resolves and refuses anything outside the root
+   * or not an existing regular file.
+   */
+  workspaceFileReveal: "desktop:workspace-file-reveal",
+  workspaceFileOpen: "desktop:workspace-file-open",
   /** 主进程 → 渲染层 */
   focusNotification: "desktop:focus-notification",
   focusWorkspace: "desktop:focus-workspace",

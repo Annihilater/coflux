@@ -26,6 +26,7 @@ import type {
   DesktopNotification,
   DesktopScreenEvent,
   DesktopUpdateState,
+  DesktopWorkspaceFileResult,
 } from "../shared/desktop-bridge";
 import { SCREEN_PORT_MESSAGE } from "../shared/desktop-bridge";
 import type { NativeEvent, NativeTransportBridge } from "../shared/native-transport";
@@ -278,7 +279,25 @@ const bridge: DesktopBridge = {
   onScreenEvent(listener) {
     return subscribe<DesktopScreenEvent>(IPC.screenEvent, listener);
   },
+  revealWorkspaceFile(root: string, path: string) {
+    return workspaceFileResult(ipcRenderer.invoke(IPC.workspaceFileReveal, String(root), String(path)));
+  },
+  openWorkspaceFile(root: string, path: string) {
+    return workspaceFileResult(ipcRenderer.invoke(IPC.workspaceFileOpen, String(root), String(path)));
+  },
 };
+
+/** Main answers `{ ok }` or `{ ok: false, error }`; anything else (a thrown handler) is a failure. */
+function workspaceFileResult(reply: Promise<unknown>): Promise<DesktopWorkspaceFileResult> {
+  return reply.then(
+    (value) => {
+      if (value && typeof value === "object" && (value as { ok?: unknown }).ok === true) return { ok: true } as const;
+      const error = value && typeof value === "object" ? (value as { error?: unknown }).error : undefined;
+      return { ok: false, error: typeof error === "string" && error ? error : "操作失败" } as const;
+    },
+    () => ({ ok: false, error: "操作失败" }) as const,
+  );
+}
 // A session's MessagePort cannot cross the context bridge; the page receives it as a window message
 // (Electron's documented port hand-off), keyed by session id.
 ipcRenderer.on(IPC.screenPort, (event, sessionId: unknown) => {

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
+import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import type { ChangedFile, ChangedFileStatus } from "@coflux/client";
+import { FileTypeIcon, FolderIcon } from "@/components/workbench/changes-file-icon";
 import { flattenTree, stepFile, type TreeNode, type TreeRow } from "@/components/workbench/changes-tree";
 import { cn } from "@/lib/utils";
 
@@ -13,9 +15,11 @@ type ChangesFileTreeProps = {
   onSelect: (path: string) => void;
   /** Takes the keyboard when the view opens, if nothing else holds it. */
   active: boolean;
+  /** The right-click menu of a file row (plan 20261001-changes-review-polish). */
+  fileMenuItems: (file: ChangedFile) => ContextMenuOption[];
 };
 
-const STATUS_LETTER: Record<ChangedFileStatus, string> = {
+export const STATUS_LETTER: Record<ChangedFileStatus, string> = {
   added: "A",
   modified: "M",
   deleted: "D",
@@ -23,7 +27,7 @@ const STATUS_LETTER: Record<ChangedFileStatus, string> = {
   untracked: "U",
 };
 
-const STATUS_TONE: Record<ChangedFileStatus, string> = {
+export const STATUS_TONE: Record<ChangedFileStatus, string> = {
   added: "text-success",
   untracked: "text-success",
   modified: "text-warning",
@@ -35,7 +39,7 @@ const STATUS_TONE: Record<ChangedFileStatus, string> = {
  * An editable element the user can see. A terminal's input textarea never counts: the overlay
  * covers the terminals, and a covered element still passes `checkVisibility()`.
  */
-function isVisibleTypingTarget(element: Element | null): boolean {
+export function isVisibleTypingTarget(element: Element | null): boolean {
   if (!(element instanceof HTMLElement)) return false;
   if (element.closest("[data-terminal-host]")) return false;
   const editable =
@@ -48,20 +52,28 @@ function isVisibleTypingTarget(element: Element | null): boolean {
 
 const INDENT_PX = 12;
 const BASE_PADDING_PX = 8;
+/** Half the chevron's width: indent guides run under the chevron of the folder they belong to. */
+const GUIDE_OFFSET_PX = 7;
 
 /**
  * The changes tree. It is one focusable element (role="tree"); rows are not focusable, the
  * focused row is tracked here. ↑/↓ select the previous/next file, ←/→ collapse/expand a folder or
  * move between a folder and its children. Esc is never handled here: it belongs to the workbench,
  * which closes the overlay.
+ *
+ * Rows read like VS Code's SCM tree (plan 20261001-changes-review-polish): file-type and folder
+ * icons from the vendored Catppuccin set, a thin indent guide per level, and a file menu on
+ * right-click. One ContextMenu serves every row: a row's own handler records which file was
+ * right-clicked before the event reaches the menu; folder rows stop it so no menu opens.
  */
-export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath, onSelect, active }: ChangesFileTreeProps) {
+export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath, onSelect, active, fileMenuItems }: ChangesFileTreeProps) {
   const rows = useMemo(() => flattenTree(nodes, collapsed), [nodes, collapsed]);
   const [focusedKey, setFocusedKey] = useState<string | null>(selectedPath);
   const [hasFocus, setHasFocus] = useState(false);
+  const [menuFile, setMenuFile] = useState<ChangedFile | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // The focus cursor follows a selection made elsewhere (restore on open, neighbour after refresh).
+  // The focus cursor follows a selection made elsewhere (restore on open, neighbour after refresh, F7).
   useEffect(() => {
     if (selectedPath) setFocusedKey(selectedPath);
   }, [selectedPath]);
@@ -159,57 +171,90 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
       onFocus={() => setHasFocus(true)}
       onBlur={() => setHasFocus(false)}
     >
-      {rows.map((row) => {
-        const selected = row.kind === "file" && row.key === selectedPath;
-        const focused = hasFocus && row.key === focusedKey;
-        return (
-          <div
-            key={`${row.kind}:${row.key}`}
-            role="treeitem"
-            aria-level={row.depth + 1}
-            aria-selected={row.kind === "file" ? selected : undefined}
-            aria-expanded={row.kind === "dir" ? row.expanded : undefined}
-            data-row-key={row.key}
-            className={cn(
-              "flex h-6 cursor-default select-none items-center gap-1 pr-2",
-              selected ? (hasFocus ? "bg-accent" : "bg-accent/60") : "hover:bg-accent/40",
-              focused && !selected && "ring-1 ring-inset ring-ring",
-            )}
-            style={{ paddingLeft: BASE_PADDING_PX + row.depth * INDENT_PX }}
-            onClick={() => {
-              containerRef.current?.focus({ preventScroll: true });
-              if (row.kind === "dir") {
+      <ContextMenu label="文件操作" size="sm" items={menuFile ? fileMenuItems(menuFile) : []}>
+        {rows.map((row) => {
+          const selected = row.kind === "file" && row.key === selectedPath;
+          const focused = hasFocus && row.key === focusedKey;
+          return (
+            <div
+              key={`${row.kind}:${row.key}`}
+              role="treeitem"
+              aria-level={row.depth + 1}
+              aria-selected={row.kind === "file" ? selected : undefined}
+              aria-expanded={row.kind === "dir" ? row.expanded : undefined}
+              data-row-key={row.key}
+              className={cn(
+                "relative flex h-6 cursor-default select-none items-center gap-1.5 pr-2",
+                selected ? (hasFocus ? "bg-accent" : "bg-accent/60") : "hover:bg-accent/40",
+                focused && !selected && "ring-1 ring-inset ring-ring",
+              )}
+              style={{ paddingLeft: BASE_PADDING_PX + row.depth * INDENT_PX }}
+              onClick={() => {
+                containerRef.current?.focus({ preventScroll: true });
+                if (row.kind === "dir") {
+                  setFocusedKey(row.key);
+                  onSetExpanded(row.key, !row.expanded);
+                } else {
+                  focusRow(row);
+                }
+              }}
+              onContextMenu={(event) => {
+                if (row.kind === "dir") {
+                  // No folder menu: keep the event from the ContextMenu around the rows.
+                  event.preventDefault();
+                  event.stopPropagation();
+                  return;
+                }
+                containerRef.current?.focus({ preventScroll: true });
                 setFocusedKey(row.key);
-                onSetExpanded(row.key, !row.expanded);
-              } else {
-                focusRow(row);
-              }
-            }}
-          >
-            {row.kind === "dir" ? (
-              <>
-                {row.expanded ? (
-                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                ) : (
-                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.name}</span>
-              </>
-            ) : (
-              <FileRow name={row.name} file={row.file} />
-            )}
-          </div>
-        );
-      })}
+                setMenuFile(row.file);
+              }}
+            >
+              <IndentGuides depth={row.depth} />
+              {row.kind === "dir" ? (
+                <>
+                  {row.expanded ? (
+                    <ChevronDown className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                  )}
+                  <FolderIcon name={row.name} open={row.expanded} />
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.name}</span>
+                </>
+              ) : (
+                <FileRow name={row.name} file={row.file} />
+              )}
+            </div>
+          );
+        })}
+      </ContextMenu>
     </div>
+  );
+}
+
+/** One thin vertical line per ancestor level, like VS Code's tree indent guides. */
+function IndentGuides({ depth }: { depth: number }) {
+  if (depth === 0) return null;
+  return (
+    <>
+      {Array.from({ length: depth }, (_, level) => (
+        <span
+          key={level}
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 w-px bg-border"
+          style={{ left: BASE_PADDING_PX + level * INDENT_PX + GUIDE_OFFSET_PX }}
+        />
+      ))}
+    </>
   );
 }
 
 function FileRow({ name, file }: { name: string; file: ChangedFile }) {
   return (
     <>
-      {/* Aligns file names with their folder's name, past the folder chevron. */}
-      <span className="size-3.5 shrink-0" />
+      {/* Aligns file icons with their folder's icon, past the folder chevron. */}
+      <span className="-mr-0.5 size-3.5 shrink-0" />
+      <FileTypeIcon path={file.path} />
       <span className={cn("min-w-0 flex-1 truncate", STATUS_TONE[file.status], file.status === "deleted" && "line-through")}>
         {name}
       </span>

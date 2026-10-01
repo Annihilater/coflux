@@ -32,6 +32,7 @@ import { createMainWindow, openExternalIfHttp } from "./window";
 import { createBrowserHost } from "./browser-host";
 import { LoopbackTunnels } from "./loopback-tunnel";
 import { createScreenHost } from "./screen-host";
+import { registerWorkspaceFileIpc } from "./workspace-files";
 import { DeviceScope } from "@coflux/protocol";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
@@ -478,6 +479,9 @@ if (!app.requestSingleInstanceLock()) {
     });
     browserHost.registerIpc(trusted);
     app.once("will-quit", () => browserHost.dispose());
+
+    // Changes view file menu (plan 20261001-changes-review-polish): reveal / open a local workspace file.
+    registerWorkspaceFileIpc(trusted);
 
     // Remote screen tabs (plan 20260929-remote-desktop): main owns each session's two RPC lanes and
     // hands the page a MessagePort; the clipboard and the menu-accelerator switch live here too.
