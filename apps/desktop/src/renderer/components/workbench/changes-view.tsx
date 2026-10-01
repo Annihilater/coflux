@@ -7,8 +7,22 @@ import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/Dropdo
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { useToast } from "@astryxdesign/core/Toast";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import type { ChangedFile, ChangesOption, CofluxClient } from "@coflux/client";
+import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient } from "@coflux/client";
+import { AnnotationPutSchema, create, type Annotation, type AnnotationCodeSide } from "@coflux/protocol";
 import { desktop } from "@/config";
+import { agentTerminals, codeAnnotations, HAND_OFF_INSTRUCTION } from "@/components/workbench/browser-annotations";
+import { annotationsModelFor, useWorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
+import { useAnnotationUndo } from "@/components/workbench/browser-annotations-ui";
+import {
+  groupCommentsByFile,
+  isPendingComment,
+  pendingCommentCounts,
+  sidePath,
+  wireSide,
+  type CommentSide,
+  type LineRange,
+} from "@/components/workbench/changes-comments";
+import { OtherCommentsSection, type CodeCommentsController } from "@/components/workbench/changes-comments-ui";
 import { ChangesDiffPane, type ChangeFileData, type CurrentChange, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
 import { ChangesFileTree, isVisibleTypingTarget } from "@/components/workbench/changes-file-tree";
 import { stepChange, type ChangeNavKind } from "@/components/workbench/changes-navigation";
@@ -91,6 +105,27 @@ function joinWorkspacePath(root: string, path: string): string {
   return root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
 }
 
+/* Plan 20261001-changes-review-comments: comments on diff lines are workspace annotations with a
+ * code anchor, read and written through the same annotations model as the browser panel (which
+ * shows only page annotations). The view reads the model, the tasks and the agents itself. */
+
+const NO_COMMENTS: readonly Annotation[] = [];
+
+/** What a comment save sends: a new comment with its anchor, or an edit of the text only. */
+type CommentPut = {
+  annotationId?: string;
+  comment: string;
+  code?: { path: string; side: AnnotationCodeSide; startLine: number; endLine: number; excerpt: string; baseCommit: string };
+};
+
+const COMMENTS_OUTDATED_MESSAGE = "这台设备的 coflux 版本过旧，更新后才能在变更里写评论。";
+
+function commentFailureText(result: AnnotationFailure, action: string): string {
+  if (result.reason === "unsupported") return "该设备 coflux 版本过旧，不支持代码评论";
+  if (result.reason === "unreachable") return `${action}失败：连不上这个工作区所在的设备`;
+  return `${action}失败：${result.error}`;
+}
+
 export function ChangesView({ workspaceId, active, client, defaultBranch, additions, deletions }: ChangesViewProps) {
   const { mode, scope, ignoreWhitespace } = useChangesPreferences();
   const uncommitted = scope === "uncommitted";
@@ -118,6 +153,20 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   /** The workspace lives on this machine's own device: Finder and the default app can reach it. */
   const local = Boolean(workspaceDaemonId && daemonState?.daemonId && workspaceDaemonId === daemonState.daemonId);
 
+  /* ----- Code comments (plan 20261001-changes-review-comments) ----- */
+  const annotationsModel = annotationsModelFor(client);
+  const annotationsEntry = useWorkspaceAnnotations(client, workspaceId, active);
+  const tasks = useStore(client.store, (state) => state.tasks);
+  const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  const offerUndo = useAnnotationUndo(annotationsModel, workspaceId, commentFailureText);
+  const loadedAnnotations = annotationsEntry.annotations;
+  const codeComments = useMemo(() => (loadedAnnotations ? codeAnnotations(loadedAnnotations) : []), [loadedAnnotations]);
+  /** Unreachable, refused or too old: comments show without actions. */
+  const commentsReadOnly = annotationsEntry.status !== "ok";
+  /** The device's coflux predates code comments (or annotations altogether). */
+  const commentsOutdated = annotationsEntry.status === "unsupported" || annotationsEntry.codeComments === false;
+  const canWriteComments = annotationsEntry.codeComments === true && !commentsReadOnly;
+
   const lastObservationRef = useRef<ChangesRefreshObservation | null>(null);
   const generationRef = useRef(0);
   const seqRef = useRef(0);
@@ -137,6 +186,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   const tree = useMemo(() => buildChangesTree(shownList?.files ?? []), [shownList]);
   const fileByPath = useMemo(() => new Map((shownList?.files ?? []).map((file) => [file.path, file])), [shownList]);
   const selectedFile = selectedPath ? (fileByPath.get(selectedPath) ?? null) : null;
+  const groupedComments = useMemo(() => groupCommentsByFile(codeComments, shownList?.files ?? []), [codeComments, shownList]);
+  const commentCounts = useMemo(() => pendingCommentCounts(groupedComments.byPath), [groupedComments]);
   const totals = useMemo(() => {
     let added = 0;
     let deleted = 0;
@@ -345,6 +396,93 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     return items;
   }
 
+  /* ----- Code comments ----- */
+
+  async function saveComment(annotation: CommentPut): Promise<string | null> {
+    const result = await annotationsModel.change(workspaceId, { kind: "put", put: create(AnnotationPutSchema, { annotation }) });
+    return result.ok ? null : commentFailureText(result, "保存");
+  }
+
+  function createComment(file: ChangedFile, base: string, side: CommentSide, range: LineRange, excerpt: string, comment: string) {
+    return saveComment({
+      comment,
+      code: {
+        path: sidePath(file, side),
+        side: wireSide(side),
+        startLine: range.start + 1,
+        endLine: range.end + 1,
+        excerpt,
+        baseCommit: side === "old" ? base : "",
+      },
+    });
+  }
+
+  /** Only the text changes: an edit without an anchor keeps the stored one. */
+  function editComment(annotation: Annotation, comment: string) {
+    return saveComment({ annotationId: annotation.annotationId, comment });
+  }
+
+  /** Deletes a pending comment, or confirms a resolved one; both can be undone for a while. */
+  async function removeComment(annotation: Annotation, confirming: boolean) {
+    const result = await annotationsModel.change(workspaceId, { kind: "delete", annotationIds: [annotation.annotationId] });
+    if (!result.ok) {
+      showToast({ body: commentFailureText(result, confirming ? "确认" : "删除"), type: "error" });
+      return;
+    }
+    offerUndo(confirming ? `已确认评论 #${annotation.number}` : `已删除评论 #${annotation.number}`, result.removedIds);
+  }
+
+  async function reopenComment(annotation: Annotation, comment: string): Promise<boolean> {
+    const result = await annotationsModel.change(workspaceId, { kind: "reopen", annotationId: annotation.annotationId, comment });
+    if (!result.ok) showToast({ body: commentFailureText(result, "重新打开"), type: "error" });
+    return result.ok;
+  }
+
+  /** 「交给 agent」: the same instruction and path as the browser panel's. */
+  async function handOff(taskId: string) {
+    const terminal = agentTerminals(tasks, sessionAgents, workspaceId).find((item) => item.taskId === taskId);
+    const result = await client.handOffAnnotations(workspaceId, taskId, HAND_OFF_INSTRUCTION);
+    if (result.ok) {
+      showToast({ body: `已交给「${terminal?.title || "终端"}」里的 ${terminal?.agent ?? "agent"}`, type: "info" });
+      return;
+    }
+    if (result.held) showToast({ body: "这个终端正被另一台设备使用，没有输入。在那台设备上操作，或换一个终端。", type: "error" });
+    else showToast({ body: commentFailureText(result, "交给 agent "), type: "error" });
+  }
+
+  function commentsFor(file: ChangedFile): CodeCommentsController {
+    const base = shownList?.base ?? "";
+    return {
+      annotations: groupedComments.byPath.get(file.path) ?? NO_COMMENTS,
+      canWrite: canWriteComments,
+      hint: commentsOutdated ? COMMENTS_OUTDATED_MESSAGE : null,
+      readOnly: commentsReadOnly,
+      create: (side, range, excerpt, comment) => createComment(file, base, side, range, excerpt, comment),
+      edit: editComment,
+      remove: (annotation, confirming) => void removeComment(annotation, confirming),
+      reopen: reopenComment,
+    };
+  }
+
+  const handOffControl = annotationsEntry.codeComments
+    ? {
+        agents: agentTerminals(tasks, sessionAgents, workspaceId),
+        disabled: commentsReadOnly || !codeComments.some(isPendingComment),
+        onHandOff: (taskId: string) => void handOff(taskId),
+      }
+    : null;
+
+  /** 「其他批注」: `readOnly` while there is no list to act against (device offline, list failed). */
+  const otherComments = (comments: readonly Annotation[], readOnly: boolean) => (
+    <OtherCommentsSection
+      comments={comments}
+      readOnly={readOnly}
+      onDelete={(annotation) => void removeComment(annotation, false)}
+      onConfirm={(annotation) => void removeComment(annotation, true)}
+      className="max-h-[45%] shrink-0"
+    />
+  );
+
   /* ----- Render ----- */
 
   const scopeMenu = <ScopeMenu scope={scope} onChange={(next) => setChangesPreference("scope", next)} />;
@@ -393,6 +531,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
           {refreshButton}
         </div>
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-center">{body}</div>
+        {/* No tree and no diff: every code comment, read-only when the list could not be read. */}
+        {listError || shownList !== null ? otherComments(codeComments, listError !== null || commentsReadOnly) : null}
       </div>
     );
   }
@@ -417,8 +557,10 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
             onSelect={setSelectedPath}
             active={active}
             fileMenuItems={fileMenuItems}
+            commentCounts={commentCounts}
           />
         </div>
+        {otherComments(groupedComments.others, commentsReadOnly)}
         <SidebarResizeHandle control={treeWidth} />
       </div>
       <div className="min-w-0 flex-1">
@@ -438,6 +580,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
               if (readyKey !== null) setBlockCount((current) => (current?.key === readyKey && current.count === count ? current : { key: readyKey, count }));
             }}
             menuItems={fileMenuItems(selectedFile)}
+            comments={commentsFor(selectedFile)}
+            handOff={handOffControl}
           />
         ) : null}
       </div>

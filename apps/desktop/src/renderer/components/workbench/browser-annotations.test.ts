@@ -9,8 +9,10 @@ import {
   annotationsMarkdown,
   annotationTitle,
   cardPlacement,
+  codeAnnotations,
   dataUrlToImage,
   groupByPage,
+  pageAnnotations,
   pageKey,
   pinsForPage,
 } from "./browser-annotations";
@@ -48,9 +50,31 @@ test("toolbar count: pending, else resolved with a check, else nothing", () => {
   const resolved = annotation({ annotationId: "b", number: 2, pageUrl: "http://x/", status: AnnotationStatus.RESOLVED });
   assert.deepEqual(annotationCount(undefined, [pending, resolved]), { kind: "pending", count: 1 });
   assert.deepEqual(annotationCount(undefined, [resolved]), { kind: "resolved", count: 1 });
-  assert.deepEqual(annotationCount({ pending: 0, resolved: 3 }, [pending]), { kind: "resolved", count: 3 });
+  // The loaded list wins over the summary (which also counts code comments); the summary is the
+  // fallback before the first load.
+  assert.deepEqual(annotationCount({ pending: 0, resolved: 3 }, [pending]), { kind: "pending", count: 1 });
+  assert.deepEqual(annotationCount({ pending: 0, resolved: 3 }, null), { kind: "resolved", count: 3 });
   assert.equal(annotationCount({ pending: 0, resolved: 0 }, null), null);
   assert.equal(annotationCount(undefined, null), null);
+});
+
+test("the browser panel's lists and count ignore code comments", () => {
+  const page = annotation({ annotationId: "a", number: 1, pageUrl: "http://x/", targets: [{ element: { tag: "button" } }] });
+  const comment = annotation({ annotationId: "b", number: 2, pageUrl: "", code: { path: "src/a.ts", side: 2, startLine: 3, endLine: 3 } });
+  const resolvedComment = annotation({
+    annotationId: "c",
+    number: 3,
+    pageUrl: "",
+    status: AnnotationStatus.RESOLVED,
+    code: { path: "src/a.ts", side: 1, startLine: 1, endLine: 2 },
+  });
+  const all = [page, comment, resolvedComment];
+  assert.deepEqual(pageAnnotations(all).map((item) => item.annotationId), ["a"]);
+  assert.deepEqual(codeAnnotations(all).map((item) => item.annotationId), ["b", "c"]);
+  // The summary counts every kind; once loaded, the badge counts page annotations only.
+  assert.deepEqual(annotationCount({ pending: 2, resolved: 1 }, pageAnnotations(all)), { kind: "pending", count: 1 });
+  assert.equal(annotationCount({ pending: 1, resolved: 1 }, pageAnnotations([comment, resolvedComment])), null);
+  assert.equal(pinsForPage(all, "http://x/").length, 1);
 });
 
 test("titles and meta lines name the elements", () => {

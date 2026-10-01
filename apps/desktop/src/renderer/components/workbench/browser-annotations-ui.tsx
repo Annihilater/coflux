@@ -30,11 +30,13 @@ import {
 } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
+import { useToast } from "@astryxdesign/core/Toast";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
+import type { AnnotationFailure } from "@coflux/client";
 import { AnnotationImageKind, type Annotation, type AnnotationImage } from "@coflux/protocol";
 
 import { annotationMeta, cardPlacement, groupByPage, isResolved, pageKey, type AgentTerminal, type CardBox } from "@/components/workbench/browser-annotations";
-import type { WorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
+import type { AnnotationsModel, WorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
 import { displayUrl } from "@/components/workbench/browser-address";
 import type { DesktopAnnotatorPalette, DesktopAnnotatorPick } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
@@ -166,8 +168,48 @@ export function useAnnotatorPalette(scopeRef: RefObject<HTMLElement | null>): De
 
 /* ---------------------------------------------------------------- shared pieces */
 
+/** How long a deletion's 「撤销」 toast stays; the worker keeps deletions restorable for a minute. */
+const UNDO_TOAST_MS = 8000;
+
+/**
+ * The 「撤销」 toast after a delete, confirm or clear (plan 20260929-annotation-polish), shared by
+ * the browser panel and the changes view. The deletion already happened everywhere (the worker keeps
+ * the records restorable for a while); 「撤销」 restores exactly the ids it removed.
+ */
+export function useAnnotationUndo(
+  model: AnnotationsModel,
+  workspaceId: string,
+  failureText: (result: AnnotationFailure, action: string) => string,
+): (body: string, annotationIds: string[]) => void {
+  const showToast = useToast();
+  async function restore(annotationIds: string[]) {
+    const result = await model.change(workspaceId, { kind: "restore", annotationIds });
+    if (!result.ok) showToast({ body: failureText(result, "撤销"), type: "error" });
+  }
+  return function offerUndo(body: string, annotationIds: string[]) {
+    if (annotationIds.length === 0) return;
+    let dismiss: (() => void) | null = null;
+    dismiss = showToast({
+      body,
+      type: "info",
+      autoHideDuration: UNDO_TOAST_MS,
+      endContent: (
+        <Button
+          label="撤销"
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            dismiss?.();
+            void restore(annotationIds);
+          }}
+        />
+      ),
+    });
+  };
+}
+
 /** A number badge in the pin's colour (the theme accent; success with ✓ once resolved). */
-function NumberBadge({ number, resolved, className }: { number: number; resolved: boolean; className?: string }) {
+export function NumberBadge({ number, resolved, className }: { number: number; resolved: boolean; className?: string }) {
   return (
     <span
       className={cn(
@@ -181,7 +223,7 @@ function NumberBadge({ number, resolved, className }: { number: number; resolved
   );
 }
 
-function IconButton({ label, onClick, children, tone = "default", disabled }: { label: string; onClick: () => void; children: ReactNode; tone?: "default" | "danger"; disabled?: boolean }) {
+export function IconButton({ label, onClick, children, tone = "default", disabled }: { label: string; onClick: () => void; children: ReactNode; tone?: "default" | "danger"; disabled?: boolean }) {
   return (
     <Tooltip content={label} placement="above">
       <button
@@ -204,7 +246,7 @@ function IconButton({ label, onClick, children, tone = "default", disabled }: { 
 }
 
 /** A textarea that grows with its content up to eight lines, then scrolls. */
-function GrowingInput({ inputRef, value, className, ...props }: { inputRef: RefObject<HTMLTextAreaElement | null>; value: string } & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "rows">) {
+export function GrowingInput({ inputRef, value, className, ...props }: { inputRef: RefObject<HTMLTextAreaElement | null>; value: string } & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "rows">) {
   useLayoutEffect(() => {
     const node = inputRef.current;
     if (!node) return;

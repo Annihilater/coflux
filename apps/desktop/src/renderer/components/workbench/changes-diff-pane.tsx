@@ -1,10 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Rows2, Space, UnfoldVertical } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AlertCircle, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Plus, Rows2, Space, UnfoldVertical } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { ChangedFile } from "@coflux/client";
+import type { Annotation } from "@coflux/protocol";
+import type { AgentTerminal } from "@/components/workbench/browser-annotations";
+import { anchorSide, buildExcerpt, commentLocation, locateAnchor, type CommentSide, type LineRange } from "@/components/workbench/changes-comments";
+import {
+  CodeCommentCard,
+  CommentsHandOffMenu,
+  CommentsOutdatedHint,
+  NewCommentCard,
+  type CodeCommentsController,
+} from "@/components/workbench/changes-comments-ui";
 import { FileTypeIcon } from "@/components/workbench/changes-file-icon";
 import { overlayEmphasis, wordEmphasis, type WordRange } from "@/components/workbench/changes-word-diff";
 import { highlightLines, resolveLang, type HighlightToken } from "@/components/workbench/diff-highlight";
@@ -12,6 +22,8 @@ import {
   buildDiffRows,
   buildSegments,
   changeBlocks,
+  CONTEXT_LINES,
+  gapId,
   hasChanges,
   parseHunkRanges,
   splitLines,
@@ -61,6 +73,10 @@ type DiffPaneProps = {
   onChangeCount: (count: number) => void;
   /** The header's 「⋯」 menu: the same file actions as the tree row's right-click menu. */
   menuItems: DropdownMenuOption[];
+  /** The file's code comments (plan 20261001-changes-review-comments). */
+  comments: CodeCommentsController;
+  /** The header's 「交给 agent ▾」; null when the device's coflux has no code comments. */
+  handOff: { agents: readonly AgentTerminal[]; disabled: boolean; onHandOff: (taskId: string) => void } | null;
 };
 
 /** Beyond this, a side is shown as plain text: tokenising it on the renderer thread would stall. */
@@ -94,6 +110,7 @@ export function ChangesDiffPane(props: DiffPaneProps) {
           </span>
         ) : null}
         <div className="flex shrink-0 items-center gap-0.5">
+          {props.handOff ? <CommentsHandOffMenu agents={props.handOff.agents} disabled={props.handOff.disabled} onHandOff={props.handOff.onHandOff} /> : null}
           <HeaderButton label="上一个变更 ⇧F7" onClick={() => onStep(-1)}>
             <ChevronUp className="size-3.5" />
           </HeaderButton>
@@ -181,7 +198,7 @@ function FileMoreMenu({ items }: { items: DropdownMenuOption[] }) {
   );
 }
 
-function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onChangeCount }: DiffPaneProps) {
+function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onChangeCount, comments }: DiffPaneProps) {
   switch (state.kind) {
     case "loading":
       return (
@@ -191,30 +208,48 @@ function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onCh
       );
     case "error":
       return (
-        <Centered>
-          <AlertCircle className={state.outdated ? "size-6 text-warning" : "size-6 text-destructive"} />
-          <p className="max-w-sm text-sm text-muted-foreground">{state.message}</p>
-          <Button label="重试" variant="secondary" size="sm" onClick={onRetry} />
-        </Centered>
+        <WithFileComments comments={comments}>
+          <Centered>
+            <AlertCircle className={state.outdated ? "size-6 text-warning" : "size-6 text-destructive"} />
+            <p className="max-w-sm text-sm text-muted-foreground">{state.message}</p>
+            <Button label="重试" variant="secondary" size="sm" onClick={onRetry} />
+          </Centered>
+        </WithFileComments>
       );
     case "binary":
-      return <Note>二进制文件，不显示内容</Note>;
+      return (
+        <WithFileComments comments={comments}>
+          <Note>二进制文件，不显示内容</Note>
+        </WithFileComments>
+      );
     case "rename-only":
-      return <Note>重命名自 {state.from}，内容未变</Note>;
+      return (
+        <WithFileComments comments={comments}>
+          <Note>重命名自 {state.from}，内容未变</Note>
+        </WithFileComments>
+      );
     case "large":
       return (
-        <Centered>
-          <FileDiff className="size-6 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">变更较大</p>
-          {state.canLoad ? (
-            <Button label="仍然加载" variant="secondary" size="sm" onClick={onForceLoad} />
-          ) : (
-            <p className="text-sm text-muted-foreground">文件太大，不显示内容</p>
-          )}
-        </Centered>
+        <WithFileComments comments={comments}>
+          <Centered>
+            <FileDiff className="size-6 text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">变更较大</p>
+            {state.canLoad ? (
+              <Button label="仍然加载" variant="secondary" size="sm" onClick={onForceLoad} />
+            ) : (
+              <p className="text-sm text-muted-foreground">文件太大，不显示内容</p>
+            )}
+          </Centered>
+        </WithFileComments>
       );
     case "ready":
-      if (state.data.binary) return <Note>二进制文件，不显示内容</Note>;
+      if (state.data.binary) {
+        return (
+          <WithFileComments comments={comments}>
+            <Note>二进制文件，不显示内容</Note>
+          </WithFileComments>
+        );
+      }
       // Keyed by path: switching files starts at the top with every gap folded, while a refresh of
       // the same file keeps the scroll position and the expanded gaps.
       return (
@@ -226,9 +261,42 @@ function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onCh
           mode={mode}
           currentChange={currentChange}
           onChangeCount={onChangeCount}
+          comments={comments}
         />
       );
   }
+}
+
+/** A saved comment bound to the file's controller. */
+function SavedComment({ annotation, comments, moved, location }: { annotation: Annotation; comments: CodeCommentsController; moved?: boolean; location?: string }) {
+  return (
+    <CodeCommentCard
+      annotation={annotation}
+      moved={moved}
+      location={location}
+      readOnly={comments.readOnly}
+      onEdit={(text) => comments.edit(annotation, text)}
+      onDelete={() => comments.remove(annotation, false)}
+      onConfirm={() => comments.remove(annotation, true)}
+      onReopen={(text) => comments.reopen(annotation, text)}
+    />
+  );
+}
+
+/** A state without lines to anchor to (binary, too large, an error, no change): the file's comments
+ * are listed above it, each with its location. */
+function WithFileComments({ comments, children }: { comments: CodeCommentsController; children: ReactNode }) {
+  if (comments.annotations.length === 0) return <>{children}</>;
+  return (
+    <div className="absolute inset-0 flex flex-col overflow-y-auto">
+      <div className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-muted/30 p-2">
+        {comments.annotations.map((annotation) => (
+          <SavedComment key={annotation.annotationId} annotation={annotation} comments={comments} location={commentLocation(annotation)} />
+        ))}
+      </div>
+      <div className="min-h-40 flex-1">{children}</div>
+    </div>
+  );
 }
 
 function Centered({ children }: { children: ReactNode }) {
@@ -299,6 +367,22 @@ function buildEmphasis(sides: Sides, ignoreWhitespace: boolean): { old: Map<numb
   return result;
 }
 
+/** A line of one side, as a key: `old:12`, `new:3` (0-based). */
+function lineKey(side: CommentSide, line: number): string {
+  return `${side}:${line}`;
+}
+
+/** The `[+]` gutter (plan 20261001-changes-review-comments): pressing a line number starts a
+ * selection, moving over other line numbers of the same side extends it, releasing opens the
+ * composer under its last line. */
+type Gutter = {
+  start: (side: CommentSide, line: number) => void;
+  extend: (side: CommentSide, line: number) => void;
+};
+
+/** The line a row's gutter comments on: a deletion's base line, else the working-tree line. */
+type GutterTarget = { side: CommentSide; line: number } | null;
+
 function DiffBody({
   file,
   data,
@@ -306,6 +390,7 @@ function DiffBody({
   mode,
   currentChange,
   onChangeCount,
+  comments,
 }: {
   file: ChangedFile;
   data: ChangeFileData;
@@ -313,12 +398,20 @@ function DiffBody({
   mode: DiffMode;
   currentChange: CurrentChange | null;
   onChangeCount: (count: number) => void;
+  comments: CodeCommentsController;
 }) {
   const sides = useMemo(() => buildSides(file, data, ignoreWhitespace), [file, data, ignoreWhitespace]);
   const emphasis = useMemo(() => buildEmphasis(sides, ignoreWhitespace), [sides, ignoreWhitespace]);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [tokens, setTokens] = useState<{ source: Sides; old: HighlightToken[][] | null; new: HighlightToken[][] | null } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** A gutter selection in progress, and the range a new comment is being written on. */
+  const [drag, setDrag] = useState<{ side: CommentSide; from: number; to: number } | null>(null);
+  const [draft, setDraft] = useState<{ side: CommentSide; range: LineRange } | null>(null);
+  const dragRef = useRef(drag);
+  useEffect(() => {
+    dragRef.current = drag;
+  });
 
   // Each side is highlighted as a whole file, so multi-line strings and comments keep their context.
   useEffect(() => {
@@ -338,7 +431,49 @@ function DiffBody({
     };
   }, [sides, file.path, file.oldPath]);
 
-  const rows = useMemo(() => buildDiffRows(sides.segments, mode, expanded), [sides, mode, expanded]);
+  // Saved comments go under the line they end on, re-found by their text in the current content;
+  // the ones whose lines are gone go on top, marked 「原位置已变化」.
+  const placed = useMemo(() => {
+    const byLine = new Map<string, Annotation[]>();
+    const moved: Annotation[] = [];
+    const ends: { side: CommentSide; line: number }[] = [];
+    for (const annotation of comments.annotations) {
+      const anchor = annotation.code;
+      if (!anchor) continue;
+      const side = anchorSide(anchor);
+      const range = locateAnchor(side === "old" ? sides.oldLines : sides.newLines, anchor);
+      if (!range) {
+        moved.push(annotation);
+        continue;
+      }
+      const key = lineKey(side, range.end);
+      const list = byLine.get(key);
+      if (list) list.push(annotation);
+      else byLine.set(key, [annotation]);
+      ends.push({ side, line: range.end });
+    }
+    return { byLine, moved, ends };
+  }, [comments.annotations, sides]);
+
+  // A folded stretch hiding a comment's (or the draft's) last line stays unfolded (the folded part
+  // is what buildDiffRows hides: an equal stretch minus its context lines next to changes).
+  const shownExpanded = useMemo(() => {
+    const wanted = draft ? [...placed.ends, { side: draft.side, line: draft.range.end }] : placed.ends;
+    if (wanted.length === 0) return expanded;
+    const next = new Set(expanded);
+    sides.segments.forEach((segment, index) => {
+      if (segment.kind !== "equal") return;
+      const head = index === 0 ? 0 : CONTEXT_LINES;
+      const tail = index === sides.segments.length - 1 ? 0 : CONTEXT_LINES;
+      for (const { side, line } of wanted) {
+        const start = side === "old" ? segment.oldStart : segment.newStart;
+        if (line >= start + head && line < start + segment.length - tail) next.add(gapId(segment));
+      }
+    });
+    return next;
+  }, [expanded, placed, draft, sides]);
+
+  const rows = useMemo(() => buildDiffRows(sides.segments, mode, shownExpanded), [sides, mode, shownExpanded]);
   const blocks = useMemo(() => {
     const result: DiffRow[][] = [];
     for (let start = 0; start < rows.length; start += ROW_BLOCK) result.push(rows.slice(start, start + ROW_BLOCK));
@@ -366,8 +501,55 @@ function DiffBody({
     target?.scrollIntoView({ block: "center" });
   }, [currentIndex, currentSeq, rows]);
 
-  if (sides.whitespaceOnly) return <Note>仅空白变化</Note>;
-  if (!hasChanges(sides.segments)) return <Note>内容未变</Note>;
+  // Releasing anywhere ends a gutter selection and opens the composer for it.
+  const dragging = drag !== null;
+  useEffect(() => {
+    if (!dragging) return;
+    function onUp() {
+      const current = dragRef.current;
+      setDrag(null);
+      if (current) setDraft({ side: current.side, range: { start: Math.min(current.from, current.to), end: Math.max(current.from, current.to) } });
+    }
+    function onCancel() {
+      setDrag(null);
+    }
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    return () => {
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+  }, [dragging]);
+
+  // Without the capability (or while the device is unreachable) there is no gutter and no composer.
+  const canWrite = comments.canWrite;
+  useEffect(() => {
+    if (canWrite) return;
+    setDrag(null);
+    setDraft(null);
+  }, [canWrite]);
+
+  const top = (
+    <>
+      {comments.hint ? <CommentsOutdatedHint text={comments.hint} /> : null}
+      {placed.moved.length > 0 ? (
+        <div className="flex flex-col gap-1.5 border-b border-border bg-muted/30 p-2">
+          {placed.moved.map((annotation) => (
+            <SavedComment key={annotation.annotationId} annotation={annotation} comments={comments} moved location={commentLocation(annotation)} />
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+
+  if (sides.whitespaceOnly || !hasChanges(sides.segments)) {
+    const note = sides.whitespaceOnly ? "仅空白变化" : "内容未变";
+    return (
+      <WithFileComments comments={comments}>
+        <Note>{note}</Note>
+      </WithFileComments>
+    );
+  }
 
   const current = tokens?.source === sides ? tokens : null;
   const renderCode = (side: "old" | "new", line: number) => {
@@ -396,8 +578,51 @@ function DiffBody({
     setExpanded((previous) => new Set(previous).add(id));
   }
 
+  const gutter: Gutter | null = canWrite
+    ? {
+        start: (side, line) => {
+          setDraft(null);
+          setDrag({ side, from: line, to: line });
+        },
+        extend: (side, line) => setDrag((value) => (value && value.side === side && value.to !== line ? { ...value, to: line } : value)),
+      }
+    : null;
+  const selection = drag
+    ? { side: drag.side, start: Math.min(drag.from, drag.to), end: Math.max(drag.from, drag.to) }
+    : draft
+      ? { side: draft.side, start: draft.range.start, end: draft.range.end }
+      : null;
+  const isSelected = (target: GutterTarget) =>
+    target !== null && selection !== null && selection.side === target.side && target.line >= selection.start && target.line <= selection.end;
+
+  /** The cards under one line of one side: its saved comments, then the composer if the draft ends there. */
+  const itemsFor = (side: CommentSide, line: number | null | undefined): ReactNode[] => {
+    if (line === null || line === undefined) return [];
+    const items: ReactNode[] = (placed.byLine.get(lineKey(side, line)) ?? []).map((annotation) => (
+      <SavedComment key={annotation.annotationId} annotation={annotation} comments={comments} />
+    ));
+    if (draft && draft.side === side && draft.range.end === line) {
+      const range = draft.range;
+      items.push(
+        <NewCommentCard
+          key="draft"
+          range={range}
+          onCancel={() => setDraft(null)}
+          onSubmit={async (text) => {
+            const excerpt = buildExcerpt(side === "old" ? sides.oldLines : sides.newLines, range);
+            const failure = await comments.create(side, range, excerpt, text);
+            if (!failure) setDraft((value) => (value === draft ? null : value));
+            return failure;
+          }}
+        />,
+      );
+    }
+    return items;
+  };
+
   return (
     <div ref={scrollRef} className="absolute inset-0 overflow-y-auto overflow-x-hidden font-mono text-sm leading-5">
+      {top}
       {blocks.map((block, blockIndex) => (
         <div
           key={blockIndex}
@@ -423,36 +648,59 @@ function DiffBody({
             const changeStart = changeIndex >= 0 && changes.starts[changeIndex] === key ? String(changeIndex) : undefined;
             const isCurrent = changeIndex >= 0 && changeIndex === currentIndex;
             if (row.kind === "split") {
+              const leftTarget: GutterTarget = row.left ? { side: "old", line: row.left.line } : null;
+              const rightTarget: GutterTarget = row.right ? { side: "new", line: row.right.line } : null;
+              const leftItems = itemsFor("old", row.left?.line);
+              const rightItems = itemsFor("new", row.right?.line);
               return (
-                <div key={key} className="relative flex" data-change-start={changeStart}>
-                  {isCurrent ? <CurrentMarker /> : null}
-                  <SplitHalf side="old" cell={row.left} renderCode={renderCode} />
-                  <SplitHalf side="new" cell={row.right} renderCode={renderCode} />
-                </div>
+                <Fragment key={key}>
+                  <div className="relative flex" data-change-start={changeStart}>
+                    {isCurrent ? <CurrentMarker /> : null}
+                    <SplitHalf side="old" cell={row.left} renderCode={renderCode} gutter={gutter} target={leftTarget} selected={isSelected(leftTarget)} />
+                    <SplitHalf side="new" cell={row.right} renderCode={renderCode} gutter={gutter} target={rightTarget} selected={isSelected(rightTarget)} />
+                  </div>
+                  {leftItems.length > 0 || rightItems.length > 0 ? (
+                    <div className="flex border-y border-border bg-muted/30">
+                      <div className="flex w-1/2 min-w-0 flex-col gap-1.5 border-r border-border p-2 empty:p-0">{leftItems}</div>
+                      <div className="flex w-1/2 min-w-0 flex-col gap-1.5 p-2 empty:p-0">{rightItems}</div>
+                    </div>
+                  ) : null}
+                </Fragment>
               );
             }
+            const target: GutterTarget =
+              row.type === "del" ? (row.oldLine !== null ? { side: "old", line: row.oldLine } : null) : row.newLine !== null ? { side: "new", line: row.newLine } : null;
+            const items =
+              row.type === "context"
+                ? [...itemsFor("old", row.oldLine), ...itemsFor("new", row.newLine)]
+                : row.type === "del"
+                  ? itemsFor("old", row.oldLine)
+                  : itemsFor("new", row.newLine);
             return (
-              <div
-                key={key}
-                className={cn("relative flex", row.type === "del" && "bg-destructive/10", row.type === "add" && "bg-success/10")}
-                data-change-start={changeStart}
-              >
-                {isCurrent ? <CurrentMarker /> : null}
-                <LineNumber value={row.oldLine} tone={row.type === "del" ? "del" : null} />
-                <LineNumber value={row.newLine} tone={row.type === "add" ? "add" : null} />
-                <span
-                  className={cn(
-                    "w-4 shrink-0 select-none text-center",
-                    row.type === "add" && "text-success",
-                    row.type === "del" && "text-destructive",
-                  )}
+              <Fragment key={key}>
+                <div
+                  className={cn("group/line relative flex", row.type === "del" && "bg-destructive/10", row.type === "add" && "bg-success/10")}
+                  data-change-start={changeStart}
                 >
-                  {row.type === "add" ? "+" : row.type === "del" ? "-" : " "}
-                </span>
-                <span className="min-w-0 flex-1 pr-3">
-                  {row.type === "del" ? renderCode("old", row.oldLine ?? 0) : renderCode("new", row.newLine ?? 0)}
-                </span>
-              </div>
+                  {isCurrent ? <CurrentMarker /> : null}
+                  {isSelected(target) ? <SelectedLine /> : null}
+                  <LineNumber value={row.oldLine} tone={row.type === "del" ? "del" : null} gutter={gutter} target={target} plus />
+                  <LineNumber value={row.newLine} tone={row.type === "add" ? "add" : null} gutter={gutter} target={target} />
+                  <span
+                    className={cn(
+                      "w-4 shrink-0 select-none text-center",
+                      row.type === "add" && "text-success",
+                      row.type === "del" && "text-destructive",
+                    )}
+                  >
+                    {row.type === "add" ? "+" : row.type === "del" ? "-" : " "}
+                  </span>
+                  <span className="min-w-0 flex-1 pr-3">
+                    {row.type === "del" ? renderCode("old", row.oldLine ?? 0) : renderCode("new", row.newLine ?? 0)}
+                  </span>
+                </div>
+                {items.length > 0 ? <div className="flex flex-col gap-1.5 border-y border-border bg-muted/30 py-2 pl-28 pr-3">{items}</div> : null}
+              </Fragment>
             );
           })}
         </div>
@@ -466,29 +714,41 @@ function CurrentMarker() {
   return <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-foreground/60" />;
 }
 
+/** The tint on lines selected for a new comment. */
+function SelectedLine() {
+  return <span aria-hidden className="pointer-events-none absolute inset-0 bg-(--color-accent)/15" />;
+}
+
 function SplitHalf({
   side,
   cell,
   renderCode,
+  gutter,
+  target,
+  selected,
 }: {
   side: "old" | "new";
   cell: { line: number; changed: boolean } | null;
   renderCode: (side: "old" | "new", line: number) => ReactNode;
+  gutter: Gutter | null;
+  target: GutterTarget;
+  selected: boolean;
 }) {
   const tone = cell?.changed ? (side === "old" ? "del" : "add") : null;
   return (
     <div
       className={cn(
-        "flex w-1/2 min-w-0",
+        "group/line relative flex w-1/2 min-w-0",
         side === "old" && "border-r border-border",
         !cell && "bg-muted/40",
         tone === "del" && "bg-destructive/10",
         tone === "add" && "bg-success/10",
       )}
     >
+      {selected ? <SelectedLine /> : null}
       {cell ? (
         <>
-          <LineNumber value={cell.line} tone={tone} />
+          <LineNumber value={cell.line} tone={tone} gutter={gutter} target={target} plus />
           <span className="min-w-0 flex-1 pl-2 pr-3">{renderCode(side, cell.line)}</span>
         </>
       ) : null}
@@ -496,15 +756,49 @@ function SplitHalf({
   );
 }
 
-function LineNumber({ value, tone }: { value: number | null; tone: "add" | "del" | null }) {
+/** A line number. With a gutter it is where a comment starts: `[+]` on hover (`plus`), press and
+ * drag to select lines. */
+function LineNumber({
+  value,
+  tone,
+  gutter,
+  target,
+  plus,
+}: {
+  value: number | null;
+  tone: "add" | "del" | null;
+  gutter?: Gutter | null;
+  target?: GutterTarget;
+  plus?: boolean;
+}) {
+  const active = gutter && target ? { gutter, target } : null;
   return (
     <span
       className={cn(
-        "w-12 shrink-0 select-none pr-2 text-right tabular-nums text-muted-foreground/60",
+        "relative w-12 shrink-0 select-none pr-2 text-right tabular-nums text-muted-foreground/60",
         tone === "add" && "text-success/80",
         tone === "del" && "text-destructive/80",
+        active && "cursor-pointer",
       )}
+      onPointerDown={
+        active
+          ? (event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              active.gutter.start(active.target.side, active.target.line);
+            }
+          : undefined
+      }
+      onPointerEnter={active ? () => active.gutter.extend(active.target.side, active.target.line) : undefined}
     >
+      {active && plus ? (
+        <span
+          aria-hidden
+          className="absolute left-1 top-0.5 hidden size-4 items-center justify-center rounded bg-(--color-accent) text-(--color-on-accent) group-hover/line:flex"
+        >
+          <Plus className="size-3" strokeWidth={3} />
+        </span>
+      ) : null}
       {value === null ? "" : value + 1}
     </span>
   );

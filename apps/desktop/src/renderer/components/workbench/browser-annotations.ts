@@ -10,9 +10,27 @@ import type { DesktopAnnotatorLocator, DesktopAnnotatorPin } from "@/desktop-bri
  * the agent terminals 「交给 agent」 offers, the instruction it types, and 「复制为 markdown」.
  */
 
-/** The instruction 「交给 agent」 types into an agent's terminal (one line; Enter follows). */
+/** The instruction 「交给 agent」 types into an agent's terminal (one line; Enter follows). Shared
+ * by the browser panel and the changes view (plan 20261001-changes-review-comments): `coflux
+ * annotations list` returns both kinds, so one hand-off covers everything pending. */
 export const HAND_OFF_INSTRUCTION =
-  "处理 coflux 浏览器批注：运行 coflux annotations list 查看，每条改完后用 coflux annotations resolve <id> --note \"改了什么\" 标记";
+  "处理 coflux 批注（浏览器批注和代码评论）：运行 coflux annotations list 查看，每条改完后用 coflux annotations resolve <id> --note \"改了什么\" 标记";
+
+/** A code comment from the changes view (plan 20261001-changes-review-comments): an annotation
+ * with a code anchor instead of page targets. Each surface shows only its own kind. */
+export function isCodeAnnotation(annotation: Annotation): boolean {
+  return annotation.code !== undefined;
+}
+
+/** The annotations the browser panel, its pins and its count show: page annotations only. */
+export function pageAnnotations(annotations: readonly Annotation[]): Annotation[] {
+  return annotations.filter((annotation) => !isCodeAnnotation(annotation));
+}
+
+/** The annotations the changes view shows: code comments only. */
+export function codeAnnotations(annotations: readonly Annotation[]): Annotation[] {
+  return annotations.filter(isCodeAnnotation);
+}
 
 /** A page's identity for grouping and pins: origin + path, without query or hash. */
 export function pageKey(url: string): string {
@@ -147,13 +165,17 @@ export function cardPlacement(
   return { left: clamp(anchor.x, maxLeft), top: clamp(top, maxTop) };
 }
 
-/** The toolbar's count segment: pending, or ✓ with the resolved count, or nothing at all. */
+/**
+ * The toolbar's count segment: pending, or ✓ with the resolved count, or nothing at all. Counted
+ * from the loaded `annotations` (the caller passes only its own kind); the center's summary, which
+ * counts every kind, is only the fallback before the first load.
+ */
 export function annotationCount(
   summary: { pending: number; resolved: number } | undefined,
   annotations: readonly Annotation[] | null,
 ): { kind: "pending" | "resolved"; count: number } | null {
-  const pending = summary ? summary.pending : (annotations ?? []).filter((annotation) => !isResolved(annotation)).length;
-  const resolved = summary ? summary.resolved : (annotations ?? []).filter(isResolved).length;
+  const pending = annotations ? annotations.filter((annotation) => !isResolved(annotation)).length : (summary?.pending ?? 0);
+  const resolved = annotations ? annotations.filter(isResolved).length : (summary?.resolved ?? 0);
   if (pending > 0) return { kind: "pending", count: pending };
   if (resolved > 0) return { kind: "resolved", count: resolved };
   return null;

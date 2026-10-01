@@ -17,6 +17,8 @@ type ChangesFileTreeProps = {
   active: boolean;
   /** The right-click menu of a file row (plan 20261001-changes-review-polish). */
   fileMenuItems: (file: ChangedFile) => ContextMenuOption[];
+  /** Pending code comments per file path, shown as a badge (plan 20261001-changes-review-comments). */
+  commentCounts?: ReadonlyMap<string, number>;
 };
 
 export const STATUS_LETTER: Record<ChangedFileStatus, string> = {
@@ -66,7 +68,7 @@ const GUIDE_OFFSET_PX = 7;
  * right-click. One ContextMenu serves every row: a row's own handler records which file was
  * right-clicked before the event reaches the menu; folder rows stop it so no menu opens.
  */
-export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath, onSelect, active, fileMenuItems }: ChangesFileTreeProps) {
+export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath, onSelect, active, fileMenuItems, commentCounts }: ChangesFileTreeProps) {
   const rows = useMemo(() => flattenTree(nodes, collapsed), [nodes, collapsed]);
   const [focusedKey, setFocusedKey] = useState<string | null>(selectedPath);
   const [hasFocus, setHasFocus] = useState(false);
@@ -222,7 +224,7 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
                   <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.name}</span>
                 </>
               ) : (
-                <FileRow name={row.name} file={row.file} />
+                <FileRow name={row.name} file={row.file} comments={commentCounts?.get(row.file.path) ?? 0} />
               )}
             </div>
           );
@@ -249,7 +251,7 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
-function FileRow({ name, file }: { name: string; file: ChangedFile }) {
+function FileRow({ name, file, comments }: { name: string; file: ChangedFile; comments: number }) {
   return (
     <>
       {/* Aligns file icons with their folder's icon, past the folder chevron. */}
@@ -258,6 +260,14 @@ function FileRow({ name, file }: { name: string; file: ChangedFile }) {
       <span className={cn("min-w-0 flex-1 truncate", STATUS_TONE[file.status], file.status === "deleted" && "line-through")}>
         {name}
       </span>
+      {comments > 0 ? (
+        <span
+          aria-label={`${comments} 条待处理评论`}
+          className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-(--color-accent) px-1 text-xs font-semibold leading-none tabular-nums text-(--color-on-accent)"
+        >
+          {comments}
+        </span>
+      ) : null}
       {!file.binary && (file.additions > 0 || file.deletions > 0) ? (
         <span className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums">
           {file.additions > 0 ? <span className="text-success">+{file.additions}</span> : null}
