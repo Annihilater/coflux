@@ -221,7 +221,7 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
                     <ChevronRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <FolderIcon name={row.name} open={row.expanded} />
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.name}</span>
+                  <span className="min-w-0 flex-1 truncate">{row.name}</span>
                 </>
               ) : (
                 <FileRow name={row.name} file={row.file} comments={commentCounts?.get(row.file.path) ?? 0} />
