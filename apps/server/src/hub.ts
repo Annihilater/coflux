@@ -68,6 +68,7 @@ import {
 import { createLogger } from "@coflux/core";
 import {
   Store,
+  type AgentSettingRecord,
   type PreparedOperationRecord,
   type SessionCheckpointRecord,
 } from "./store.js";
@@ -132,6 +133,16 @@ const MAX_CLIENT_TOKEN_BYTES = 512;
 /** Join keys are `cf_join_` + 32 base64url chars; the bound only stops oversized input before hashing. */
 const MAX_JOIN_KEY_BYTES = 128;
 const MAX_JOIN_KEY_REQUEST_ID_BYTES = 128;
+/* Account agent settings (plan 20261002-account-agent-settings). The center does not know the agent
+ * catalog: the id is an opaque token bounded by charset and length, and only safety limits apply. */
+const AGENT_SETTING_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const MAX_AGENT_SETTING_REQUEST_ID_BYTES = 128;
+/** The desktop's own cap on a launch command (agent-settings.ts MAX_COMMAND_LENGTH), in characters. */
+const MAX_AGENT_SETTING_COMMAND_CHARS = 1000;
+/** Rows per account: far above any catalog, low enough that one account cannot grow the table unboundedly. */
+const MAX_AGENT_SETTINGS_PER_ACCOUNT = 32;
+/** Control characters (newlines included) are stripped from a command: it is typed into a shell as one line. */
+const AGENT_COMMAND_CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
 /** One message for every redeem miss (unknown, expired, used, replaced): nothing to learn by probing. */
 const JOIN_KEY_REJECTED = "接入密钥无效、已过期或已被使用";
 const MAX_RATE_LIMIT_KEYS = 10_000;
@@ -605,6 +616,9 @@ export class Hub {
   private readonly enrollLimiter = new FixedWindowLimiter(config.enrollRateLimit, config.authRateWindowMs);
   /** Join key mints per account (plan 20260924-device-join-keys). */
   private readonly joinKeyMintLimiter = new FixedWindowLimiter(config.joinKeyMintRateLimit, config.authRateWindowMs);
+  /** Agent-setting writes chained per account (plan 20261002-account-agent-settings), so the full
+   * configurations they broadcast leave in commit order and the last broadcast is the latest state. */
+  private readonly agentSettingWrites = new Map<AccountId, Promise<void>>();
   private readonly daemonAuthLimiter = new FixedWindowLimiter(config.daemonAuthRateLimit, config.authRateWindowMs);
   private readonly loginLimiter = new FixedWindowLimiter(config.loginRateLimit, config.authRateWindowMs);
   private readonly tokenAuthLimiter = new FixedWindowLimiter(config.tokenAuthRateLimit, config.authRateWindowMs);
@@ -3057,14 +3071,18 @@ export class Hub {
         let tasks: Task[];
         let checkpoints: SessionCheckpointRecord[];
         let inbox: Awaited<ReturnType<Store["notificationPage"]>>;
+        let agentSettings: AgentSettingRecord[];
         try {
-          [daemons, projects, workspaces, tasks, checkpoints, inbox] = await Promise.all([
+          // The agent settings are read in the same window as the rest: a write that commits before
+          // this read is in it, one that commits after lands in the backlog replayed below.
+          [daemons, projects, workspaces, tasks, checkpoints, inbox, agentSettings] = await Promise.all([
             this.daemonInfoList(accountId),
             this.store.listProjects(accountId),
             this.store.listWorkspaces(accountId),
             this.store.listTasks(accountId),
             this.store.listSessionCheckpoints(accountId),
             this.store.notificationPage(accountId),
+            this.store.listAgentSettings(accountId),
           ]);
         } catch (error) {
           client.snapshotBacklog = undefined;
@@ -3076,6 +3094,7 @@ export class Hub {
         if (backlog.overflowed) return;
         this.sendClientNow(client, { case: "stateSnapshot", value: { daemons, projects, workspaces, tasks, ports: this.allPorts(accountId) } });
         this.sendClientNow(client, { case: "notificationPage", value: { ...inbox, requestId: "initial" } });
+        this.sendClientNow(client, { case: "agentSettingsUpdated", value: { agents: agentSettings, requestId: "", error: "" } });
         for (const checkpoint of checkpoints) this.sendCheckpoint(client, checkpoint, true);
         // agent presence 补发（plan 073）：client 的 stateSnapshot handler 会清空本地 presence，
         // 这里按设备补发当前全量——顺序在快照之后、与 checkpoint 同批，天然落在乱序防护序列内。
@@ -3171,6 +3190,10 @@ export class Hub {
       }
       case "deviceJoinKeyCreate": {
         await this.createJoinKey(client, msg.payload.value.requestId, msg.payload.value.replaces);
+        break;
+      }
+      case "agentSettingSet": {
+        await this.setAgentSetting(client, msg.payload.value);
         break;
       }
       case "deviceAuthorizeInfo": {
@@ -3843,7 +3866,7 @@ export class Hub {
     client.accountId = accountId;
     client.tokenHash = tokenHash;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
@@ -4237,6 +4260,48 @@ export class Hub {
       return;
     }
     log.warn("daemon joined with a key but went away before registration", { remoteAddress: conn.remoteAddress });
+  }
+
+  /** `agentSettingSet` (plan 20261002-account-agent-settings): replace one agent's record for the
+   * account, then send the account's full configuration to every subscribed client of the account —
+   * the writer included, and directly to an unsubscribed writer — tagged with the write's request id.
+   * A rejected write is answered with an error to the writer only. */
+  private async setAgentSetting(
+    client: ClientConn,
+    value: { requestId: string; agentId: string; enabled: boolean; command: string },
+  ): Promise<void> {
+    const { requestId, agentId, enabled } = value;
+    const reject = (error: string) => this.sendClient(client, { case: "agentSettingsUpdated", value: { requestId, agents: [], error } });
+    if (!validBoundedText(requestId, MAX_AGENT_SETTING_REQUEST_ID_BYTES)) return void reject("agent 设置请求无效");
+    if (!AGENT_SETTING_ID_PATTERN.test(agentId)) return void reject("agent 标识无效");
+    const command = value.command.replace(AGENT_COMMAND_CONTROL_CHARS, "");
+    if (command.length > MAX_AGENT_SETTING_COMMAND_CHARS) return void reject(`启动命令不能超过 ${MAX_AGENT_SETTING_COMMAND_CHARS} 个字符`);
+    const accountId = client.accountId!;
+    const previous = this.agentSettingWrites.get(accountId) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      let result: Awaited<ReturnType<Store["setAgentSetting"]>>;
+      try {
+        result = await this.store.setAgentSetting(accountId, { agentId, enabled, command }, Date.now(), MAX_AGENT_SETTINGS_PER_ACCOUNT);
+      } catch (error) {
+        log.warn("agent setting write failed", { accountId, error: String(error) });
+        reject("保存 agent 设置失败，请重试");
+        return;
+      }
+      if (result.capped) {
+        reject("账号里的 agent 设置条目过多");
+        return;
+      }
+      const payload: ServerToClientPayload = { case: "agentSettingsUpdated", value: { requestId, agents: result.agents, error: "" } };
+      this.broadcast(accountId, payload);
+      if (!client.subscribed) this.sendClient(client, payload);
+    });
+    const tail = run.catch(() => undefined);
+    this.agentSettingWrites.set(accountId, tail);
+    try {
+      await run;
+    } finally {
+      if (this.agentSettingWrites.get(accountId) === tail) this.agentSettingWrites.delete(accountId);
+    }
   }
 
   /** `deviceJoinKeyCreate`: mint a one-time join key for the signed-in account, revoking `replaces` when

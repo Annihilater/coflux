@@ -46,6 +46,10 @@ import {
   type SessionCheckpoint,
 } from "@coflux/protocol";
 
+/** One row of `account_agent_settings` (plan 20261002-account-agent-settings), shaped like the wire
+ * AgentSetting message. */
+export type AgentSettingRecord = { agentId: string; enabled: boolean; command: string };
+
 const MAX_SESSION_CHECKPOINTS_PER_ACCOUNT = 256;
 const MAX_SESSION_CHECKPOINT_BYTES_PER_ACCOUNT = 64 * 1024 * 1024;
 const SESSION_CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -550,6 +554,44 @@ export class Store {
       DELETE FROM device_join_keys
       WHERE expires_at < ${cutoff} OR (created_at < ${cutoff} AND (used_at IS NOT NULL OR revoked_at IS NOT NULL))
     `;
+  }
+
+  /* --------------------- account agent settings --------------------- */
+  /** The account's agent launch settings (plan 20261002-account-agent-settings), one record per agent
+   * id, in a stable order. */
+  async listAgentSettings(accountId: AccountId): Promise<AgentSettingRecord[]> {
+    return await this.sql<AgentSettingRecord[]>`
+      SELECT agent_id, enabled, command FROM account_agent_settings
+      WHERE account_id = ${accountId}
+      ORDER BY agent_id
+    `;
+  }
+  /** Replace one agent's record (last write wins) and return the account's full configuration as of
+   * this write, in one transaction serialized per account. A new agent id beyond `maxRows` is
+   * refused with `{ capped: true }` and nothing is written. */
+  async setAgentSetting(
+    accountId: AccountId,
+    setting: AgentSettingRecord,
+    updatedAt: number,
+    maxRows: number,
+  ): Promise<{ capped: true } | { capped: false; agents: AgentSettingRecord[] }> {
+    return await this.transaction(async (tx) => {
+      await tx.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-settings:${accountId}`}, 0))`;
+      const [counted] = await tx.sql<{ others: number }[]>`
+        SELECT count(*)::int AS others FROM account_agent_settings
+        WHERE account_id = ${accountId} AND agent_id <> ${setting.agentId}
+      `;
+      if ((counted?.others ?? 0) >= maxRows) return { capped: true } as const;
+      await tx.sql`
+        INSERT INTO account_agent_settings (account_id, agent_id, enabled, command, updated_at)
+        VALUES (${accountId}, ${setting.agentId}, ${setting.enabled}, ${setting.command}, ${updatedAt})
+        ON CONFLICT (account_id, agent_id) DO UPDATE SET
+          enabled = excluded.enabled,
+          command = excluded.command,
+          updated_at = excluded.updated_at
+      `;
+      return { capped: false, agents: await tx.listAgentSettings(accountId) } as const;
+    });
   }
 
   /* ---------------------------- devices ---------------------------- */

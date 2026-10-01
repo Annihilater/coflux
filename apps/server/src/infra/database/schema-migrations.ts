@@ -1318,6 +1318,21 @@ CREATE INDEX idx_device_join_keys_account ON coflux.device_join_keys(account_id,
 CREATE INDEX idx_device_join_keys_expires ON coflux.device_join_keys(expires_at);
 `;
 
+/** Version 9 (plan 20261002-account-agent-settings): the account's agent launch settings — which
+ * coding agents the desktop's new-tab menu offers and the command typed to launch each. One row per
+ * (account, agent id); the center does not know the agent catalog, so `agent_id` is an opaque token
+ * the hub bounds. Only adds a table: a server rolled back to a build without it simply ignores it. */
+const ACCOUNT_AGENT_SETTINGS_SCHEMA_SQL = `
+CREATE TABLE coflux.account_agent_settings (
+  account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL,
+  command TEXT NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (account_id, agent_id)
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1378,6 +1393,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "device_join_keys",
     definition: DEVICE_JOIN_KEYS_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(DEVICE_JOIN_KEYS_SCHEMA_SQL); },
+  },
+  {
+    version: 9,
+    name: "account_agent_settings",
+    definition: ACCOUNT_AGENT_SETTINGS_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(ACCOUNT_AGENT_SETTINGS_SCHEMA_SQL); },
   },
 ];
 

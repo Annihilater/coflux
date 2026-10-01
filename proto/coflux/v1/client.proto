@@ -219,6 +219,7 @@ message ClientToServer {
     DeviceTailcatFailed device_tailcat_failed = 46;
     DeviceJoinKeyCreate device_join_key_create = 47;
     DirectoryWorkspaceEnsure directory_workspace_ensure = 48;
+    AgentSettingSet agent_setting_set = 49;
   }
 }
 
@@ -236,6 +237,10 @@ message AuthOk {
   // token、用户已删）就不设本字段，认证照常成功——身份查询永远不是拒绝理由。
   optional string login_name = 4;
   bool notification_inbox = 5;
+  // This center stores the account's agent launch settings (plan 20261002-account-agent-settings):
+  // it sends AgentSettingsUpdated after the subscribe snapshot and accepts AgentSettingSet. False
+  // (an older center) tells the client "not supported" apart from "nothing configured yet".
+  bool agent_settings = 7;
 }
 
 message AuthError {
@@ -428,6 +433,7 @@ message ServerToClient {
     AnnotationsSummaryUpdated annotations_summary_updated = 46;
     ExecutorRunsUpdated executor_runs_updated = 47;
     DirectoryWorkspaceEnsured directory_workspace_ensured = 48;
+    AgentSettingsUpdated agent_settings_updated = 49;
   }
 }
 
@@ -473,4 +479,31 @@ message NotificationChanged {
   bool created = 7;
   string request_id = 8;
   string error = 9;
+}
+
+// Account-level agent launch settings (plan 20261002-account-agent-settings): which coding agents the
+// desktop's new-tab menu offers and the command typed to launch each. One record per agent id; the
+// center does not know the agent catalog and treats `agent_id` as an opaque bounded token.
+message AgentSetting {
+  string agent_id = 1;
+  bool enabled = 2;
+  string command = 3;
+}
+// Replace one agent's record for the signed-in account (last write wins, per agent). Answered with
+// AgentSettingsUpdated carrying the same request_id.
+message AgentSettingSet {
+  string request_id = 1;
+  string agent_id = 2;
+  bool enabled = 3;
+  string command = 4;
+}
+// The account's full agent configuration. Sent to every subscribed client of the account right after
+// the subscribe snapshot (empty request_id) and after every accepted AgentSettingSet (request_id of
+// that write, broadcast to all subscribed clients and also sent to an unsubscribed writer). A
+// non-empty `error` answers a rejected write, goes only to the writer and carries no configuration:
+// the client must not treat its empty `agents` as the account's configuration.
+message AgentSettingsUpdated {
+  repeated AgentSetting agents = 1;
+  string request_id = 2;
+  string error = 3;
 }
