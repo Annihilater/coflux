@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { KeyRound, X } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { Text } from "@astryxdesign/core/Text";
+import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import type { SecretAnswer, SecretAnswerResult, SecretRequestState } from "@coflux/client";
 
-import { phaseAfterAnswer, type SecretCardPhase } from "@/components/workbench/secret-request";
+import { multilineSecretFromPaste, phaseAfterAnswer, type SecretCardPhase } from "@/components/workbench/secret-request";
 
 type AnswerSecret = (requestId: string, answer: SecretAnswer) => Promise<SecretAnswerResult>;
 
@@ -18,6 +19,12 @@ type AnswerSecret = (requestId: string, answer: SecretAnswer) => Promise<SecretA
  * The typed value stays in this component's state until it is sent to the device's worker over the
  * end-to-end Device channel; it is cleared once the card closes. Notification and badge come from
  * the request's inbox entry, not from here.
+ *
+ * Multi-line values (plan 20261002-secret-skill): a password input flattens line breaks before
+ * `onChange` sees the text, so the paste event is the only place the original exists. A paste with
+ * an inner line break (`multilineSecretFromPaste`) replaces the value and swaps the field for a
+ * masked textarea, where Enter inserts a line break and ⌘Enter submits. There is no manual toggle;
+ * any other paste, typing and Enter-to-submit behave as in the single-line field.
  */
 export function SecretRequestCards({
   requests,
@@ -53,7 +60,19 @@ function SecretRequestCard({
   onAnswer: AnswerSecret;
 }) {
   const [value, setValue] = useState("");
+  const [multiline, setMultiline] = useState(false);
   const [phase, setPhase] = useState<SecretCardPhase>({ kind: "pending" });
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+
+  // The textarea replaces the focused password input: carry the focus over, caret at the end.
+  useEffect(() => {
+    if (!multiline) return;
+    const area = areaRef.current;
+    if (!area) return;
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+  }, [multiline]);
+
   if (phase.kind === "closed") return null;
   const submitting = phase.kind === "submitting";
 
@@ -65,6 +84,27 @@ function SecretRequestCard({
     // A closed card forgets the value; a failed one keeps it for the retry.
     if (next.kind === "closed") setValue("");
     setPhase(next);
+  }
+
+  // Bubbles up from the single-line input; cancelling it here still stops the input's own paste.
+  function onSingleLinePaste(event: ClipboardEvent<HTMLDivElement>) {
+    if (multiline || submitting) return;
+    const pasted = multilineSecretFromPaste(event.clipboardData.getData("text/plain"));
+    if (pasted === null) return;
+    event.preventDefault();
+    setValue(pasted);
+    setMultiline(true);
+  }
+
+  function onMultilineKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Enter" || !event.metaKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    void submit({ kind: "provide", value });
+  }
+
+  // The masked text must not leave the field in clear text through the clipboard or a drag either.
+  function blockExport(event: { preventDefault(): void }) {
+    event.preventDefault();
   }
 
   const deadline = new Date(request.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -99,20 +139,43 @@ function SecretRequestCard({
           <div className="mt-0.5 whitespace-pre-wrap break-words text-base">{request.reason}</div>
         </div>
       ) : null}
-      <div className="mt-2">
-        <TextInput
-          label={`${request.name} 的值`}
-          isLabelHidden
-          type="password"
-          autoComplete="off"
-          value={value}
-          onChange={(next) => setValue(next)}
-          onEnter={() => void submit({ kind: "provide", value })}
-          placeholder={`粘贴或输入 ${request.name}`}
-          isDisabled={submitting}
-          width="100%"
-        />
+      <div className="mt-2" onPaste={onSingleLinePaste}>
+        {multiline ? (
+          // -webkit-text-security draws every character as a disc while keeping the line structure.
+          <div className="[&_textarea]:[-webkit-text-security:disc]">
+            <TextArea
+              ref={areaRef}
+              label={`${request.name} 的值`}
+              isLabelHidden
+              autoComplete="off"
+              hasSpellCheck={false}
+              rows={5}
+              value={value}
+              onChange={(next) => setValue(next)}
+              onKeyDown={onMultilineKeyDown}
+              onCopy={blockExport}
+              onCut={blockExport}
+              onDragStart={blockExport}
+              isDisabled={submitting}
+              width="100%"
+            />
+          </div>
+        ) : (
+          <TextInput
+            label={`${request.name} 的值`}
+            isLabelHidden
+            type="password"
+            autoComplete="off"
+            value={value}
+            onChange={(next) => setValue(next)}
+            onEnter={() => void submit({ kind: "provide", value })}
+            placeholder={`粘贴或输入 ${request.name}`}
+            isDisabled={submitting}
+            width="100%"
+          />
+        )}
       </div>
+      {multiline ? <div className="mt-1 text-sm text-muted-foreground">多行值，换行原样保留 · ⌘Enter 提供</div> : null}
       {phase.kind === "failed" ? (
         <div role="alert" className="mt-1.5">
           <Text type="supporting">{phase.error}，可以重试。</Text>

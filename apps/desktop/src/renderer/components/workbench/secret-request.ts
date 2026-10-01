@@ -41,6 +41,24 @@ export function secretRequestsForTask(
     .sort((a, b) => a.createdAt - b.createdAt || a.requestId.localeCompare(b.requestId));
 }
 
+/**
+ * What a paste into the single-line secret field turns into (plan 20261002-secret-skill). A line
+ * break is LF, CRLF or a lone CR. Text whose line breaks are only at its start or end — a key copied
+ * from a terminal or a file with a trailing newline — returns null: it stays a single-line paste and
+ * the password field drops those line breaks, exactly as before. Only a line break left between
+ * content once the surrounding ones are ignored switches the field to multi-line; the value is then
+ * the pasted text with every CRLF and lone CR normalized to LF and nothing else changed, trailing
+ * newline included (OpenSSH private keys need theirs). LF is also what a textarea's value holds by
+ * specification, so a value pasted and then edited stays consistent.
+ *
+ * This is the one place a user's secret can be altered silently: keep the tests in step.
+ */
+export function multilineSecretFromPaste(text: string): string | null {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const inner = normalized.replace(/^\n+/, "").replace(/\n+$/, "");
+  return inner.includes("\n") ? normalized : null;
+}
+
 /** Where a card is. `closed` removes it at once, before the live set catches up. */
 export type SecretCardPhase =
   | { kind: "pending" }
