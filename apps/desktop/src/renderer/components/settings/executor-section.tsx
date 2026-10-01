@@ -106,7 +106,8 @@ export function ExecutorSection({ bridge, client }: { bridge: DesktopBridge; cli
     };
   }, [bridge, settings]);
 
-  const models = catalog?.models ?? [];
+  // Memoized so an absent catalog does not hand the effect and the search source a new array every render.
+  const models = useMemo(() => catalog?.models ?? [], [catalog]);
 
   // 已保存的那个模型要显示出来，但它只有在目录里能找到时才算数——找不到说明 provider 被删了或
   // 模型下架了，这时候留空比显示一个选不中的名字诚实。

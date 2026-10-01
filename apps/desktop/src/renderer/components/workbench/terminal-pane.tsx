@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -244,9 +244,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
-  // Read by the OSC 133 handler registered once at mount.
-  const onPromptStartRef = useRef(props.onPromptStart);
-  onPromptStartRef.current = props.onPromptStart;
+  // Called by the OSC 133 handler registered once at mount, with the latest callback.
+  const promptStarted = useEffectEvent((taskId: string) => props.onPromptStart?.(taskId));
   const liveRef = useRef({
     visible: props.visible,
     focused: props.focused,
@@ -277,8 +276,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   });
 
   // 挂载时创建 xterm 等命令式资源，只跑一次：TerminalPane 以 taskId 为 React key，
-  // 同一实例生命周期内 taskId 不变，无需把 props 列进依赖数组。
-  useEffect(() => {
+  // 同一实例生命周期内 taskId 不变。The setup is an effect event: it reads the props of the render it
+  // runs in (the mount) without making them dependencies, and the effect below runs it once.
+  const mountTerminal = useEffectEvent((): (() => void) | undefined => {
     const host = hostRef.current;
     if (!host) return;
 
@@ -607,7 +607,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       const current = commands[commands.length - 1];
       if (mark.kind === "prompt-start") {
         beginCommand();
-        onPromptStartRef.current?.(props.taskId);
+        promptStarted(props.taskId);
       } else if (mark.kind === "command-start" && current) {
         current.start = terminal.registerMarker(0);
         current.state = "running";
@@ -912,16 +912,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       searchAddonRef.current = null;
       commandsRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  });
+  useEffect(() => mountTerminal(), []);
 
   // sessionReady 门控：先注册 ptyOutput consumer，再通知上层可以 attach——
   // 否则 attach 回放的 scrollback 字节会在 consumer 注册前到达而丢失。
-  useEffect(() => {
-    const sessionId = props.sessionId;
+  // Runs whenever the session changes; the callbacks it hands over are read from that render's props.
+  const attachSession = useEffectEvent((sessionId: string): (() => void) | undefined => {
     const terminal = terminalRef.current;
     const controller = controllerRef.current;
-    if (!sessionId || !terminal || !controller) return;
+    if (!terminal || !controller) return;
     const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
       if (replace) {
         // gap 恢复：快照是渲染好的屏幕，里面没有 OSC 133，旧的命令边界跟着这一屏一起作废。
@@ -933,8 +933,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     props.onSessionReady(props.taskId, sessionId, controller);
     return unregister;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.sessionId]);
+  });
+  const sessionId = props.sessionId;
+  useEffect(() => {
+    if (!sessionId) return;
+    return attachSession(sessionId);
+  }, [sessionId]);
 
   // Becoming visible refits (a hidden pane's fit is a no-op, so the size is stale); becoming the
   // focused pane also takes the keyboard. Only one pane is ever focused, so only one takes it.
@@ -1042,9 +1046,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [props.focused, paperOpen, executorExpanded]);
 
   // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
-  useEffect(() => {
+  // Adjusted during render when `visible` flips.
+  const [syncedVisible, setSyncedVisible] = useState(props.visible);
+  if (props.visible !== syncedVisible) {
+    setSyncedVisible(props.visible);
     if (!props.visible) setPaperOpen(false);
-  }, [props.visible]);
+  }
 
   // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
   useEffect(() => {

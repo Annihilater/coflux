@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Folder, GitBranch, Globe, Monitor, SquareTerminal, type LucideIcon } from "lucide-react";
 import {
   CommandPalette,
@@ -202,21 +202,28 @@ export function NavigationPalette(props: NavigationPaletteProps) {
   const snapshotRef = useRef<PaletteSnapshot>(EMPTY_PALETTE_SNAPSHOT);
   const recentRef = useRef<readonly string[]>([]);
   const filterRef = useRef<PaletteFilter>("all");
-  const wasOpenRef = useRef(false);
+  const [wasOpen, setWasOpen] = useState(false);
   // One CommandPalette instance per open, because the component only resets itself along its own
   // close path: ⌘P pressed a second time flips `isOpen` from the outside, and the query, its
   // results and the highlight index would all still be there when the palette came back. The key
   // changes on open and never on close, so the instance that is on screen is always the one that
   // handles its own dismissal — including handing focus back to the terminal.
-  const openEpochRef = useRef(0);
+  const [openEpoch, setOpenEpoch] = useState(0);
   const [filter, setFilter] = useState<PaletteFilter>("all");
 
-  if (props.isOpen !== wasOpenRef.current) {
-    wasOpenRef.current = props.isOpen;
-    filterRef.current = "all";
+  // Adjusted during render when `isOpen` flips: the state updates re-run this render before it
+  // commits, so the instance that mounts already has its key.
+  if (props.isOpen !== wasOpen) {
+    setWasOpen(props.isOpen);
     setFilter("all");
-    if (props.isOpen) {
-      openEpochRef.current += 1;
+    if (props.isOpen) setOpenEpoch((epoch) => epoch + 1);
+  }
+
+  // The frozen data is written in the commit that opens (or closes) the palette: layout effects run
+  // before the new instance's own effect bootstraps the search source, which reads these refs.
+  const freeze = useEffectEvent((isOpen: boolean) => {
+    filterRef.current = "all";
+    if (isOpen) {
       const state = props.client.store.getState();
       snapshotRef.current = buildPaletteSnapshot({
         projects: state.projects,
@@ -235,7 +242,11 @@ export function NavigationPalette(props: NavigationPaletteProps) {
       snapshotRef.current = EMPTY_PALETTE_SNAPSHOT;
       recentRef.current = [];
     }
-  }
+  });
+  const isOpen = props.isOpen;
+  useLayoutEffect(() => {
+    freeze(isOpen);
+  }, [isOpen]);
 
   const searchSource = useMemo<SearchSource<PaletteItem>>(
     () => ({
@@ -269,7 +280,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
 
   return (
     <CommandPalette<PaletteItem>
-      key={openEpochRef.current}
+      key={openEpoch}
       isOpen={props.isOpen}
       onOpenChange={props.onOpenChange}
       searchSource={searchSource}

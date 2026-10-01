@@ -90,32 +90,45 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
 
   const listLength = step === "device" ? filteredDaemons.length : filteredEntries.length;
 
+  // Opening (and a device list change while open) starts the wizard over. Adjusted during render
+  // when either changes; focusing the device search stays an effect, as before.
+  const [resetFor, setResetFor] = useState<{ open: boolean; daemons: DaemonInfo[] } | null>(null);
+  if (resetFor === null || resetFor.open !== props.open || resetFor.daemons !== props.daemons) {
+    setResetFor({ open: props.open, daemons: props.daemons });
+    if (props.open) {
+      setStep("device");
+      setQuery("");
+      setHomeAbs("");
+      setCwdAbs("");
+      setEntries([]);
+      setPathFilter("");
+      setShowHidden(false);
+      setHighlight(-1);
+      setError("");
+      setDaemonId("");
+      setLoading(false);
+    }
+  }
   useEffect(() => {
     if (!props.open) return;
-    setStep("device");
-    setQuery("");
-    setHomeAbs("");
-    setCwdAbs("");
-    setEntries([]);
-    setPathFilter("");
-    setShowHidden(false);
-    setHighlight(-1);
-    setError("");
-    setDaemonId("");
-    setLoading(false);
     queueMicrotask(() => deviceInputRef.current?.focus());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, props.daemons]);
 
-  useEffect(() => {
+  // The keyboard highlight starts over whenever the list it points into changes, and is clamped to
+  // the list's length; both adjusted during render.
+  const [highlightFor, setHighlightFor] = useState({ step, query, pathFilter, entries, showHidden });
+  if (
+    highlightFor.step !== step ||
+    highlightFor.query !== query ||
+    highlightFor.pathFilter !== pathFilter ||
+    highlightFor.entries !== entries ||
+    highlightFor.showHidden !== showHidden
+  ) {
+    setHighlightFor({ step, query, pathFilter, entries, showHidden });
     setHighlight(-1);
-  }, [step, query, pathFilter, entries, showHidden]);
-
-  useEffect(() => {
-    if (highlight >= 0 && highlight >= listLength) {
-      setHighlight(listLength === 0 ? -1 : listLength - 1);
-    }
-  }, [highlight, listLength]);
+  } else if (highlight >= 0 && highlight >= listLength) {
+    setHighlight(listLength === 0 ? -1 : listLength - 1);
+  }
 
   useEffect(() => {
     if (highlight < 0) return;

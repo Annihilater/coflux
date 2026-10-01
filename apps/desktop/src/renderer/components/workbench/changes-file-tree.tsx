@@ -99,9 +99,12 @@ export function ChangesFileTree({
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // The focus cursor follows a selection made elsewhere (restore on open, neighbour after refresh, F7).
-  useEffect(() => {
+  // Adjusted during render when `selectedPath` changes, instead of in an effect.
+  const [followedPath, setFollowedPath] = useState(selectedPath);
+  if (selectedPath !== followedPath) {
+    setFollowedPath(selectedPath);
     if (selectedPath) setFocusedKey(selectedPath);
-  }, [selectedPath]);
+  }
 
   useEffect(() => {
     if (!focusedKey) return;

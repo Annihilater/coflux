@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
@@ -259,9 +259,13 @@ function NewTabMenu({
   // from the last committed render, so it is switched off while the menu is open and stays off until
   // the trigger loses focus or the pointer comes back to it.
   const [tooltipQuiet, setTooltipQuiet] = useState(false);
-  useEffect(() => {
+  // Quieted when the menu opens: adjusted during render when `open` flips (null: not synced yet), so
+  // it is committed together with the open menu.
+  const [syncedOpen, setSyncedOpen] = useState<boolean | null>(null);
+  if (open !== syncedOpen) {
+    setSyncedOpen(open);
     if (open) setTooltipQuiet(true);
-  }, [open]);
+  }
   useEffect(() => {
     const trigger = anchorRef.current;
     if (!tooltipQuiet || !trigger) return;
@@ -437,7 +441,9 @@ function GroupSash({
   // cursor and text selection back, and tell the owner the drag is over. Pointer capture dies with
   // the element.
   const onEndRef = useRef(onEnd);
-  onEndRef.current = onEnd;
+  useLayoutEffect(() => {
+    onEndRef.current = onEnd;
+  });
   useEffect(
     () => () => {
       const drag = dragRef.current;
@@ -576,7 +582,7 @@ export function WorkspaceTerminal({
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
-  const seenDoneRef = useRef(new Set<string>());
+  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -586,11 +592,13 @@ export function WorkspaceTerminal({
   const dragEndedRef = useRef(true);
   // The drawn drag image: captured at dragstart, moved by a window dragover listener straight on the
   // DOM node (one transform per frame, no React render per pointer move).
+  // The state copy is what the ghost renders from; the ref is what the dragover listener moves.
   const dragGhostRef = useRef<DragGhost | null>(null);
+  const [dragGhost, setDragGhost] = useState<DragGhost | null>(null);
   const ghostNodeRef = useRef<HTMLDivElement | null>(null);
   // The last zone each group highlighted, so a highlight fading out stays where it was instead of
   // snapping back to the centre while it fades.
-  const lastZoneRef = useRef(new Map<string, LayoutSide | "center">());
+  const [lastZones, setLastZones] = useState<ReadonlyMap<string, LayoutSide | "center">>(() => new Map());
 
   useEffect(() => {
     if (!dragTaskId) return;
@@ -648,9 +656,8 @@ export function WorkspaceTerminal({
   }
 
   // pending 收敛：store 中分支已到目标值即清除；20s 兜底解锁（上报丢失时下次快照仍会纠正显示）
-  useEffect(() => {
-    if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
-  }, [pendingBranch, workspace?.branch]);
+  // Cleared during render as soon as the reported branch has reached the target.
+  if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
   useEffect(() => {
     if (!pendingBranch) return;
     const timer = window.setTimeout(() => setPendingBranch(null), 20_000);
@@ -663,11 +670,36 @@ export function WorkspaceTerminal({
   const geometry = layoutGeometry(layout);
   const singleGroup = geometry.groups.length === 1;
 
+  // Which finished agents have been seen, as of this render: a session is forgotten once its agent
+  // works again, and marked seen when its tab is on screen (this workspace is shown, the changes
+  // overlay is closed, and it is its group's active tab). Adjusted during render; the tabs below
+  // render from `seenNow`.
+  let seenNext = seenDone;
+  for (const { group } of geometry.groups) {
+    for (const taskId of group.tabs) {
+      if (isBrowserTabId(taskId) || isScreenTabId(taskId)) continue;
+      const sessionId = taskById.get(taskId)?.sessionId;
+      if (!sessionId) continue;
+      const agentState = sessionAgents[sessionId]?.state;
+      const done = agentState === "done" || agentState === "waiting";
+      if (agentState && !done && seenNext.has(sessionId)) {
+        const next = new Set(seenNext);
+        next.delete(sessionId);
+        seenNext = next;
+      } else if (done && active && !changesOpen && group.activeTabId === taskId && !seenNext.has(sessionId)) {
+        seenNext = new Set(seenNext).add(sessionId);
+      }
+    }
+  }
+  if (seenNext !== seenDone) setSeenDone(seenNext);
+  const seenNow = seenNext;
+
   function endDrag() {
     setDragTaskId(null);
     setDropTarget(null);
+    setDragGhost(null);
     dragGhostRef.current = null;
-    lastZoneRef.current.clear();
+    setLastZones((current) => (current.size === 0 ? current : new Map()));
   }
 
   function dropOnStrip(group: LayoutGroup, index: number) {
@@ -722,7 +754,9 @@ export function WorkspaceTerminal({
         // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
         dragEndedRef.current = false;
         window.setTimeout(() => {
-          if (!dragEndedRef.current) setDragTaskId(tabId);
+          if (dragEndedRef.current) return;
+          setDragTaskId(tabId);
+          setDragGhost(dragGhostRef.current);
         }, 0);
       },
       onDragEnd: () => {
@@ -990,14 +1024,7 @@ export function WorkspaceTerminal({
     const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
-    if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
-      seenDoneRef.current.delete(sessionId);
-    }
-    // Seen only when it is on screen: this workspace is shown, the changes overlay is closed, and it is its group's active tab.
-    if (active && !changesOpen && isActive && sessionId && (agentState === "done" || agentState === "waiting")) {
-      seenDoneRef.current.add(sessionId);
-    }
-    const seenDone = Boolean(sessionId && seenDoneRef.current.has(sessionId));
+    const tabSeenDone = Boolean(sessionId && seenNow.has(sessionId));
     // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
     const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
     // Moving a group's only tab into a new group beside that group would leave nothing behind.
@@ -1048,7 +1075,7 @@ export function WorkspaceTerminal({
               ) : state === "detached" ? (
                 <Unplug className="size-3 shrink-0 text-warning" />
               ) : agentEntry ? (
-                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={seenDone} className={bright ? "opacity-90" : "opacity-70"} />
+                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={tabSeenDone} className={bright ? "opacity-90" : "opacity-70"} />
               ) : launchedAgent ? (
                 <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
               ) : (
@@ -1296,8 +1323,7 @@ export function WorkspaceTerminal({
       {dragTaskId && !changesOpen
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
-            if (target) lastZoneRef.current.set(group.id, target);
-            const shownZone = target ?? lastZoneRef.current.get(group.id) ?? "center";
+            const shownZone = target ?? lastZones.get(group.id) ?? "center";
             return (
               <div
                 key={`drop:${group.id}`}
@@ -1308,7 +1334,10 @@ export function WorkspaceTerminal({
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
                   const zone = zoneAt(event);
-                  if (target !== zone) setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  if (target === zone) return;
+                  setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  // Remembered so the highlight fades out where it was instead of snapping to the centre.
+                  setLastZones((current) => (current.get(group.id) === zone ? current : new Map(current).set(group.id, zone)));
                 }}
                 onDragLeave={(event) => {
                   const next = event.relatedTarget;
@@ -1340,27 +1369,27 @@ export function WorkspaceTerminal({
 
       {/* The drag image, drawn here (see EMPTY_DRAG_IMAGE): an opaque tab that follows the pointer.
           Positioned by the dragover listener, fixed to the viewport, never a pointer target. */}
-      {dragTaskId && dragGhostRef.current ? (
+      {dragTaskId && dragGhost ? (
         <div
           ref={ghostNodeRef}
           aria-hidden
           className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
-          style={{ transform: `translate3d(${dragGhostRef.current.x - dragGhostRef.current.offsetX}px, ${dragGhostRef.current.y - dragGhostRef.current.offsetY}px, 0)` }}
+          style={{ transform: `translate3d(${dragGhost.x - dragGhost.offsetX}px, ${dragGhost.y - dragGhost.offsetY}px, 0)` }}
         >
           <div
             className="flex h-7 max-w-52 items-center gap-1.5 rounded-md border border-border bg-popover px-2.5 text-sm text-foreground shadow-lg transition-[opacity,transform] duration-150 ease-out starting:scale-95 starting:opacity-0"
-            style={{ minWidth: Math.min(dragGhostRef.current.width, 208) }}
+            style={{ minWidth: Math.min(dragGhost.width, 208) }}
           >
-            {dragGhostRef.current.browser ? (
-              <BrowserTabGlyph favicon={dragGhostRef.current.browser.favicon} loading={false} className="opacity-90" />
-            ) : dragGhostRef.current.screen ? (
+            {dragGhost.browser ? (
+              <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
+            ) : dragGhost.screen ? (
               <Monitor className="size-3 shrink-0 opacity-90" />
-            ) : dragGhostRef.current.file !== null ? (
-              <FileTypeIcon path={dragGhostRef.current.file} />
+            ) : dragGhost.file !== null ? (
+              <FileTypeIcon path={dragGhost.file} />
             ) : (
               <SquareTerminal className="size-3 shrink-0 opacity-90" />
             )}
-            <span className="truncate">{dragGhostRef.current.title}</span>
+            <span className="truncate">{dragGhost.title}</span>
           </div>
         </div>
       ) : null}

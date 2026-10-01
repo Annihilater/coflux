@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import {
   AppWindow,
@@ -261,6 +261,9 @@ function BrowserView({
   const [failure, setFailure] = useState<Failure | null>(null);
   const [editing, setEditing] = useState(false);
   const [addressText, setAddressText] = useState("");
+  // When editing began or the address text was last typed: the "now" suggestions are ranked against
+  // (read from the clock in those handlers, never during render).
+  const [typedAt, setTypedAt] = useState(0);
   const [highlight, setHighlight] = useState(-1);
   const [devtoolsOpen, setDevtoolsOpen] = useState(false);
   const [frozenFrame, setFrozenFrame] = useState<string | null>(null);
@@ -587,9 +590,8 @@ function BrowserView({
     liveRef.current = { url, title, mode, failure, visible, editing };
   });
 
-  function currentMode(): DesktopBrowserMode | null {
-    return runtime.modeOf(scope) ?? liveRef.current.mode;
-  }
+  // Read from the webview's event handlers at the moment the event fires.
+  const currentMode = useEffectEvent((): DesktopBrowserMode | null => runtime.modeOf(scope) ?? liveRef.current.mode);
 
   /** Loads a URL the address bar, a suggestion, a port or a retry resolved — always through main. */
   function navigate(target: string) {
@@ -685,13 +687,11 @@ function BrowserView({
   }, [guestId, annotatorKey]);
 
   // A detail card whose annotation is gone (deleted or confirmed, here or elsewhere) closes; a later
-  // 「撤销」 does not bring the card back.
-  useEffect(() => {
-    if (detail && annotations && !annotations.some((annotation) => annotation.annotationId === detail.id)) {
-      setDetail(null);
-      setDetailDirty(false);
-    }
-  }, [detail, annotations]);
+  // 「撤销」 does not bring the card back. Adjusted during render.
+  if (detail && annotations && !annotations.some((annotation) => annotation.annotationId === detail.id)) {
+    setDetail(null);
+    setDetailDirty(false);
+  }
 
   // The page area's size, for placing the comment card over the element (page CSS pixels scale onto it).
   useEffect(() => {
@@ -704,11 +704,6 @@ function BrowserView({
     observer.observe(region);
     return () => observer.disconnect();
   }, []);
-
-  // A tab that leaves the screen leaves annotate mode (a card being written stays).
-  useEffect(() => {
-    if (!visible) setAnnotating(false);
-  }, [visible]);
 
   // 1. Prepare the scope's partition (main decides local vs remote from the local daemon id).
   useEffect(() => {
@@ -913,32 +908,6 @@ function BrowserView({
     };
   }, [devtoolsOpen, guestId]);
 
-  // 框选截图: Escape leaves the frozen frame without capturing.
-  useEffect(() => {
-    if (!frozenFrame) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      cancelRegion();
-    }
-    window.addEventListener("keydown", onKeyDown, { capture: true });
-    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frozenFrame]);
-
-  // A tab that leaves the screen drops an unfinished region capture.
-  useEffect(() => {
-    if (!visible && frozenFrame) cancelRegion();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
-
-  // A blank new tab starts in its address bar.
-  useEffect(() => {
-    if (blank && entry.focused && visible) focusAddress();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   function cancelRegion() {
     const guest = guestIdRef.current;
     if (guest !== null) desktop.browserReleaseFreeze(guest);
@@ -946,6 +915,52 @@ function BrowserView({
     setSelection(null);
     selectionStartRef.current = null;
   }
+
+  // 框选截图: Escape leaves the frozen frame without capturing.
+  const cancelRegionOnEscape = useEffectEvent(() => cancelRegion());
+  useEffect(() => {
+    if (!frozenFrame) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      cancelRegionOnEscape();
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [frozenFrame]);
+
+  // A tab that leaves the screen leaves annotate mode (a card being written stays), and drops an
+  // unfinished region capture (what cancelRegion does). The state is adjusted during render when
+  // `visible` flips; releasing the freeze in main runs in an effect.
+  const [syncedVisible, setSyncedVisible] = useState<boolean | null>(null);
+  const [releaseFreezeOnHide, setReleaseFreezeOnHide] = useState(false);
+  if (visible !== syncedVisible) {
+    setSyncedVisible(visible);
+    if (!visible) setAnnotating(false);
+    if (visible) setReleaseFreezeOnHide(false);
+    else if (frozenFrame) {
+      setFrozenFrame(null);
+      setSelection(null);
+      setReleaseFreezeOnHide(true);
+    }
+  }
+  const releaseHiddenFreeze = useEffectEvent(() => {
+    const guest = guestIdRef.current;
+    if (guest !== null) desktop.browserReleaseFreeze(guest);
+    selectionStartRef.current = null;
+  });
+  useEffect(() => {
+    if (releaseFreezeOnHide) releaseHiddenFreeze();
+  }, [releaseFreezeOnHide]);
+
+  // A blank new tab starts in its address bar (checked once, as the view mounts).
+  const focusBlankAddress = useEffectEvent(() => {
+    if (blank && entry.focused && visible) focusAddress();
+  });
+  useEffect(() => {
+    focusBlankAddress();
+  }, []);
 
   async function captureVisible() {
     const guest = guestIdRef.current;
@@ -1036,7 +1051,7 @@ function BrowserView({
   }
 
   // Address bar suggestions: only while the user is editing what is there.
-  const suggestions: BrowserSuggestion[] = editing && addressText.trim() && addressText !== displayUrl(url) ? rankSuggestions(library, addressText, Date.now(), 8) : [];
+  const suggestions: BrowserSuggestion[] = editing && addressText.trim() && addressText !== displayUrl(url) ? rankSuggestions(library, addressText, typedAt, 8) : [];
 
   function submitAddress() {
     const picked = highlight >= 0 ? suggestions[highlight] : undefined;
@@ -1159,6 +1174,7 @@ function BrowserView({
             className="h-6 w-full rounded-md bg-muted/60 px-2.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
             onFocus={(event) => {
               setAddressText(displayUrl(url));
+              setTypedAt(Date.now());
               setEditing(true);
               setHighlight(-1);
               const input = event.currentTarget;
@@ -1170,6 +1186,7 @@ function BrowserView({
             }}
             onChange={(event) => {
               setAddressText(event.target.value);
+              setTypedAt(Date.now());
               setEditing(true);
               setHighlight(-1);
             }}

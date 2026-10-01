@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AlertCircle, Check, Circle, LoaderCircle } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
@@ -61,12 +61,12 @@ export function DaemonOnboardingDialog(props: DaemonOnboardingDialogProps) {
 
 
   // 打开时按当下状态定起点：从账号菜单以「等待授权」进来直接是进度页；引导重新打开不沿用上次的标记
-  useEffect(() => {
-    if (!open) return;
-    setLocal({ started: state.status !== "not-installed", authError: null, fdaSettled: false });
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  // Adjusted during render when `open` flips (null: not synced yet); `state` is read as it is then.
+  const [syncedOpen, setSyncedOpen] = useState<boolean | null>(null);
+  if (open !== syncedOpen) {
+    setSyncedOpen(open);
+    if (open) setLocal({ started: state.status !== "not-installed", authError: null, fdaSettled: false });
+  }
 
   const current = { ...local, authError: props.authError };
   const page = resolveOnboardingPage(state, current);

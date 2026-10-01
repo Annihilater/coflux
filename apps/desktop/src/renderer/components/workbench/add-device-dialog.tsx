@@ -114,13 +114,13 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
     setJoinKey(result.ok ? { status: "ready", key: result.key, expiresAt: result.expiresAt } : { status: "error", error: result.error, previous: replaces });
   }
 
-  // First show of the Headless tab in this opening mints its key; tab switches keep it. Declared after
-  // the generation bump so the mint belongs to the current opening.
-  useEffect(() => {
-    if (open && tab === "headless" && joinKey.status === "idle") void mintJoinKey("");
-    // mintJoinKey is recreated every render; the state it reads is captured at call time.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, tab, joinKey.status]);
+  // First show of the Headless tab in this opening mints its key; tab switches keep it. Every opening
+  // starts on the Desktop tab with an idle key (the reset above), so the Headless tab is only ever
+  // reached by the user switching to it: the mint starts from that switch.
+  function selectTab(next: AddDeviceTab) {
+    setTab(next);
+    if (open && next === "headless" && joinKey.status === "idle") void mintJoinKey("");
+  }
 
   // Countdown: re-render once a second while a key is showing.
   const counting = open && joinKey.status === "ready";
@@ -130,10 +130,13 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
     return () => clearInterval(timer);
   }, [counting]);
 
-  useEffect(() => {
-    if (!open) return;
-    setTracker((previous) => advanceBaselineTracker(previous, status, daemons));
-  }, [open, status, daemons]);
+  // The baseline follows the connection and the device list while open. Adjusted during render
+  // whenever one of them changes (after the reset above, whose fresh tracker it then advances).
+  const [trackedFor, setTrackedFor] = useState<{ open: boolean; status: typeof status; daemons: typeof daemons } | null>(null);
+  if (trackedFor === null || trackedFor.open !== open || trackedFor.status !== status || trackedFor.daemons !== daemons) {
+    setTrackedFor({ open, status, daemons });
+    if (open) setTracker((previous) => advanceBaselineTracker(previous, status, daemons));
+  }
 
   // Freeze the first new device during render, so the frame that brings it also shows the success view.
   // Skipped on the reset render itself: `tracker` / `success` there still hold the previous opening's
@@ -187,7 +190,7 @@ export function AddDeviceDialog(props: AddDeviceDialogProps) {
         content={
           <LayoutContent>
             <VStack gap={4} hAlign="stretch">
-              <SegmentedControl value={tab} onChange={(value) => setTab(value === "headless" ? "headless" : "desktop")} label="接入方式" layout="fill" size="sm">
+              <SegmentedControl value={tab} onChange={(value) => selectTab(value === "headless" ? "headless" : "desktop")} label="接入方式" layout="fill" size="sm">
                 <SegmentedControlItem value="desktop" label="Desktop" />
                 <SegmentedControlItem value="headless" label="Headless" />
               </SegmentedControl>

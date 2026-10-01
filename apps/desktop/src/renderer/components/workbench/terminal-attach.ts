@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
@@ -37,8 +37,9 @@ export type TerminalAttach = {
   /** 横幅「重新打开」（plan 097）：在同一个 Tab 里起新 shell。 */
   reopenTask: (taskId: string) => void;
   /** Panes on screen = the active tab of every group of the selected workspace while the changes
-   * overlay is closed. The attach gate reads it, so Workbench writes it synchronously during render
-   * and in every layout commit (the same synchronous-read contract as before, now a set). */
+   * overlay is closed. The attach gate reads it, so Workbench writes it synchronously on every layout
+   * or overlay change and in a layout effect after every commit, before any pane's passive effect
+   * runs (the same synchronous-read contract as before, now a set). */
   setVisibleTaskIds: (taskIds: ReadonlySet<string>) => void;
   handleTerminalReady: (taskId: string, controller: TerminalController) => void;
   handleTerminalDispose: (taskId: string, controller: TerminalController) => void;
@@ -306,7 +307,9 @@ export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: read
     return controlStates[task.id] ?? (task.status === TaskStatus.RUNNING ? "idle" : "stopped");
   }
 
-  useEffect(() => {
+  // The ledger work below reads the state machine's other inputs as they are when it runs (refs and
+  // the store); only the task list triggers it.
+  const syncTasks = useEffectEvent((tasks: readonly Task[]) => {
     const ids = new Set(tasks.map((task) => task.id));
     // 只清理真正从快照消失的 task：换了工作区的 task 仍在这份全量列表里，账本原样保留，
     // 面板既不重建也不重新 attach（plan 104）。
@@ -349,14 +352,16 @@ export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: read
         if (sawLive || isVisible(task.id)) showExitedHistory(task, controller);
       }
     }
-    // 只跟踪 tasks（对应 Solid `on(tasks, ...)` 的显式单一依赖），
-    // 回调内其余状态一律读 ref/store 当下值，不纳入依赖数组。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  // 只跟踪 tasks（对应 Solid `on(tasks, ...)` 的显式单一依赖），
+  // 回调内其余状态一律读 ref/store 当下值（effect event）。
+  useEffect(() => {
+    syncTasks(tasks);
   }, [tasks]);
 
   // Device holder 被他端接管 → 置 detached、清 attach key、终端内写系统提示行。
   // 重新接管走 force claim（Tab 点击或横幅按钮）。
-  useEffect(() => {
+  const markDetached = useEffectEvent((detachedTaskIds: Iterable<string>) => {
     for (const taskId of detachedTaskIds) {
       const task = currentTask(taskId);
       if (!task || controlStatesRef.current[taskId] === "detached") continue;
@@ -365,15 +370,19 @@ export function useTerminalAttach(client: CofluxClient, { tasks }: { tasks: read
       updateControlState(taskId, "detached");
       controllersRef.current.get(taskId)?.writeSystem("控制权已被其它客户端接管，点击此 Tab 可重新接管");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    markDetached(detachedTaskIds);
   }, [detachedTaskIds]);
 
   // error 消息到达时清 launching 态（taskStart 失败兜底）；乐观 tab 的收尾仍在工作区容器里。
-  useEffect(() => {
-    if (!lastError) return;
+  const stopLaunching = useEffectEvent(() => {
     for (const taskId of launchingTaskIdsRef.current) updateControlState(taskId, "stopped");
     launchingTaskIdsRef.current.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (!lastError) return;
+    stopLaunching();
   }, [lastError]);
 
   // The old "workspace became visible → refit and attach" effect is gone: Workbench now diffs the

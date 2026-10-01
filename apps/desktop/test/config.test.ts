@@ -304,7 +304,7 @@ test("release.yml: mirror upload before release, pointers after it, stable only,
 
 test("ci.yml 带 desktop 质量门", () => {
   const ci = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
-  assert.match(ci, /pnpm -C apps\/desktop typecheck && pnpm -C apps\/desktop test && pnpm -C apps\/desktop build/);
+  assert.match(ci, /pnpm -C apps\/desktop typecheck && pnpm -C apps\/desktop lint && pnpm -C apps\/desktop test && pnpm -C apps\/desktop build/);
 });
 
 // The remote screen helper (plan 20260929-remote-desktop) ships with the desktop app only: built

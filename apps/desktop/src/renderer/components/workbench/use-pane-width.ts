@@ -2,6 +2,25 @@ import { useEffect, useRef, useState } from "react";
 
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 
+type PaneResize = {
+  pointerId: number;
+  startX: number;
+  startWidth: number;
+  handle: HTMLDivElement;
+  previousCursor: string;
+  previousUserSelect: string;
+};
+
+/** Ends a resize in progress, if any: the document's cursor and selection go back, capture is released. */
+function restoreResizeEnvironment(resizeRef: { current: PaneResize | null }) {
+  const resize = resizeRef.current;
+  if (!resize) return;
+  resizeRef.current = null;
+  document.documentElement.style.cursor = resize.previousCursor;
+  document.documentElement.style.userSelect = resize.previousUserSelect;
+  if (resize.handle.hasPointerCapture(resize.pointerId)) resize.handle.releasePointerCapture(resize.pointerId);
+}
+
 /**
  * A draggable pane width persisted in localStorage, with the same feel as the sidebar's
  * (pointer capture, persist on release, double-click restores the default), returned as the same
@@ -22,14 +41,7 @@ export function usePaneWidth(options: { storageKey: string; defaultWidth: number
   });
   const [isResizing, setIsResizing] = useState(false);
   const widthRef = useRef(width);
-  const resizeRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startWidth: number;
-    handle: HTMLDivElement;
-    previousCursor: string;
-    previousUserSelect: string;
-  } | null>(null);
+  const resizeRef = useRef<PaneResize | null>(null);
 
   function persist(value: number) {
     try {
@@ -45,29 +57,15 @@ export function usePaneWidth(options: { storageKey: string; defaultWidth: number
     setWidth(clamped);
   }
 
-  function restoreResizeEnvironment() {
-    const resize = resizeRef.current;
-    if (!resize) return;
-    resizeRef.current = null;
-    document.documentElement.style.cursor = resize.previousCursor;
-    document.documentElement.style.userSelect = resize.previousUserSelect;
-    if (resize.handle.hasPointerCapture(resize.pointerId)) resize.handle.releasePointerCapture(resize.pointerId);
-  }
-
   function finishResize(pointerId: number) {
     if (resizeRef.current?.pointerId !== pointerId) return;
-    restoreResizeEnvironment();
+    restoreResizeEnvironment(resizeRef);
     setIsResizing(false);
     persist(widthRef.current);
   }
 
-  useEffect(
-    () => () => {
-      restoreResizeEnvironment();
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
+  // Unmounted mid-drag: put the document back.
+  useEffect(() => () => restoreResizeEnvironment(resizeRef), []);
 
   return {
     width,

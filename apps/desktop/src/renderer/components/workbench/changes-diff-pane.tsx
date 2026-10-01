@@ -599,12 +599,16 @@ function DiffBody({
   }, [dragging]);
 
   // Without the capability (or while the device is unreachable) there is no gutter and no composer.
+  // Losing it discards an in-progress drag and an unsent draft (adjusted during render, when it flips).
   const canWrite = comments.canWrite;
-  useEffect(() => {
-    if (canWrite) return;
-    setDrag(null);
-    setDraft(null);
-  }, [canWrite]);
+  const [hadWrite, setHadWrite] = useState(canWrite);
+  if (canWrite !== hadWrite) {
+    setHadWrite(canWrite);
+    if (!canWrite) {
+      setDrag(null);
+      setDraft(null);
+    }
+  }
 
   const top = (
     <>

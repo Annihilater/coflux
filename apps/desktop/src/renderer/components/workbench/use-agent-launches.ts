@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 import type { CofluxClient } from "@coflux/client";
 
@@ -133,8 +133,12 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
     }
     if (launchesRef.current.size === 0) stopPolling();
   }
+  // The polling interval is started from event handlers, so it calls the latest tick through a ref
+  // kept current after every commit.
   const tickRef = useRef(tick);
-  tickRef.current = tick;
+  useLayoutEffect(() => {
+    tickRef.current = tick;
+  });
 
   function startPolling() {
     if (pollRef.current !== undefined) return;
@@ -145,10 +149,12 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
 
   // Records follow the task list: a task that is gone takes its record with it. Only once the first
   // snapshot is in — an empty pre-login or offline list would wipe every record.
+  const pruneRecords = useEffectEvent((liveTaskIds: ReadonlySet<string>) => {
+    commitRecords(pruneAgentTabRecords(recordsRef.current, liveTaskIds));
+  });
   useEffect(() => {
     if (!snapshotReady) return;
-    commitRecords(pruneAgentTabRecords(recordsRef.current, new Set(tasks.map((task) => task.id))));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    pruneRecords(new Set(tasks.map((task) => task.id)));
   }, [tasks, snapshotReady]);
 
   return {

@@ -251,7 +251,7 @@ export class DeckController {
   /* ---------------------------------------------------------------- elements */
 
   /** The card layer's root: the pane's box, used for size and pointer coordinates. */
-  readonly rootRef = (el: HTMLElement | null): void => {
+  readonly attachRoot = (el: HTMLElement | null): void => {
     if (el === this.root) return;
     if (this.root) this.detachRoot();
     if (!el) return;
@@ -265,7 +265,7 @@ export class DeckController {
   };
 
   /** The deck container: carries the hover/switch/lifted data attributes the CSS keys on. */
-  readonly deckRef = (el: HTMLElement | null): void => {
+  readonly attachDeck = (el: HTMLElement | null): void => {
     this.deckEl = el;
     this.flags = { hover: false, switching: false, lifted: false };
     if (el) {
@@ -276,12 +276,12 @@ export class DeckController {
     }
   };
 
-  readonly overlayRef = (el: HTMLElement | null): void => {
+  readonly attachOverlay = (el: HTMLElement | null): void => {
     this.overlayEl = el;
     if (el) this.render();
   };
 
-  readonly backdropRef = (el: HTMLElement | null): void => {
+  readonly attachBackdrop = (el: HTMLElement | null): void => {
     this.backdropEl = el;
     if (el) this.render();
   };
