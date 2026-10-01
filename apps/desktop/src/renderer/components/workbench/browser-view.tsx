@@ -261,6 +261,9 @@ function BrowserView({
   const [failure, setFailure] = useState<Failure | null>(null);
   const [editing, setEditing] = useState(false);
   const [addressText, setAddressText] = useState("");
+  // When editing began or the address text was last typed: the "now" suggestions are ranked against
+  // (read from the clock in those handlers, never during render).
+  const [typedAt, setTypedAt] = useState(0);
   const [highlight, setHighlight] = useState(-1);
   const [devtoolsOpen, setDevtoolsOpen] = useState(false);
   const [frozenFrame, setFrozenFrame] = useState<string | null>(null);
@@ -905,6 +908,14 @@ function BrowserView({
     };
   }, [devtoolsOpen, guestId]);
 
+  function cancelRegion() {
+    const guest = guestIdRef.current;
+    if (guest !== null) desktop.browserReleaseFreeze(guest);
+    setFrozenFrame(null);
+    setSelection(null);
+    selectionStartRef.current = null;
+  }
+
   // 框选截图: Escape leaves the frozen frame without capturing.
   const cancelRegionOnEscape = useEffectEvent(() => cancelRegion());
   useEffect(() => {
@@ -950,14 +961,6 @@ function BrowserView({
   useEffect(() => {
     focusBlankAddress();
   }, []);
-
-  function cancelRegion() {
-    const guest = guestIdRef.current;
-    if (guest !== null) desktop.browserReleaseFreeze(guest);
-    setFrozenFrame(null);
-    setSelection(null);
-    selectionStartRef.current = null;
-  }
 
   async function captureVisible() {
     const guest = guestIdRef.current;
@@ -1048,7 +1051,7 @@ function BrowserView({
   }
 
   // Address bar suggestions: only while the user is editing what is there.
-  const suggestions: BrowserSuggestion[] = editing && addressText.trim() && addressText !== displayUrl(url) ? rankSuggestions(library, addressText, Date.now(), 8) : [];
+  const suggestions: BrowserSuggestion[] = editing && addressText.trim() && addressText !== displayUrl(url) ? rankSuggestions(library, addressText, typedAt, 8) : [];
 
   function submitAddress() {
     const picked = highlight >= 0 ? suggestions[highlight] : undefined;
@@ -1171,6 +1174,7 @@ function BrowserView({
             className="h-6 w-full rounded-md bg-muted/60 px-2.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:bg-background"
             onFocus={(event) => {
               setAddressText(displayUrl(url));
+              setTypedAt(Date.now());
               setEditing(true);
               setHighlight(-1);
               const input = event.currentTarget;
@@ -1182,6 +1186,7 @@ function BrowserView({
             }}
             onChange={(event) => {
               setAddressText(event.target.value);
+              setTypedAt(Date.now());
               setEditing(true);
               setHighlight(-1);
             }}
