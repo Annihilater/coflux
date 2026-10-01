@@ -684,13 +684,11 @@ function BrowserView({
   }, [guestId, annotatorKey]);
 
   // A detail card whose annotation is gone (deleted or confirmed, here or elsewhere) closes; a later
-  // 「撤销」 does not bring the card back.
-  useEffect(() => {
-    if (detail && annotations && !annotations.some((annotation) => annotation.annotationId === detail.id)) {
-      setDetail(null);
-      setDetailDirty(false);
-    }
-  }, [detail, annotations]);
+  // 「撤销」 does not bring the card back. Adjusted during render.
+  if (detail && annotations && !annotations.some((annotation) => annotation.annotationId === detail.id)) {
+    setDetail(null);
+    setDetailDirty(false);
+  }
 
   // The page area's size, for placing the comment card over the element (page CSS pixels scale onto it).
   useEffect(() => {
@@ -703,11 +701,6 @@ function BrowserView({
     observer.observe(region);
     return () => observer.disconnect();
   }, []);
-
-  // A tab that leaves the screen leaves annotate mode (a card being written stays).
-  useEffect(() => {
-    if (!visible) setAnnotating(false);
-  }, [visible]);
 
   // 1. Prepare the scope's partition (main decides local vs remote from the local daemon id).
   useEffect(() => {
@@ -913,29 +906,49 @@ function BrowserView({
   }, [devtoolsOpen, guestId]);
 
   // 框选截图: Escape leaves the frozen frame without capturing.
+  const cancelRegionOnEscape = useEffectEvent(() => cancelRegion());
   useEffect(() => {
     if (!frozenFrame) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      cancelRegion();
+      cancelRegionOnEscape();
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frozenFrame]);
 
-  // A tab that leaves the screen drops an unfinished region capture.
+  // A tab that leaves the screen leaves annotate mode (a card being written stays), and drops an
+  // unfinished region capture (what cancelRegion does). The state is adjusted during render when
+  // `visible` flips; releasing the freeze in main runs in an effect.
+  const [syncedVisible, setSyncedVisible] = useState<boolean | null>(null);
+  const [releaseFreezeOnHide, setReleaseFreezeOnHide] = useState(false);
+  if (visible !== syncedVisible) {
+    setSyncedVisible(visible);
+    if (!visible) setAnnotating(false);
+    if (visible) setReleaseFreezeOnHide(false);
+    else if (frozenFrame) {
+      setFrozenFrame(null);
+      setSelection(null);
+      setReleaseFreezeOnHide(true);
+    }
+  }
+  const releaseHiddenFreeze = useEffectEvent(() => {
+    const guest = guestIdRef.current;
+    if (guest !== null) desktop.browserReleaseFreeze(guest);
+    selectionStartRef.current = null;
+  });
   useEffect(() => {
-    if (!visible && frozenFrame) cancelRegion();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+    if (releaseFreezeOnHide) releaseHiddenFreeze();
+  }, [releaseFreezeOnHide]);
 
-  // A blank new tab starts in its address bar.
-  useEffect(() => {
+  // A blank new tab starts in its address bar (checked once, as the view mounts).
+  const focusBlankAddress = useEffectEvent(() => {
     if (blank && entry.focused && visible) focusAddress();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    focusBlankAddress();
   }, []);
 
   function cancelRegion() {
