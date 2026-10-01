@@ -202,22 +202,26 @@ export function NavigationPalette(props: NavigationPaletteProps) {
   const snapshotRef = useRef<PaletteSnapshot>(EMPTY_PALETTE_SNAPSHOT);
   const recentRef = useRef<readonly string[]>([]);
   const filterRef = useRef<PaletteFilter>("all");
-  const wasOpenRef = useRef(false);
+  const [wasOpen, setWasOpen] = useState(false);
   // One CommandPalette instance per open, because the component only resets itself along its own
   // close path: ⌘P pressed a second time flips `isOpen` from the outside, and the query, its
   // results and the highlight index would all still be there when the palette came back. The key
   // changes on open and never on close, so the instance that is on screen is always the one that
   // handles its own dismissal — including handing focus back to the terminal.
-  const openEpochRef = useRef(0);
+  const [openEpoch, setOpenEpoch] = useState(0);
   const [filter, setFilter] = useState<PaletteFilter>("all");
 
-  if (props.isOpen !== wasOpenRef.current) {
-    wasOpenRef.current = props.isOpen;
+  // Adjusted during render when `isOpen` flips: the state updates re-run this render before it
+  // commits, so the instance that mounts already has its key and its frozen data.
+  if (props.isOpen !== wasOpen) {
+    setWasOpen(props.isOpen);
+    // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
     filterRef.current = "all";
     setFilter("all");
     if (props.isOpen) {
-      openEpochRef.current += 1;
+      setOpenEpoch((epoch) => epoch + 1);
       const state = props.client.store.getState();
+      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       snapshotRef.current = buildPaletteSnapshot({
         projects: state.projects,
         workspaces: state.workspaces,
@@ -229,10 +233,13 @@ export function NavigationPalette(props: NavigationPaletteProps) {
         canOpenBrowserTab: Boolean(props.onNewBrowserTab && props.current.workspaceId),
         canOpenScreenTab: Boolean(props.onNewScreenTab && props.current.workspaceId),
       });
+      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       recentRef.current = readRecentPlaces(props.recentStore);
     } else {
       // Nothing of the closed palette stays reachable: the next open builds its own.
+      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       snapshotRef.current = EMPTY_PALETTE_SNAPSHOT;
+      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       recentRef.current = [];
     }
   }
@@ -269,7 +276,7 @@ export function NavigationPalette(props: NavigationPaletteProps) {
 
   return (
     <CommandPalette<PaletteItem>
-      key={openEpochRef.current}
+      key={openEpoch}
       isOpen={props.isOpen}
       onOpenChange={props.onOpenChange}
       searchSource={searchSource}

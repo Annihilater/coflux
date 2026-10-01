@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import type { DaemonInfo, Project, Workspace } from "@coflux/protocol";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { Dialog as AstryxDialog, DialogHeader as AstryxDialogHeader } from "@astryxdesign/core/Dialog";
@@ -22,11 +22,16 @@ type WorkspaceRenameDialogProps = {
 export function WorkspaceRenameDialog(props: WorkspaceRenameDialogProps) {
   const [name, setName] = useState("");
 
-  useEffect(() => {
-    if (!props.open) return;
-    const workspace = props.workspace;
-    setName(workspace && workspace.name !== workspace.branch ? workspace.name : "");
-  }, [props.open, props.workspace]);
+  // Refill the field when the dialog opens, or when its workspace changes while open. Adjusted
+  // during render (the inputs it last filled from are kept in state) instead of in an effect.
+  const [filledFor, setFilledFor] = useState<{ open: boolean; workspace: Workspace | null } | null>(null);
+  if (filledFor === null || filledFor.open !== props.open || filledFor.workspace !== props.workspace) {
+    setFilledFor({ open: props.open, workspace: props.workspace });
+    if (props.open) {
+      const workspace = props.workspace;
+      setName(workspace && workspace.name !== workspace.branch ? workspace.name : "");
+    }
+  }
 
   function save() {
     if (!props.workspace) return;
@@ -75,11 +80,12 @@ type DeviceRenameDialogProps = {
 export function DeviceRenameDialog(props: DeviceRenameDialogProps) {
   const [name, setName] = useState("");
 
-  useEffect(() => {
-    if (!props.open) return;
-    const daemon = props.daemon;
-    setName(daemon?.name ?? "");
-  }, [props.open, props.daemon]);
+  // Refill the field when the dialog opens, or when its device changes while open (see WorkspaceRenameDialog).
+  const [filledFor, setFilledFor] = useState<{ open: boolean; daemon: DaemonInfo | null } | null>(null);
+  if (filledFor === null || filledFor.open !== props.open || filledFor.daemon !== props.daemon) {
+    setFilledFor({ open: props.open, daemon: props.daemon });
+    if (props.open) setName(props.daemon?.name ?? "");
+  }
 
   function save() {
     if (!props.daemon) return;
@@ -133,10 +139,12 @@ type ProjectRenameDialogProps = {
 export function ProjectRenameDialog(props: ProjectRenameDialogProps) {
   const [name, setName] = useState("");
 
-  useEffect(() => {
-    if (!props.open) return;
-    setName(props.project?.name ?? "");
-  }, [props.open, props.project]);
+  // Refill the field when the dialog opens, or when its project changes while open (see WorkspaceRenameDialog).
+  const [filledFor, setFilledFor] = useState<{ open: boolean; project: Project | null } | null>(null);
+  if (filledFor === null || filledFor.open !== props.open || filledFor.project !== props.project) {
+    setFilledFor({ open: props.open, project: props.project });
+    if (props.open) setName(props.project?.name ?? "");
+  }
 
   function save() {
     if (!props.project) return;

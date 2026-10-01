@@ -798,6 +798,7 @@ function BrowserView({
       }
       const fallback = loadFailure(failedUrl, detail.errorCode, detail.errorDescription);
       const guest = guestIdRef.current;
+      // oxlint-disable-next-line react/exhaustive-deps -- currentMode reads the live mode through runtime and liveRef when the event fires; adding it (a new function every render) would tear down and recreate the webview on every render
       if (currentMode() === "remote" && isLoopbackUrl(failedUrl) && guest !== null) {
         // The device tunnel failed in main, which remembers why. Asked here rather than pushed from
         // there: a push and this event travel different paths, and the generic page would win races.

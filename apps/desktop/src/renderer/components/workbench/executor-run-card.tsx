@@ -108,6 +108,7 @@ export function ExecutorRunCards({
   const lastSeen = useRef(new Map<string, ExecutorRunState>());
 
   const live = executorRunsForTask(runs, taskId);
+  // oxlint-disable-next-line react/refs -- lastSeen is a render-time cache of run snapshots the store may already have dropped; it must be current within this same render and must not trigger renders of its own
   for (const run of live) lastSeen.current.set(run.runId, run);
   const liveIds = new Set(live.map((run) => run.runId));
   const panelRunId = panel?.runId ?? null;
@@ -115,19 +116,23 @@ export function ExecutorRunCards({
   const present = live
     .filter((run) => retainAfterEnd({ live: true, ended: ended.has(run.runId), expanded: run.runId === panelRunId }))
     .map((run) => run.runId);
+  // oxlint-disable-next-line react/refs -- lastSeen is a render-time cache of run snapshots the store may already have dropped; it must be current within this same render and must not trigger renders of its own
   if (panelRunId !== null && !liveIds.has(panelRunId) && lastSeen.current.has(panelRunId)) present.push(panelRunId);
   const reconciled = reconcileDeck(deck, present);
   if (reconciled) setDeck(reconciled);
   const current = reconciled ?? deck;
 
   const mountedIds = new Set([...current.order, ...current.leaving]);
+  // oxlint-disable-next-line react/refs -- lastSeen is a render-time cache of run snapshots the store may already have dropped; it must be current within this same render and must not trigger renders of its own
   for (const id of [...lastSeen.current.keys()]) {
+    // oxlint-disable-next-line react/refs -- lastSeen is a render-time cache of run snapshots the store may already have dropped; it must be current within this same render and must not trigger renders of its own
     if (!mountedIds.has(id) && !liveIds.has(id)) lastSeen.current.delete(id);
   }
   if ([...ended].some((id) => !liveIds.has(id) && !mountedIds.has(id))) {
     setEnded(new Set([...ended].filter((id) => liveIds.has(id) || mountedIds.has(id))));
   }
   const mounted = [...mountedIds]
+    // oxlint-disable-next-line react/refs -- lastSeen is a render-time cache of run snapshots the store may already have dropped; it must be current within this same render and must not trigger renders of its own
     .map((id) => lastSeen.current.get(id))
     .filter((run): run is ExecutorRunState => run !== undefined)
     .sort(byArrival);
@@ -176,6 +181,7 @@ export function ExecutorRunCards({
   }, [panelOpen, focused, collapse]);
 
   // Hand the deck its runs after every render, before paint: a new card is placed before it shows.
+  // oxlint-disable-next-line react/exhaustive-deps -- runs after every render on purpose (see above); the setState calls only sit inside callbacks the deck invokes later on user input, never synchronously here
   useLayoutEffect(() => {
     controller.setCallbacks({
       bringToFront: (runId) =>
@@ -203,6 +209,7 @@ export function ExecutorRunCards({
     <div ref={controller.rootRef} className="pointer-events-none absolute inset-0 overflow-hidden">
       {/* The deck: above the terminal, below the paper, the ⌘F box and secret requests (z-30);
           while a panel is out it rises to the paper's level (z-40), still under the paper's button. */}
+      {/* oxlint-disable-next-line react/refs -- controller.deckRef is a callback ref method of the deck controller, not a ref object; nothing reads `.current` here */}
       <div ref={controller.deckRef} className={cn("group/deck absolute inset-0", panel ? "z-40" : "z-30")}>
         {/* The dimmed pane behind an expanded card (its opacity is the loop's); a click collapses.
             It covers this pane only, never the window. */}
@@ -214,6 +221,7 @@ export function ExecutorRunCards({
             onClick={collapse}
           />
         ) : null}
+        {/* oxlint-disable-next-line react/refs -- `mounted` comes from the lastSeen render-time snapshot cache (see above); the cards render from those snapshots on purpose */}
         {mounted.map((run) => {
           const runId = run.runId;
           const role: CardRole = current.order[0] === runId ? "front" : current.order.includes(runId) ? "back" : "leaving";
@@ -250,6 +258,7 @@ const SWITCH_BUTTON =
  */
 function DeckSwitch({ controller, onSlide }: { controller: DeckController; onSlide: (step: 1 | -1) => void }) {
   return (
+    // oxlint-disable-next-line react/refs -- controller.overlayRef is a callback ref method of the deck controller, not a ref object; nothing reads `.current` here
     <div ref={controller.overlayRef} className="pointer-events-none absolute left-0 top-0 z-[1100] w-80 origin-center">
       <div
         aria-hidden
@@ -495,6 +504,7 @@ function useElapsed(start: number, ended: boolean, endedAt: number | undefined):
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (ended) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- the clock restarts from the current time whenever the run goes (again); without it the first second would show a stale elapsed time
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);

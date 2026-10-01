@@ -119,6 +119,7 @@ export function TerminalPaper(props: TerminalPaperProps) {
   }, [mounted, measure]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- mounting one commit after `open` is what lets the paper's first frame be the collapsed state it grows from; doing it during render would shift the open/close animation
     if (props.open) setMounted(true);
     else setExpanded(false);
   }, [props.open]);
@@ -144,6 +145,7 @@ export function TerminalPaper(props: TerminalPaperProps) {
   useEffect(() => {
     if (!mounted) return;
     let cancelled = false;
+    // oxlint-disable-next-line react/set-state-in-effect -- drops the previous transcript when a new fetch starts for another session or a fresh open; the fetch itself is the external system this effect syncs with
     setResult(null);
     void loadTranscript(execRef.current, { agent, agentSessionId, workspaceId }).then((next) => {
       if (!cancelled) setResult(next);

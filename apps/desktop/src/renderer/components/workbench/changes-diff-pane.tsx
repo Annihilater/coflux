@@ -532,6 +532,7 @@ function DiffBody({
   const canWrite = comments.canWrite;
   useEffect(() => {
     if (canWrite) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- an in-progress drag and an unsent draft are discarded when the write capability goes away; deriving them away instead would resurrect the draft when the device comes back
     setDrag(null);
     setDraft(null);
   }, [canWrite]);

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -62,19 +62,24 @@ export function ExecutorEndpointDialog(props: Props) {
   const [touched, setTouched] = useState(false);
 
   // 每次打开都从入参重建：对话框是长期挂载的，不重建会把上一次编辑的残留带进新增。
-  useEffect(() => {
-    if (!props.open) return;
-    const editing = props.editing;
-    setId(editing?.id ?? "");
-    setName(editing?.name ?? "");
-    setBaseUrl(editing?.baseUrl ?? "");
-    setApi(editing?.api ?? "openai-completions");
-    setModels((editing?.models ?? []).map((model) => model.id).join("\n"));
-    setApiKey("");
-    setAuthHeader(editing?.authHeader ?? false);
-    setKeyless(editing?.keyless ?? false);
-    setTouched(false);
-  }, [props.open, props.editing]);
+  // Rebuilt during render when `open` or `editing` changes (the inputs it last rebuilt from are
+  // kept in state) instead of in an effect.
+  const [filledFor, setFilledFor] = useState<{ open: boolean; editing: DesktopExecutorCustomProvider | null } | null>(null);
+  if (filledFor === null || filledFor.open !== props.open || filledFor.editing !== props.editing) {
+    setFilledFor({ open: props.open, editing: props.editing });
+    if (props.open) {
+      const editing = props.editing;
+      setId(editing?.id ?? "");
+      setName(editing?.name ?? "");
+      setBaseUrl(editing?.baseUrl ?? "");
+      setApi(editing?.api ?? "openai-completions");
+      setModels((editing?.models ?? []).map((model) => model.id).join("\n"));
+      setApiKey("");
+      setAuthHeader(editing?.authHeader ?? false);
+      setKeyless(editing?.keyless ?? false);
+      setTouched(false);
+    }
+  }
 
   const trimmedId = id.trim();
   const modelIds = models

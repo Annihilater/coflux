@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
@@ -251,6 +251,7 @@ function NewTabMenu({
   // the trigger loses focus or the pointer comes back to it.
   const [tooltipQuiet, setTooltipQuiet] = useState(false);
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- the tooltip reads isEnabled from the last committed render, so the quiet flag must be committed state set once the menu opened; `open` is driven from outside (⌘T), there is no event here to set it from
     if (open) setTooltipQuiet(true);
   }, [open]);
   useEffect(() => {
@@ -426,7 +427,9 @@ function GroupSash({
   // cursor and text selection back, and tell the owner the drag is over. Pointer capture dies with
   // the element.
   const onEndRef = useRef(onEnd);
-  onEndRef.current = onEnd;
+  useLayoutEffect(() => {
+    onEndRef.current = onEnd;
+  });
   useEffect(
     () => () => {
       const drag = dragRef.current;
@@ -573,7 +576,9 @@ export function WorkspaceTerminal({
   const dragEndedRef = useRef(true);
   // The drawn drag image: captured at dragstart, moved by a window dragover listener straight on the
   // DOM node (one transform per frame, no React render per pointer move).
+  // The state copy is what the ghost renders from; the ref is what the dragover listener moves.
   const dragGhostRef = useRef<DragGhost | null>(null);
+  const [dragGhost, setDragGhost] = useState<DragGhost | null>(null);
   const ghostNodeRef = useRef<HTMLDivElement | null>(null);
   // The last zone each group highlighted, so a highlight fading out stays where it was instead of
   // snapping back to the centre while it fades.
@@ -636,6 +641,7 @@ export function WorkspaceTerminal({
 
   // pending 收敛：store 中分支已到目标值即清除；20s 兜底解锁（上报丢失时下次快照仍会纠正显示）
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- the pending branch is cleared once the device-reported branch catches up; deriving it instead would bring the pending state back if the branch moved away again before the 20s fallback
     if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
   }, [pendingBranch, workspace?.branch]);
   useEffect(() => {
@@ -653,6 +659,7 @@ export function WorkspaceTerminal({
   function endDrag() {
     setDragTaskId(null);
     setDropTarget(null);
+    setDragGhost(null);
     dragGhostRef.current = null;
     lastZoneRef.current.clear();
   }
@@ -708,7 +715,9 @@ export function WorkspaceTerminal({
         // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
         dragEndedRef.current = false;
         window.setTimeout(() => {
-          if (!dragEndedRef.current) setDragTaskId(tabId);
+          if (dragEndedRef.current) return;
+          setDragTaskId(tabId);
+          setDragGhost(dragGhostRef.current);
         }, 0);
       },
       onDragEnd: () => {
@@ -1168,6 +1177,7 @@ export function WorkspaceTerminal({
   // workbench.tsx), so every rectangle here is relative to the terminal main area.
   return (
     <>
+      {/* oxlint-disable-next-line react/refs -- renderTab records which finished agents were seen on screen in seenDoneRef during render on purpose: a render-only marker that must not cause another render */}
       {geometry.groups.map((entry) => renderGroup(entry.group, entry.rect))}
 
       {/* Sashes: after the group chrome (later in document order than the strips' drag regions, see drag-region.ts), z-20 above the pane layer. */}
@@ -1200,6 +1210,7 @@ export function WorkspaceTerminal({
           here and never on the pane — whose drop upload only accepts files, and the tab payload is
           deliberately not a file. */}
       {dragTaskId && !changesOpen
+        // oxlint-disable-next-line react/refs -- lastZoneRef remembers each group's last highlighted zone during render so a fading highlight stays in place; state would cost a render per zone change
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
             if (target) lastZoneRef.current.set(group.id, target);
@@ -1246,25 +1257,25 @@ export function WorkspaceTerminal({
 
       {/* The drag image, drawn here (see EMPTY_DRAG_IMAGE): an opaque tab that follows the pointer.
           Positioned by the dragover listener, fixed to the viewport, never a pointer target. */}
-      {dragTaskId && dragGhostRef.current ? (
+      {dragTaskId && dragGhost ? (
         <div
           ref={ghostNodeRef}
           aria-hidden
           className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
-          style={{ transform: `translate3d(${dragGhostRef.current.x - dragGhostRef.current.offsetX}px, ${dragGhostRef.current.y - dragGhostRef.current.offsetY}px, 0)` }}
+          style={{ transform: `translate3d(${dragGhost.x - dragGhost.offsetX}px, ${dragGhost.y - dragGhost.offsetY}px, 0)` }}
         >
           <div
             className="flex h-7 max-w-52 items-center gap-1.5 rounded-md border border-border bg-popover px-2.5 text-sm text-foreground shadow-lg transition-[opacity,transform] duration-150 ease-out starting:scale-95 starting:opacity-0"
-            style={{ minWidth: Math.min(dragGhostRef.current.width, 208) }}
+            style={{ minWidth: Math.min(dragGhost.width, 208) }}
           >
-            {dragGhostRef.current.browser ? (
-              <BrowserTabGlyph favicon={dragGhostRef.current.browser.favicon} loading={false} className="opacity-90" />
-            ) : dragGhostRef.current.screen ? (
+            {dragGhost.browser ? (
+              <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
+            ) : dragGhost.screen ? (
               <Monitor className="size-3 shrink-0 opacity-90" />
             ) : (
               <SquareTerminal className="size-3 shrink-0 opacity-90" />
             )}
-            <span className="truncate">{dragGhostRef.current.title}</span>
+            <span className="truncate">{dragGhost.title}</span>
           </div>
         </div>
       ) : null}
