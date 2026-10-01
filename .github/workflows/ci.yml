@@ -161,8 +161,8 @@ jobs:
 
       # 桌面客户端（plan 103 / 106）：typecheck 覆盖主进程 + preload + 渲染层两份 tsconfig，test 覆盖主进程与渲染层单测，
       # build 出 main/preload/renderer 三份产物；打包与签名在 desktop-release.yml。electron-vite build 不需要 Electron 二进制。
-      - name: desktop 类型检查 + 单元测试 + 构建
-        run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop test && pnpm -C apps/desktop build
+      - name: desktop 类型检查 + lint + 单元测试 + 构建
+        run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop lint && pnpm -C apps/desktop test && pnpm -C apps/desktop build
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

@@ -104,31 +104,39 @@ export function ExecutorRunCards({
   // The expanded run: `open` until the user collapses it, then kept until it is back in its slot.
   const [panel, setPanel] = useState<PanelState>(null);
   // The last snapshot of every run shown here, so a card whose run the store already dropped can
-  // still render: while its panel stays open, and while it springs out.
-  const lastSeen = useRef(new Map<string, ExecutorRunState>());
+  // still render: while its panel stays open, and while it springs out. Kept as immutable state and
+  // adjusted during render (below), like the deck itself.
+  const [lastSeen, setLastSeen] = useState<ReadonlyMap<string, ExecutorRunState>>(() => new Map());
 
   const live = executorRunsForTask(runs, taskId);
-  for (const run of live) lastSeen.current.set(run.runId, run);
+  // `seen` is this render's snapshot map: a new map only when a live run is new or changed.
+  let seen = lastSeen;
+  if (live.some((run) => lastSeen.get(run.runId) !== run)) {
+    const next = new Map(lastSeen);
+    for (const run of live) next.set(run.runId, run);
+    seen = next;
+  }
   const liveIds = new Set(live.map((run) => run.runId));
   const panelRunId = panel?.runId ?? null;
   // A run stays in the deck while it goes by both signals; the expanded one until its panel closed.
   const present = live
     .filter((run) => retainAfterEnd({ live: true, ended: ended.has(run.runId), expanded: run.runId === panelRunId }))
     .map((run) => run.runId);
-  if (panelRunId !== null && !liveIds.has(panelRunId) && lastSeen.current.has(panelRunId)) present.push(panelRunId);
+  if (panelRunId !== null && !liveIds.has(panelRunId) && seen.has(panelRunId)) present.push(panelRunId);
   const reconciled = reconcileDeck(deck, present);
   if (reconciled) setDeck(reconciled);
   const current = reconciled ?? deck;
 
   const mountedIds = new Set([...current.order, ...current.leaving]);
-  for (const id of [...lastSeen.current.keys()]) {
-    if (!mountedIds.has(id) && !liveIds.has(id)) lastSeen.current.delete(id);
+  if ([...seen.keys()].some((id) => !mountedIds.has(id) && !liveIds.has(id))) {
+    seen = new Map([...seen].filter(([id]) => mountedIds.has(id) || liveIds.has(id)));
   }
+  if (seen !== lastSeen) setLastSeen(seen);
   if ([...ended].some((id) => !liveIds.has(id) && !mountedIds.has(id))) {
     setEnded(new Set([...ended].filter((id) => liveIds.has(id) || mountedIds.has(id))));
   }
   const mounted = [...mountedIds]
-    .map((id) => lastSeen.current.get(id))
+    .map((id) => seen.get(id))
     .filter((run): run is ExecutorRunState => run !== undefined)
     .sort(byArrival);
 
@@ -175,7 +183,8 @@ export function ExecutorRunCards({
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [panelOpen, focused, collapse]);
 
-  // Hand the deck its runs after every render, before paint: a new card is placed before it shows.
+  // The deck's callbacks into this component: every function in them is stable, so they are handed
+  // over once (declared before the sync below, so they are in place before its first run).
   useLayoutEffect(() => {
     controller.setCallbacks({
       bringToFront: (runId) =>
@@ -189,8 +198,17 @@ export function ExecutorRunCards({
       gone: (runId) => setDeck((cur) => (cur.leaving.includes(runId) ? { ...cur, leaving: cur.leaving.filter((id) => id !== runId) } : cur)),
       panelClosed: (runId) => setPanel((cur) => (cur && cur.runId === runId && !cur.open ? null : cur)),
     });
+  }, [controller, expand]);
+
+  // Hand the deck its runs after every render, before paint: a new card is placed before it shows.
+  useLayoutEffect(() => {
     controller.sync({ order: current.order, leaving: current.leaving, panel });
   });
+
+  // Stable callback refs into the deck controller (it owns the elements imperatively).
+  const attachRoot = useCallback((el: HTMLElement | null) => controller.attachRoot(el), [controller]);
+  const attachDeck = useCallback((el: HTMLElement | null) => controller.attachDeck(el), [controller]);
+  const attachBackdrop = useCallback((el: HTMLElement | null) => controller.attachBackdrop(el), [controller]);
 
   if (mounted.length === 0) return null;
 
@@ -200,15 +218,15 @@ export function ExecutorRunCards({
 
   return (
     // Clips to the pane: a rubber-banded or tilted card never paints over a neighbouring pane.
-    <div ref={controller.rootRef} className="pointer-events-none absolute inset-0 overflow-hidden">
+    <div ref={attachRoot} className="pointer-events-none absolute inset-0 overflow-hidden">
       {/* The deck: above the terminal, below the paper, the ⌘F box and secret requests (z-30);
           while a panel is out it rises to the paper's level (z-40), still under the paper's button. */}
-      <div ref={controller.deckRef} className={cn("group/deck absolute inset-0", panel ? "z-40" : "z-30")}>
+      <div ref={attachDeck} className={cn("group/deck absolute inset-0", panel ? "z-40" : "z-30")}>
         {/* The dimmed pane behind an expanded card (its opacity is the loop's); a click collapses.
             It covers this pane only, never the window. */}
         {panel ? (
           <div
-            ref={controller.backdropRef}
+            ref={attachBackdrop}
             aria-hidden
             className={cn("absolute inset-0 z-[1900] bg-black", panel.open ? "pointer-events-auto" : "pointer-events-none")}
             onClick={collapse}
@@ -249,8 +267,9 @@ const SWITCH_BUTTON =
  * `‹` slides the deck left (the card peeking on the right comes to the front); `›` slides it right.
  */
 function DeckSwitch({ controller, onSlide }: { controller: DeckController; onSlide: (step: 1 | -1) => void }) {
+  const attachOverlay = useCallback((el: HTMLElement | null) => controller.attachOverlay(el), [controller]);
   return (
-    <div ref={controller.overlayRef} className="pointer-events-none absolute left-0 top-0 z-[1100] w-80 origin-center">
+    <div ref={attachOverlay} className="pointer-events-none absolute left-0 top-0 z-[1100] w-80 origin-center">
       <div
         aria-hidden
         className="absolute left-px w-[30px] bg-gradient-to-r from-popover from-20% to-transparent opacity-0 transition-opacity duration-150 group-data-[switch]/deck:opacity-100"
@@ -495,9 +514,15 @@ function useElapsed(start: number, ended: boolean, endedAt: number | undefined):
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (ended) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    // The clock is the external system: one tick right away (the time may be stale if the run goes
+    // again after it ended), then one a second.
+    const tick = () => setNow(Date.now());
+    const first = window.setTimeout(tick, 0);
+    const timer = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
   }, [ended]);
   return formatElapsed((ended ? (endedAt ?? now) : now) - start);
 }

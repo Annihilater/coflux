@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
+use coflux_protocol::wire::{FsReadResult, FsReadStatus, FsStatEntry};
 use coflux_protocol::{FsEntry, FsEntryKind};
 use tokio::process::Command;
 
@@ -287,24 +288,169 @@ pub async fn list_dir(
     }
 }
 
-pub async fn read_file_text(root: &str, rel: &str) -> (bool, String, Option<String>) {
-    let target = match safe_resolve(root, rel) {
-        Some(t) => t,
-        None => return (false, String::new(), Some("路径越界或不存在".into())),
+/// Where a workspace path resolves (plan 20261001-terminal-file-tab): the same anchoring as
+/// `safe_resolve`, but the failures stay apart so stat and read can report them typed.
+enum Resolved {
+    Inside(PathBuf),
+    Missing,
+    Outside,
+    Failed(String),
+}
+
+/// The canonical root a batch of paths is resolved against.
+fn real_root(root: &str) -> Option<PathBuf> {
+    std::fs::canonicalize(expand_home(root)?).ok()
+}
+
+fn resolve_under(real_base: &Path, rel: &str) -> Resolved {
+    let Some(rel) = expand_home(rel) else {
+        return Resolved::Failed("HOME 不可用".into());
     };
-    match std::fs::metadata(&target) {
-        Err(e) => (false, String::new(), Some(e.to_string())),
-        Ok(m) => {
-            if !m.is_file() {
-                return (false, String::new(), Some("不是文件".into()));
-            }
-            if m.len() > MAX_READ_BYTES {
-                return (false, String::new(), Some("文件过大（>2MB）".into()));
-            }
-            match std::fs::read(&target) {
-                Ok(b) => (true, String::from_utf8_lossy(&b).into_owned(), None),
-                Err(e) => (false, String::new(), Some(e.to_string())),
-            }
+    let joined = if rel.is_empty() {
+        real_base.to_path_buf()
+    } else {
+        // An absolute `rel` replaces the base; it must still land under the root.
+        real_base.join(rel)
+    };
+    match std::fs::canonicalize(&joined) {
+        Ok(target) if target == real_base || target.starts_with(real_base) => {
+            Resolved::Inside(target)
         }
+        Ok(_) => Resolved::Outside,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Resolved::Failed(e.to_string())
+        }
+        // A missing path that already climbs out of the root by its ".." segments is an escape,
+        // not a missing workspace file.
+        Err(_) if !lexically_under(real_base, &joined) => Resolved::Outside,
+        // Not found, a dangling link, a file used as a directory ("a.txt/b").
+        Err(_) => Resolved::Missing,
+    }
+}
+
+/// Whether `path`, with "." and ".." applied textually, stays under `base`.
+fn lexically_under(base: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.starts_with(base)
+}
+
+/// An opaque file revision from metadata: modification time in nanoseconds, size and inode.
+/// Clients only compare it for equality.
+fn file_revision(meta: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+    let mtime_ns = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+    format!("{mtime_ns}-{}-{}", meta.len(), meta.ino())
+}
+
+/// The canonical path of `target` relative to `real_base`; empty for the root itself.
+fn relative_to(real_base: &Path, target: &Path) -> String {
+    target
+        .strip_prefix(real_base)
+        .map(|rel| rel.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Upper bound on the paths of one fsStat request.
+pub const MAX_STAT_PATHS: usize = 64;
+
+/// Batched existence check (plan 20261001-terminal-file-tab): one entry per path, in order.
+/// Blocking; callers run it off the async executor. `None` when the root itself is unusable.
+pub fn stat_paths(root: &str, paths: &[String]) -> Option<Vec<FsStatEntry>> {
+    let real_base = real_root(root)?;
+    Some(
+        paths
+            .iter()
+            .map(|path| {
+                let mut entry = FsStatEntry {
+                    path: path.clone(),
+                    ..Default::default()
+                };
+                if let Resolved::Inside(target) = resolve_under(&real_base, path) {
+                    entry.exists = true;
+                    entry.relative_path = relative_to(&real_base, &target);
+                    if let Ok(meta) = std::fs::metadata(&target) {
+                        if meta.is_file() {
+                            entry.is_file = true;
+                            entry.revision = file_revision(&meta);
+                        }
+                    }
+                }
+                entry
+            })
+            .collect(),
+    )
+}
+
+fn read_failure(status: FsReadStatus, error: impl Into<String>) -> FsReadResult {
+    FsReadResult {
+        ok: false,
+        error: Some(error.into()),
+        status: status as i32,
+        ..Default::default()
+    }
+}
+
+/// Reads a workspace file as lossy UTF-8 under the 2 MB cap. With `known_revision` equal to the
+/// file's current revision the answer is NOT_MODIFIED with empty content. Every OK and
+/// NOT_MODIFIED answer carries a non-empty revision. `request_id` is left for the caller.
+pub async fn read_file_text(root: &str, rel: &str, known_revision: Option<&str>) -> FsReadResult {
+    let Some(real_base) = real_root(root) else {
+        return read_failure(FsReadStatus::Error, "工作区根目录不可用");
+    };
+    let target = match resolve_under(&real_base, rel) {
+        Resolved::Inside(target) => target,
+        Resolved::Missing => return read_failure(FsReadStatus::NotFound, "文件不存在"),
+        Resolved::Outside => return read_failure(FsReadStatus::Error, "路径越界"),
+        Resolved::Failed(error) => return read_failure(FsReadStatus::Error, error),
+    };
+    let meta = match std::fs::metadata(&target) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return read_failure(FsReadStatus::NotFound, "文件不存在")
+        }
+        Err(e) => return read_failure(FsReadStatus::Error, e.to_string()),
+    };
+    if !meta.is_file() {
+        return read_failure(FsReadStatus::NotFile, "不是文件");
+    }
+    if meta.len() > MAX_READ_BYTES {
+        return read_failure(FsReadStatus::TooLarge, "文件过大（>2MB）");
+    }
+    // The revision is taken before the read: a change racing the read yields newer content under
+    // an older revision, which the next conditional read then sees as modified and re-reads.
+    let revision = file_revision(&meta);
+    if known_revision.is_some_and(|known| !known.is_empty() && known == revision) {
+        return FsReadResult {
+            ok: true,
+            revision,
+            status: FsReadStatus::NotModified as i32,
+            ..Default::default()
+        };
+    }
+    match std::fs::read(&target) {
+        Ok(bytes) if bytes.len() as u64 > MAX_READ_BYTES => {
+            read_failure(FsReadStatus::TooLarge, "文件过大（>2MB）")
+        }
+        Ok(bytes) => FsReadResult {
+            ok: true,
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+            revision,
+            status: FsReadStatus::Ok as i32,
+            ..Default::default()
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            read_failure(FsReadStatus::NotFound, "文件不存在")
+        }
+        Err(e) => read_failure(FsReadStatus::Error, e.to_string()),
     }
 }

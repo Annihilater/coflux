@@ -1,14 +1,13 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Terminal, type IDecoration, type IMarker } from "@xterm/xterm";
+import { Terminal, type IBufferRange, type IDecoration, type ILink, type IMarker } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
 import { useToast } from "@astryxdesign/core/Toast";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
-import type { ExecutorRunState, FsWriteResult } from "@coflux/client";
+import type { ExecutorRunState, FileStatResult, FsWriteResult } from "@coflux/client";
 
 import { ExecutorRunCards, type ExecutorCardClient } from "@/components/workbench/executor-run-card";
 import { commandOutputText, createCommandMarkReader } from "@/components/workbench/terminal-command-marks";
@@ -17,13 +16,15 @@ import {
   canSendTerminalResize,
   type TerminalControlState,
 } from "@/components/workbench/terminal-control-state";
-import { findFileReferences, readTerminalLine } from "@/components/workbench/terminal-file-references";
+import { findFileReferences, readTerminalLine, type TerminalFileReference } from "@/components/workbench/terminal-file-references";
+import { createFileLinkCache, isLinkReplyCurrent } from "@/components/workbench/terminal-file-links";
+import { findTerminalWebLinks } from "@/components/workbench/terminal-web-links";
 import { TerminalPaper } from "@/components/workbench/terminal-paper";
 import type { TranscriptAgent, TranscriptExec } from "@/components/workbench/terminal-transcript";
 import { decideTerminalFit, TERMINAL_FIT_LIMITS, type TerminalFitProposal } from "@/components/workbench/terminal-fit";
 import { applyImeCommittedInputPatch, type XtermCoreInternals } from "@/components/workbench/terminal-ime-patch";
 import { decideTerminalKeyOwner } from "@/components/workbench/terminal-key-ownership";
-import { shouldCopyTerminalFileReference, shouldOpenTerminalWebLink } from "@/components/workbench/terminal-link-activation";
+import { shouldOpenTerminalFileLink, shouldOpenTerminalWebLink } from "@/components/workbench/terminal-link-activation";
 import { rewriteUnspecifiedHost } from "@/components/workbench/browser-address";
 import { parseOsc52Payload } from "@/components/workbench/osc52-clipboard";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
@@ -79,6 +80,10 @@ type TerminalPaneProps = {
   transcriptAgent: TranscriptAgent | null;
   /** Right click on a web link → 在内置浏览器中打开 (plan 20260924-desktop-browser-tab): a browser tab in this pane's workspace. */
   onOpenBrowserTab?: (workspaceId: string, url: string) => void;
+  /** Which printed paths are files of the workspace (plan 20261001-terminal-file-tab); absent = no file links. */
+  statFiles?: (workspaceId: string, paths: string[]) => Promise<FileStatResult>;
+  /** ⌘+click or 「打开文件」 on a file link: `path` is the canonical workspace-relative path. */
+  onOpenFile?: (workspaceId: string, path: string, line?: number) => void;
   /** agent 自己的会话标识，已校验过形状；null = 旧 worker / 还没上报，同样不出按钮。 */
   agentSessionId: string | null;
   /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
@@ -115,6 +120,19 @@ const SEARCH_OPTIONS: ISearchOptions = {
 };
 
 const NO_SEARCH_RESULTS = { index: -1, count: 0 };
+
+/** The palette's blue: the theme's `blue` and the hovered link's colour (plan
+ * 20261001-terminal-file-tab). Not the CSS `--accent` token — in this app that is the dark hover
+ * surface and would make the link vanish on the paper — and decorations only take #RRGGBB. */
+const LINK_HOVER_COLOR = "#6b9bd1";
+
+/** The link under the pointer, typed so the context menu offers the right items for it. */
+type HoveredLink =
+  | { kind: "url"; url: string }
+  | { kind: "file"; workspaceId: string; path: string; line?: number; text: string };
+
+/** Existence answers are shared by every pane: they are keyed by workspace and raw path. */
+const fileLinkCache = createFileLinkCache();
 
 /** 命令装饰条的颜色，取自上面的终端主题。 */
 const COMMAND_COLORS = { running: "#6a6a6a", success: "#4fae6e", failure: "#e05c6a", unknown: "#c9a227" } as const;
@@ -216,18 +234,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [menuCommands, setMenuCommands] = useState(0);
   // 链接悬停提示（需要修饰键才激活，不提示的话没人猜得到）；位置用 fixed，省掉容器坐标换算。
   const [linkHint, setLinkHint] = useState<{ label: string; x: number; y: number } | null>(null);
-  // The web link under the pointer, from the web-link addon's hover/leave (link computation is
-  // asynchronous, so a right click the instant the pointer arrives may miss it — accepted). The
-  // context menu snapshots it when it opens: its three link items belong to that link.
-  const hoveredLinkRef = useRef<string | null>(null);
-  const [menuLink, setMenuLink] = useState<string | null>(null);
+  // The link under the pointer, from the link providers' hover/leave (a file link appears only once
+  // the device answered, so a right click the instant the pointer arrives may miss it — accepted).
+  // The context menu snapshots it when it opens: its link items belong to that link, and its kind
+  // decides which items (the URL's three, or a file's 打开文件 / 复制路径).
+  const hoveredLinkRef = useRef<HoveredLink | null>(null);
+  const [menuLink, setMenuLink] = useState<HoveredLink | null>(null);
 
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
-  // Read by the OSC 133 handler registered once at mount.
-  const onPromptStartRef = useRef(props.onPromptStart);
-  onPromptStartRef.current = props.onPromptStart;
+  // Called by the OSC 133 handler registered once at mount, with the latest callback.
+  const promptStarted = useEffectEvent((taskId: string) => props.onPromptStart?.(taskId));
   const liveRef = useRef({
     visible: props.visible,
     focused: props.focused,
@@ -237,6 +255,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     sendInput: props.sendInput,
     sendResize: props.sendResize,
     sendFsWrite: props.sendFsWrite,
+    statFiles: props.statFiles,
+    onOpenFile: props.onOpenFile,
     showToast,
   });
   useEffect(() => {
@@ -249,13 +269,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       sendInput: props.sendInput,
       sendResize: props.sendResize,
       sendFsWrite: props.sendFsWrite,
+      statFiles: props.statFiles,
+      onOpenFile: props.onOpenFile,
       showToast,
     };
   });
 
   // 挂载时创建 xterm 等命令式资源，只跑一次：TerminalPane 以 taskId 为 React key，
-  // 同一实例生命周期内 taskId 不变，无需把 props 列进依赖数组。
-  useEffect(() => {
+  // 同一实例生命周期内 taskId 不变。The setup is an effect event: it reads the props of the render it
+  // runs in (the mount) without making them dependencies, and the effect below runs it once.
+  const mountTerminal = useEffectEvent((): (() => void) | undefined => {
     const host = hostRef.current;
     if (!host) return;
 
@@ -309,7 +332,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         red: "#e05c6a",
         green: "#4fae6e",
         yellow: "#c9a227",
-        blue: "#6b9bd1",
+        blue: LINK_HOVER_COLOR,
         magenta: "#b07cc6",
         cyan: "#56b6c2",
         white: "#d4d4d4",
@@ -342,40 +365,144 @@ export function TerminalPane(props: TerminalPaneProps) {
     searchAddonRef.current = searchAddon;
     searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => setSearchResults({ index: resultIndex, count: resultCount }));
 
+    // Link hover (plan 20261001-terminal-file-tab): no underline; the hovered link's cells take the
+    // palette's blue through an xterm decoration (decorations only take a literal #RRGGBB). One
+    // decoration per buffer line the link covers, each anchored to its own marker; both are
+    // disposed on leave. registerMarker's offset is relative to the cursor line and is not range
+    // checked, so a target line outside the buffer is skipped rather than turned into a marker
+    // that never renders and never disposes itself.
+    //
+    // Registering or removing a decoration makes xterm re-render every row as a non-redraw render,
+    // and the Linkifier answers such a render on the hovered line by calling `leave` and asking the
+    // providers again — which hover the same link again. Painting on every hover and clearing on
+    // every leave would therefore loop once per frame. So the clear after a leave waits a
+    // microtask (the re-ask is synchronous, within the same render callback), and hovering the
+    // range that is already painted keeps the existing decorations instead of registering new ones.
+    let hoverPaint: { key: string; parts: { marker: IMarker; decoration: IDecoration | undefined; line: number }[] } | null = null;
+    let hoverClearPending = false;
+    const disposeHoverPaint = () => {
+      for (const { marker, decoration } of hoverPaint?.parts ?? []) {
+        decoration?.dispose();
+        marker.dispose();
+      }
+      hoverPaint = null;
+    };
+    const paintHover = (range: IBufferRange) => {
+      hoverClearPending = false;
+      const key = `${range.start.x}:${range.start.y}:${range.end.x}:${range.end.y}`;
+      // Same range, and its markers still sit on the lines they were placed on (scrollback trimming
+      // moves markers with their lines): keep it.
+      if (hoverPaint?.key === key && hoverPaint.parts.every((part) => !part.marker.isDisposed && part.marker.line === part.line)) return;
+      disposeHoverPaint();
+      const buffer = terminal.buffer.active;
+      const cursorLine = buffer.baseY + buffer.cursorY;
+      const parts: NonNullable<typeof hoverPaint>["parts"] = [];
+      for (let y = range.start.y; y <= range.end.y; y++) {
+        const line = y - 1;
+        if (line < 0 || line >= buffer.length) continue;
+        const startX = y === range.start.y ? range.start.x - 1 : 0;
+        const endX = y === range.end.y ? range.end.x : terminal.cols;
+        if (endX <= startX) continue;
+        const marker = terminal.registerMarker(line - cursorLine);
+        if (!marker) continue;
+        const decoration = terminal.registerDecoration({ marker, x: startX, width: endX - startX, foregroundColor: LINK_HOVER_COLOR, layer: "top" });
+        parts.push({ marker, decoration, line });
+      }
+      hoverPaint = { key, parts };
+    };
+    const leaveLink = (target: HoveredLink) => {
+      if (hoveredLinkRef.current === target) hoveredLinkRef.current = null;
+      setLinkHint(null);
+      hoverClearPending = true;
+      queueMicrotask(() => {
+        if (!hoverClearPending) return;
+        hoverClearPending = false;
+        disposeHoverPaint();
+      });
+    };
+
     // 输出中的 URL（plan 20260924-desktop-browser-tab，取代 plan 109 对网页链接的 ⌘ 门控）：普通左键单击
     // 在系统浏览器打开；右键在终端菜单顶部多出三项（系统浏览器 / 内置浏览器 / 复制链接）；拖选经过链接
     // 不算点击——xterm 在同一链接上 mousedown+mouseup 就激活、不看选区，所以激活前先看有没有选区。
-    // 必须传自定义激活函数——插件默认的那个先调无 URL 的 window.open()、再赋 location.href，
-    // 主进程对 window.open 一律 deny 且只放行 http(s) 的 URL，收到 about:blank 直接丢弃，表现为点了没反应。
-    // 这里带 URL 调 window.open，主进程的 setWindowOpenHandler 拿到真实 URL 交 shell.openExternal；
-    // 返回值在桌面版恒为 null（deny），不据此分支。0.0.0.0 先改写成 localhost（浏览器拒绝前者）。
-    terminal.loadAddon(
-      new WebLinksAddon(
-        (event, uri) => {
-          setLinkHint(null);
-          if (!shouldOpenTerminalWebLink(event, terminal.hasSelection())) return;
-          window.open(rewriteUnspecifiedHost(uri), "_blank", "noopener");
-        },
-        {
-          hover: (event, text) => {
-            hoveredLinkRef.current = text;
-            setLinkHint({ label: "点击打开 · 右键更多", x: event.clientX, y: event.clientY });
-          },
-          leave: (_event, text) => {
-            if (hoveredLinkRef.current === text) hoveredLinkRef.current = null;
-            setLinkHint(null);
-          },
-        },
-      ),
-    );
-
-    // 文件引用（`src/a.ts:12:5`）：悬停有下划线与提示，⌘+点击把原文复制到剪贴板。
-    // 不是「在编辑器里打开」——工作台没有编辑器面板，而本 plan 只许动主进程的权限集合，
-    // 没法新开一个打开文件的 IPC。对着 agent 终端而言，路径能一键进剪贴板就是最有用的动作。
+    // The provider is our own (terminal-web-links.ts) so its links can turn the underline off.
+    // Activation must call window.open WITH the URL: the main process denies every window.open and
+    // only forwards an http(s) URL from setWindowOpenHandler to shell.openExternal — the addon's old
+    // default (a URL-less window.open, then location.href) arrived as about:blank and was dropped.
+    // The return value is always null on desktop (deny), so nothing branches on it. 0.0.0.0 is
+    // rewritten to localhost first (browsers refuse the former).
     terminal.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
+        const links = findTerminalWebLinks(terminal.buffer.active, bufferLineNumber);
+        if (links.length === 0) {
+          callback(undefined);
+          return;
+        }
+        callback(
+          links.map(({ range, text }): ILink => {
+            const target: HoveredLink = { kind: "url", url: text };
+            return {
+              range,
+              text,
+              decorations: { pointerCursor: true, underline: false },
+              activate: (event, uri) => {
+                setLinkHint(null);
+                if (!shouldOpenTerminalWebLink(event, terminal.hasSelection())) return;
+                window.open(rewriteUnspecifiedHost(uri), "_blank", "noopener");
+              },
+              hover: (event) => {
+                hoveredLinkRef.current = target;
+                paintHover(range);
+                setLinkHint({ label: "点击打开 · 右键更多", x: event.clientX, y: event.clientY });
+              },
+              leave: () => leaveLink(target),
+            };
+          }),
+        );
+      },
+    });
+
+    // File links (plan 20261001-terminal-file-tab; recognition from plan 20260916): a recognised
+    // `path[:line[:col]]` is a link only once the device confirms it is a regular file inside the
+    // workspace (terminal-file-links.ts). The check runs for the hovered line only, batched into
+    // one fsStat; a cache hit answers synchronously. ⌘+click opens the file in a tab at that line;
+    // a plain click does nothing (it selects text); the right-click menu opens or copies the path.
+    let latestFileLinkRequest = 0;
+    const fileLinksFor = (bufferLineNumber: number, cellOf: number[], references: TerminalFileReference[], workspaceId: string): ILink[] | undefined => {
+      const links: ILink[] = [];
+      for (const reference of references) {
+        const state = fileLinkCache.get(workspaceId, reference.path);
+        if (state?.kind !== "file") continue;
+        // IBufferRange is 1-based and end-inclusive, i.e. the 0-based exclusive end.
+        const range: IBufferRange = {
+          start: { x: cellOf[reference.start]! + 1, y: bufferLineNumber },
+          end: { x: cellOf[reference.end]!, y: bufferLineNumber },
+        };
+        const target: HoveredLink = { kind: "file", workspaceId, path: state.relativePath, line: reference.line, text: reference.text };
+        links.push({
+          range,
+          text: reference.text,
+          decorations: { pointerCursor: true, underline: false },
+          activate: (event) => {
+            setLinkHint(null);
+            if (!shouldOpenTerminalFileLink(event)) return;
+            liveRef.current.onOpenFile?.(target.workspaceId, target.path, target.line);
+          },
+          hover: (event) => {
+            hoveredLinkRef.current = target;
+            paintHover(range);
+            setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击打开 · 右键更多`, x: event.clientX, y: event.clientY });
+          },
+          leave: () => leaveLink(target),
+        });
+      }
+      return links.length > 0 ? links : undefined;
+    };
+    terminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const request = ++latestFileLinkRequest;
         const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) {
+        const { workspaceId, statFiles } = liveRef.current;
+        if (!line || !statFiles) {
           callback(undefined);
           return;
         }
@@ -385,27 +512,23 @@ export function TerminalPane(props: TerminalPaneProps) {
           callback(undefined);
           return;
         }
-        callback(
-          references.map((reference) => ({
-            // IBufferRange 是「1-based 含右端」，正好等于 0-based 右开端点（见 addon-web-links 的 LinkComputer）。
-            range: {
-              start: { x: cellOf[reference.start]! + 1, y: bufferLineNumber },
-              end: { x: cellOf[reference.end]!, y: bufferLineNumber },
-            },
-            text: reference.text,
-            decorations: { pointerCursor: true, underline: true },
-            activate: (event: MouseEvent, linkText: string) => {
-              setLinkHint(null);
-              if (!shouldCopyTerminalFileReference(event)) return;
-              void navigator.clipboard.writeText(linkText).then(
-                () => liveRef.current.showToast({ body: `已复制 ${linkText}`, type: "info" }),
-                () => liveRef.current.showToast({ body: "复制路径失败", type: "error" }),
-              );
-            },
-            hover: (event: MouseEvent) => setLinkHint({ label: `${SHORTCUT_MODIFIER_PREFIX} 点击复制路径`, x: event.clientX, y: event.clientY }),
-            leave: () => setLinkHint(null),
-          })),
-        );
+        const unknown = fileLinkCache.unknown(workspaceId, references.map((reference) => reference.path));
+        if (unknown.length === 0) {
+          callback(fileLinksFor(bufferLineNumber, cellOf, references, workspaceId));
+          return;
+        }
+        void statFiles(workspaceId, unknown).then((result) => {
+          if (result.kind === "ok") fileLinkCache.record(workspaceId, result.entries);
+          else if (result.kind === "daemonOutdated") fileLinkCache.recordOutdated(workspaceId);
+          // A failed check is not cached; the references stay plain text until the next hover.
+          if (disposed) return;
+          const current = terminal.buffer.active.getLine(bufferLineNumber - 1);
+          const currentText = current ? readTerminalLine(current).text : null;
+          // A late answer for a line the pointer has left (or that output scrolled away) is dropped
+          // without calling back at all; the next hover hits the cache.
+          if (!isLinkReplyCurrent({ request, latestRequest: latestFileLinkRequest, requestedText: text, currentText })) return;
+          callback(fileLinksFor(bufferLineNumber, cellOf, references, workspaceId));
+        });
       },
     });
     // 命令边界（OSC 133）：shell 集成早就在往流里发，这里才第一次有人接。
@@ -484,7 +607,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       const current = commands[commands.length - 1];
       if (mark.kind === "prompt-start") {
         beginCommand();
-        onPromptStartRef.current?.(props.taskId);
+        promptStarted(props.taskId);
       } else if (mark.kind === "command-start" && current) {
         current.start = terminal.registerMarker(0);
         current.state = "running";
@@ -789,16 +912,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       searchAddonRef.current = null;
       commandsRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  });
+  useEffect(() => mountTerminal(), []);
 
   // sessionReady 门控：先注册 ptyOutput consumer，再通知上层可以 attach——
   // 否则 attach 回放的 scrollback 字节会在 consumer 注册前到达而丢失。
-  useEffect(() => {
-    const sessionId = props.sessionId;
+  // Runs whenever the session changes; the callbacks it hands over are read from that render's props.
+  const attachSession = useEffectEvent((sessionId: string): (() => void) | undefined => {
     const terminal = terminalRef.current;
     const controller = controllerRef.current;
-    if (!sessionId || !terminal || !controller) return;
+    if (!terminal || !controller) return;
     const unregister = props.registerSessionConsumer(sessionId, (data, replace) => {
       if (replace) {
         // gap 恢复：快照是渲染好的屏幕，里面没有 OSC 133，旧的命令边界跟着这一屏一起作废。
@@ -810,8 +933,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     });
     props.onSessionReady(props.taskId, sessionId, controller);
     return unregister;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.sessionId]);
+  });
+  const sessionId = props.sessionId;
+  useEffect(() => {
+    if (!sessionId) return;
+    return attachSession(sessionId);
+  }, [sessionId]);
 
   // Becoming visible refits (a hidden pane's fit is a no-op, so the size is stale); becoming the
   // focused pane also takes the keyboard. Only one pane is ever focused, so only one takes it.
@@ -919,9 +1046,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [props.focused, paperOpen, executorExpanded]);
 
   // 切到别的 tab 就收起纸面：面板只是 display:hidden，留着它下次回来会是一份过期快照。
-  useEffect(() => {
+  // Adjusted during render when `visible` flips.
+  const [syncedVisible, setSyncedVisible] = useState(props.visible);
+  if (props.visible !== syncedVisible) {
+    setSyncedVisible(props.visible);
     if (!props.visible) setPaperOpen(false);
-  }, [props.visible]);
+  }
 
   // 打开查找框时聚焦并全选输入内容（再按一次 ⌘F 是「换个词重搜」而不是追加）。
   useEffect(() => {
@@ -932,26 +1062,46 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [searchOpen]);
 
   // A right click on a web link (plan 20260924-desktop-browser-tab) puts three items for that link
-  // on top of the unchanged menu; a right click elsewhere shows the menu as it always was.
-  const linkTarget = menuLink ? rewriteUnspecifiedHost(menuLink) : null;
-  const linkItems: ContextMenuOption[] = linkTarget
-    ? [
-        { label: "在系统浏览器中打开", onClick: () => window.open(linkTarget, "_blank", "noopener") },
-        {
-          label: "在内置浏览器中打开",
-          isDisabled: !props.onOpenBrowserTab,
-          onClick: () => props.onOpenBrowserTab?.(props.workspaceId, linkTarget),
+  // on top of the unchanged menu; on a file link (plan 20261001-terminal-file-tab) two items; a
+  // right click elsewhere shows the menu as it always was.
+  let linkItems: ContextMenuOption[] = [];
+  if (menuLink?.kind === "url") {
+    const url = menuLink.url;
+    const linkTarget = rewriteUnspecifiedHost(url);
+    linkItems = [
+      { label: "在系统浏览器中打开", onClick: () => window.open(linkTarget, "_blank", "noopener") },
+      {
+        label: "在内置浏览器中打开",
+        isDisabled: !props.onOpenBrowserTab,
+        onClick: () => props.onOpenBrowserTab?.(props.workspaceId, linkTarget),
+      },
+      {
+        label: "复制链接",
+        onClick: () => {
+          desktop.writeClipboard(url);
+          showToast({ body: "已复制链接", type: "info" });
         },
-        {
-          label: "复制链接",
-          onClick: () => {
-            desktop.writeClipboard(menuLink ?? linkTarget);
-            showToast({ body: "已复制链接", type: "info" });
-          },
+      },
+      { type: "divider" },
+    ];
+  } else if (menuLink?.kind === "file") {
+    const file = menuLink;
+    linkItems = [
+      {
+        label: "打开文件",
+        isDisabled: !props.onOpenFile,
+        onClick: () => props.onOpenFile?.(file.workspaceId, file.path, file.line),
+      },
+      {
+        label: "复制路径",
+        onClick: () => {
+          desktop.writeClipboard(file.text);
+          showToast({ body: `已复制 ${file.text}`, type: "info" });
         },
-        { type: "divider" },
-      ]
-    : [];
+      },
+      { type: "divider" },
+    ];
+  }
   const contextMenuItems: ContextMenuOption[] = [
     ...linkItems,
     { label: "复制", isDisabled: !menuSelection, onClick: copySelection },

@@ -28,6 +28,7 @@ export function TerminalPanes({
   frames,
   onPaneFocus,
   onOpenBrowserTab,
+  onOpenFile,
   onPromptStart,
   client,
   attach,
@@ -42,6 +43,8 @@ export function TerminalPanes({
   onPaneFocus: (taskId: string) => void;
   /** A terminal link's 在内置浏览器中打开 (plan 20260924-desktop-browser-tab). */
   onOpenBrowserTab: (workspaceId: string, url: string) => void;
+  /** A terminal file link's ⌘+click or 打开文件 (plan 20261001-terminal-file-tab): open or focus its file tab. */
+  onOpenFile?: (workspaceId: string, path: string, line?: number) => void;
   /** A live prompt-start mark in a pane (plan 20261001-desktop-agents: a pending agent launch types its command). */
   onPromptStart: (taskId: string) => void;
   client: CofluxClient;
@@ -97,6 +100,8 @@ export function TerminalPanes({
             agentSessionId={agentSessionId}
             execInWorkspace={client.execInWorkspace}
             onOpenBrowserTab={onOpenBrowserTab}
+            statFiles={client.statWorkspaceFiles}
+            onOpenFile={onOpenFile}
             secretCards={secretCards}
             executorRuns={executorRuns}
             executorClient={client}

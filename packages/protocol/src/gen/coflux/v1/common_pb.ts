@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file coflux/v1/common.proto.
  */
 export const file_coflux_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2ZsdXgvdjEvY29tbW9uLnByb3RvEgljb2ZsdXgudjEipwEKCkRhZW1vbkluZm8SEQoJZGFlbW9uX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSDAoEaG9zdBgDIAEoCRIQCghwbGF0Zm9ybRgEIAEoCRIOCgZvbmxpbmUYBSABKAgSFgoOd29ya2VyX3ZlcnNpb24YBiABKAkSGgoSc3VwZXJ2aXNvcl92ZXJzaW9uGAcgASgJEhQKDGNhcGFiaWxpdGllcxgIIAMoCSKJAQoHUHJvamVjdBIKCgJpZBgBIAEoCRISCgphY2NvdW50X2lkGAIgASgJEhEKCWRhZW1vbl9pZBgDIAEoCRIMCgRuYW1lGAQgASgJEhEKCXJlcG9fcGF0aBgFIAEoCRIWCg5kZWZhdWx0X2JyYW5jaBgGIAEoCRISCgpjcmVhdGVkX2F0GAcgASgBIskBCglXb3Jrc3BhY2USCgoCaWQYASABKAkSEgoKYWNjb3VudF9pZBgCIAEoCRIRCglkYWVtb25faWQYAyABKAkSEgoKcHJvamVjdF9pZBgEIAEoCRIMCgRuYW1lGAUgASgJEgwKBHBhdGgYBiABKAkSDgoGYnJhbmNoGAcgASgJEg8KB2lzX21haW4YCCABKAgSEgoKY3JlYXRlZF9hdBgJIAEoARIRCglhZGRpdGlvbnMYCiABKAUSEQoJZGVsZXRpb25zGAsgASgFIo8CCgRUYXNrEgoKAmlkGAEgASgJEhIKCmFjY291bnRfaWQYAiABKAkSEQoJZGFlbW9uX2lkGAMgASgJEhIKCnByb2plY3RfaWQYBCABKAkSFAoMd29ya3NwYWNlX2lkGAUgASgJEg0KBXRpdGxlGAYgASgJEiUKBnN0YXR1cxgHIAEoDjIVLmNvZmx1eC52MS5UYXNrU3RhdHVzEhcKCnNlc3Npb25faWQYCCABKAlIAIgBARIWCglleGl0X2NvZGUYCSABKAVIAYgBARISCgpjcmVhdGVkX2F0GAogASgBEhIKCnVwZGF0ZWRfYXQYCyABKAFCDQoLX3Nlc3Npb25faWRCDAoKX2V4aXRfY29kZSJLCgdGc0VudHJ5EgwKBG5hbWUYASABKAkSJAoEa2luZBgCIAEoDjIWLmNvZmx1eC52MS5Gc0VudHJ5S2luZBIMCgRzaXplGAMgASgBIjEKClNlc3Npb25SZWYSEgoKc2Vzc2lvbl9pZBgBIAEoCRIPCgd0YXNrX2lkGAIgASgJIjEKDFNlc3Npb25Qb3J0cxISCgpzZXNzaW9uX2lkGAEgASgJEg0KBXBvcnRzGAIgAygNIigKC1BvcnRQcmV2aWV3EgwKBHBvcnQYASABKA0SCwoDdXJsGAIgASgJIpEBCg9TZXNzaW9uQWdlbnRSZWYSEgoKc2Vzc2lvbl9pZBgBIAEoCRIPCgd0YXNrX2lkGAIgASgJEg0KBWFnZW50GAMgASgJEg0KBXN0YXRlGAQgASgJEg8KB21lc3NhZ2UYBSABKAkSEAoIcHJvZ3Jlc3MYBiABKAkSGAoQYWdlbnRfc2Vzc2lvbl9pZBgHIAEoCSJDCglUYXNrUG9ydHMSDwoHdGFza19pZBgBIAEoCRIlCgVwb3J0cxgCIAMoCzIWLmNvZmx1eC52MS5Qb3J0UHJldmlldyJ9CgpFeGVjUmVzdWx0EhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSEQoJZXhpdF9jb2RlGAMgASgFEg4KBnN0ZG91dBgEIAEoCRIOCgZzdGRlcnIYBSABKAkSEgoFZXJyb3IYBiABKAlIAIgBAUIICgZfZXJyb3IiiQEKCEZzTGlzdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSCgoCb2sYAiABKAgSIwoHZW50cmllcxgDIAMoCzISLmNvZmx1eC52MS5Gc0VudHJ5EhIKBWVycm9yGAQgASgJSACIAQESEQoEcGF0aBgFIAEoCUgBiAEBQggKBl9lcnJvckIHCgVfcGF0aCJdCgxGc1JlYWRSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBIPCgdjb250ZW50GAMgASgJEhIKBWVycm9yGAQgASgJSACIAQFCCAoGX2Vycm9yImkKDUZzV3JpdGVSZXN1bHQSEgoKcmVxdWVzdF9pZBgBIAEoCRIKCgJvaxgCIAEoCBIRCgRwYXRoGAMgASgJSACIAQESEgoFZXJyb3IYBCABKAlIAYgBAUIHCgVfcGF0aEIICgZfZXJyb3IiKgoJUHJveHlEYXRhEg8KB2Nvbm5faWQYASABKAkSDAoEZGF0YRgCIAEoDCJZChFUcmFuc3BvcnRBcnRpZmFjdBILCgN1cmwYASABKAkSDgoGc2hhMjU2GAIgASgJEgwKBHNpemUYAyABKAQSGQoRcmVsZWFzZV9zaWduYXR1cmUYBCABKAki6AEKE0FjY291bnROb3RpZmljYXRpb24SCgoCaWQYASABKAkSEAoIc2VxdWVuY2UYAiABKAESDwoHbWVzc2FnZRgDIAEoCRIRCglkYWVtb25faWQYBCABKAkSEwoLZGV2aWNlX25hbWUYBSABKAkSFAoMd29ya3NwYWNlX2lkGAYgASgJEhYKDndvcmtzcGFjZV9uYW1lGAcgASgJEg8KB3Rhc2tfaWQYCCABKAkSFgoOdGVybWluYWxfdGl0bGUYCSABKAkSEgoKY3JlYXRlZF9hdBgKIAEoARIPCgdyZWFkX2F0GAsgASgBIpEBChBTZWNyZXRSZXF1ZXN0UmVmEhIKCnJlcXVlc3RfaWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCRIPCgd0YXNrX2lkGAMgASgJEgwKBG5hbWUYBCABKAkSDgoGcmVhc29uGAUgASgJEhIKCmNyZWF0ZWRfYXQYBiABKAESEgoKZXhwaXJlc19hdBgHIAEoASKvAQoORXhlY3V0b3JSdW5SZWYSDgoGcnVuX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSDwoHdGFza19pZBgDIAEoCRINCgV0aXRsZRgEIAEoCRINCgV3cml0ZRgFIAEoCBINCgVwaGFzZRgGIAEoCRIUCgxzdWJtaXR0ZWRfYXQYByABKAESEgoKc3RhcnRlZF9hdBgIIAEoARIRCglob3N0X2xvc3QYCSABKAgiZwoaV29ya3NwYWNlQW5ub3RhdGlvblN1bW1hcnkSFAoMd29ya3NwYWNlX2lkGAEgASgJEhAKCHJldmlzaW9uGAIgASgNEg8KB3BlbmRpbmcYAyABKA0SEAoIcmVzb2x2ZWQYBCABKA0qcAoKVGFza1N0YXR1cxIbChdUQVNLX1NUQVRVU19VTlNQRUNJRklFRBAAEhQKEFRBU0tfU1RBVFVTX0lETEUQARIXChNUQVNLX1NUQVRVU19SVU5OSU5HEAISFgoSVEFTS19TVEFUVVNfRVhJVEVEEAMqjwEKC0ZzRW50cnlLaW5kEh0KGUZTX0VOVFJZX0tJTkRfVU5TUEVDSUZJRUQQABIWChJGU19FTlRSWV9LSU5EX0ZJTEUQARIVChFGU19FTlRSWV9LSU5EX0RJUhACEhkKFUZTX0VOVFJZX0tJTkRfU1lNTElOSxADEhcKE0ZTX0VOVFJZX0tJTkRfT1RIRVIQBGIGcHJvdG8z");
+  fileDesc("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c2tTdGF0dXMSGwoXVEFTS19TVEFUVVNfVU5TUEVDSUZJRUQQABIUChBUQVNLX1NUQVRVU19JRExFEAESFwoTVEFTS19TVEFUVVNfUlVOTklORxACEhYKElRBU0tfU1RBVFVTX0VYSVRFRBADKo8BCgtGc0VudHJ5S2luZBIdChlGU19FTlRSWV9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSRlNfRU5UUllfS0lORF9GSUxFEAESFQoRRlNfRU5UUllfS0lORF9ESVIQAhIZChVGU19FTlRSWV9LSU5EX1NZTUxJTksQAxIXChNGU19FTlRSWV9LSU5EX09USEVSEAQq2QEKDEZzUmVhZFN0YXR1cxIeChpGU19SRUFEX1NUQVRVU19VTlNQRUNJRklFRBAAEhUKEUZTX1JFQURfU1RBVFVTX09LEAESHwobRlNfUkVBRF9TVEFUVVNfTk9UX01PRElGSUVEEAISHAoYRlNfUkVBRF9TVEFUVVNfTk9UX0ZPVU5EEAMSGwoXRlNfUkVBRF9TVEFUVVNfTk9UX0ZJTEUQBBIcChhGU19SRUFEX1NUQVRVU19UT09fTEFSR0UQBRIYChRGU19SRUFEX1NUQVRVU19FUlJPUhAGYgZwcm90bzM");
 
 /**
  * @generated from message coflux.v1.DaemonInfo
@@ -561,9 +561,28 @@ export type FsReadResult = Message<"coflux.v1.FsReadResult"> & {
   content: string;
 
   /**
+   * Free-form, human-readable text. Clients decide every state from `status`, never from this.
+   *
    * @generated from field: optional string error = 4;
    */
   error?: string | undefined;
+
+  /**
+   * Opaque revision of the file the answer describes (plan 20261001-terminal-file-tab), derived by
+   * the worker from file metadata; clients only compare it for equality. A worker that knows this
+   * field always sets it on OK and NOT_MODIFIED; an OK answer with an empty revision comes from a
+   * worker that predates it.
+   *
+   * @generated from field: string revision = 5;
+   */
+  revision: string;
+
+  /**
+   * UNSPECIFIED only from a worker that predates the field.
+   *
+   * @generated from field: coflux.v1.FsReadStatus status = 6;
+   */
+  status: FsReadStatus;
 };
 
 /**
@@ -572,6 +591,57 @@ export type FsReadResult = Message<"coflux.v1.FsReadResult"> & {
  */
 export const FsReadResultSchema: GenMessage<FsReadResult> = /*@__PURE__*/
   messageDesc(file_coflux_v1_common, 12);
+
+/**
+ * One entry of a DeviceFsStatResult, in request order (plan 20261001-terminal-file-tab).
+ *
+ * @generated from message coflux.v1.FsStatEntry
+ */
+export type FsStatEntry = Message<"coflux.v1.FsStatEntry"> & {
+  /**
+   * Echo of the requested path, byte for byte.
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * The path resolves (links followed) to something inside the workspace root. False for a
+   * missing path, a dangling link and a path that resolves outside the root.
+   *
+   * @generated from field: bool exists = 2;
+   */
+  exists: boolean;
+
+  /**
+   * The resolved target is a regular file.
+   *
+   * @generated from field: bool is_file = 3;
+   */
+  isFile: boolean;
+
+  /**
+   * The file's revision, comparable with FsReadResult.revision; empty unless `is_file`.
+   *
+   * @generated from field: string revision = 4;
+   */
+  revision: string;
+
+  /**
+   * Set when `exists`: the canonical path relative to the canonicalised root ("~" expanded,
+   * links and ".." resolved, absolute inputs made relative); empty for the root itself.
+   *
+   * @generated from field: string relative_path = 5;
+   */
+  relativePath: string;
+};
+
+/**
+ * Describes the message coflux.v1.FsStatEntry.
+ * Use `create(FsStatEntrySchema)` to create a new message.
+ */
+export const FsStatEntrySchema: GenMessage<FsStatEntry> = /*@__PURE__*/
+  messageDesc(file_coflux_v1_common, 13);
 
 /**
  * @generated from message coflux.v1.FsWriteResult
@@ -607,7 +677,7 @@ export type FsWriteResult = Message<"coflux.v1.FsWriteResult"> & {
  * Use `create(FsWriteResultSchema)` to create a new message.
  */
 export const FsWriteResultSchema: GenMessage<FsWriteResult> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 13);
+  messageDesc(file_coflux_v1_common, 14);
 
 /**
  * 端口转发隧道的原始 TCP 字节（server↔daemon 双向）
@@ -631,7 +701,7 @@ export type ProxyData = Message<"coflux.v1.ProxyData"> & {
  * Use `create(ProxyDataSchema)` to create a new message.
  */
 export const ProxyDataSchema: GenMessage<ProxyData> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 14);
+  messageDesc(file_coflux_v1_common, 15);
 
 /**
  * Independently signed native companion for the exact enclosing worker release.
@@ -665,7 +735,7 @@ export type TransportArtifact = Message<"coflux.v1.TransportArtifact"> & {
  * Use `create(TransportArtifactSchema)` to create a new message.
  */
 export const TransportArtifactSchema: GenMessage<TransportArtifact> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 15);
+  messageDesc(file_coflux_v1_common, 16);
 
 /**
  * Immutable source snapshots survive deletion of the original target.
@@ -734,7 +804,7 @@ export type AccountNotification = Message<"coflux.v1.AccountNotification"> & {
  * Use `create(AccountNotificationSchema)` to create a new message.
  */
 export const AccountNotificationSchema: GenMessage<AccountNotification> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 16);
+  messageDesc(file_coflux_v1_common, 17);
 
 /**
  * A pending secret request (plan 20260926-agent-secret-input): an agent in a coflux terminal ran
@@ -800,7 +870,7 @@ export type SecretRequestRef = Message<"coflux.v1.SecretRequestRef"> & {
  * Use `create(SecretRequestRefSchema)` to create a new message.
  */
 export const SecretRequestRefSchema: GenMessage<SecretRequestRef> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 17);
+  messageDesc(file_coflux_v1_common, 18);
 
 /**
  * A live executor run as the center may know it (plan 20260929-executor-pip): the metadata that
@@ -879,7 +949,7 @@ export type ExecutorRunRef = Message<"coflux.v1.ExecutorRunRef"> & {
  * Use `create(ExecutorRunRefSchema)` to create a new message.
  */
 export const ExecutorRunRefSchema: GenMessage<ExecutorRunRef> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 18);
+  messageDesc(file_coflux_v1_common, 19);
 
 /**
  * One workspace's browser annotations as the center may know them (plan
@@ -917,7 +987,7 @@ export type WorkspaceAnnotationSummary = Message<"coflux.v1.WorkspaceAnnotationS
  * Use `create(WorkspaceAnnotationSummarySchema)` to create a new message.
  */
 export const WorkspaceAnnotationSummarySchema: GenMessage<WorkspaceAnnotationSummary> = /*@__PURE__*/
-  messageDesc(file_coflux_v1_common, 19);
+  messageDesc(file_coflux_v1_common, 20);
 
 /**
  * @generated from enum coflux.v1.TaskStatus
@@ -985,4 +1055,64 @@ export enum FsEntryKind {
  */
 export const FsEntryKindSchema: GenEnum<FsEntryKind> = /*@__PURE__*/
   enumDesc(file_coflux_v1_common, 1);
+
+/**
+ * The typed outcome of an fs read (plan 20261001-terminal-file-tab).
+ *
+ * @generated from enum coflux.v1.FsReadStatus
+ */
+export enum FsReadStatus {
+  /**
+   * @generated from enum value: FS_READ_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * `content` is the whole file (lossy UTF-8) and `revision` is its revision.
+   *
+   * @generated from enum value: FS_READ_STATUS_OK = 1;
+   */
+  OK = 1,
+
+  /**
+   * The request's `known_revision` equals the file's current revision; `content` is empty.
+   *
+   * @generated from enum value: FS_READ_STATUS_NOT_MODIFIED = 2;
+   */
+  NOT_MODIFIED = 2,
+
+  /**
+   * The path does not exist (or a link in it is dangling).
+   *
+   * @generated from enum value: FS_READ_STATUS_NOT_FOUND = 3;
+   */
+  NOT_FOUND = 3,
+
+  /**
+   * The path exists but is not a regular file.
+   *
+   * @generated from enum value: FS_READ_STATUS_NOT_FILE = 4;
+   */
+  NOT_FILE = 4,
+
+  /**
+   * The file is larger than the worker's read cap (2 MB).
+   *
+   * @generated from enum value: FS_READ_STATUS_TOO_LARGE = 5;
+   */
+  TOO_LARGE = 5,
+
+  /**
+   * Anything else: the path resolves outside the workspace, an I/O failure.
+   *
+   * @generated from enum value: FS_READ_STATUS_ERROR = 6;
+   */
+  ERROR = 6,
+}
+
+/**
+ * Describes the enum coflux.v1.FsReadStatus.
+ */
+export const FsReadStatusSchema: GenEnum<FsReadStatus> = /*@__PURE__*/
+  enumDesc(file_coflux_v1_common, 2);
 

@@ -7,7 +7,7 @@
  * 判定刻意保守——宁可漏，不可把普通英文单词变成一片下划线：
  * - 带 `/` 的路径段；或
  * - `名字.扩展名` 形态（扩展名首字符是字母、总长 ≤ 10）。
- * URL 交给 addon-web-links，这里显式排除带 scheme 的 token。
+ * URLs belong to the web-link provider (terminal-web-links.ts); tokens with a scheme are excluded here.
  */
 
 export type TerminalFileReference = {

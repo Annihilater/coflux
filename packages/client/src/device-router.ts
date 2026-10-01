@@ -25,6 +25,7 @@ import {
   type DeviceExecutorHostRegistered,
   type DeviceExecutorReport,
   type DeviceExecutorTranscript,
+  type DeviceFsStatResult,
   type DevicePortsResult,
   type DeviceSessionCatalog,
   type FsListed,
@@ -82,6 +83,7 @@ const HEARTBEAT_MAX_MISSES = 2;
  * `empty_payload` on the RPC lane while the request was in flight). */
 export const DAEMON_OUTDATED_CODE = "daemon_outdated";
 const DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新后才能查看变更";
+const FILES_DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新后才能查看文件";
 /** The changes view reads one file at a time; a file near the worker's 6 MB per-side cap on a slow
  * link needs longer than the default RPC timeout. */
 const CHANGES_FILE_TIMEOUT_MS = 45_000;
@@ -357,6 +359,16 @@ interface DeviceRoute {
   /** Further `empty_payload` replies still expected on that generation for annotation requests that
    * were already failed together with the first one; swallowed, never shown as a generic error. */
   annotationStrayErrors?: { generation: bigint; count: number };
+  /** Where the worker answered `fsStat` with its request-id-less `empty_payload` (plan
+   * 20261001-terminal-file-tab): the elevated-lane generation it arrived on and the session-lane
+   * generation active at that moment. While either is still the active channel of its lane, later
+   * stats fail fast as daemon-outdated without being sent. The elevated lane is released as soon as
+   * no RPC is pending, so the long-lived session lane carries the verdict between hover bursts; a
+   * hot-upgraded worker drops both channels, and the new ones ask again. */
+  fsStatUnsupported?: { elevated: bigint; session?: bigint };
+  /** Further `empty_payload` replies still expected on that generation for `fsStat` requests that
+   * were already failed together with the first one; swallowed, never shown as a generic error. */
+  fsStatStrayErrors?: { generation: bigint; count: number };
   /** Executor transcript subscriptions by run id (plan 20260929-executor-pip). */
   executorSubscriptions: Map<string, ExecutorSubscription>;
   /** Executor viewer frames (subscribe / unsubscribe / stop) sent on a session-lane generation
@@ -1589,6 +1601,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // code the view renders as "the daemon needs updating", instead of a 20 s timeout plus a stray
     // global error.
     if (!requestId && code === "empty_payload" && channel.lane === "elevated") {
+      // `fsStat` (plan 20261001-terminal-file-tab) is attributed first, annotations-style: hovering
+      // puts several stats in flight and an old worker answers each with its own id-less error, so
+      // the ones still expected are counted and swallowed instead of reaching reportDeviceError.
+      // A worker that knows the changes RPCs but not fsStat can only mean the stats here.
+      if (attributeFsStatUnsupported(route, channel)) return true;
       const outdated = [...route.pendingRequests.values()].filter(
         (pending) => pending.sentGeneration === channel.generation && isChangesRequest(pending.payload),
       );
@@ -1701,6 +1718,31 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   function annotationsUnsupportedNow(route: DeviceRoute): boolean {
     const generation = route.annotationsUnsupportedGeneration;
     return generation !== undefined && route.sessionLane.active?.generation === generation;
+  }
+
+  /** Whether a request-id-less `empty_payload` on the elevated lane belongs to `fsStat` requests in
+   * flight on this channel (plan 20261001-terminal-file-tab). The heartbeat never travels on the
+   * elevated lane, so there is no ambiguity with it. */
+  function attributeFsStatUnsupported(route: DeviceRoute, channel: DeviceChannel): boolean {
+    const stray = route.fsStatStrayErrors;
+    if (stray && stray.generation === channel.generation && stray.count > 0) {
+      stray.count -= 1;
+      return true;
+    }
+    const pending = [...route.pendingRequests.values()].filter((entry) => entry.payload.case === "fsStat");
+    const sent = pending.filter((entry) => entry.sentGeneration === channel.generation);
+    if (sent.length === 0) return false;
+    route.fsStatUnsupported = { elevated: channel.generation, session: route.sessionLane.active?.generation };
+    route.fsStatStrayErrors = { generation: channel.generation, count: sent.length - 1 };
+    for (const entry of pending) finishPendingWithError(route, entry, fsOutdatedError());
+    return true;
+  }
+
+  function fsStatUnsupportedNow(route: DeviceRoute): boolean {
+    const verdict = route.fsStatUnsupported;
+    if (!verdict) return false;
+    if (route.elevatedLane.active?.generation === verdict.elevated) return true;
+    return verdict.session !== undefined && route.sessionLane.active?.generation === verdict.session;
   }
 
   /* ===== Executor transcript viewers (plan 20260929-executor-pip) ===== */
@@ -2484,13 +2526,28 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("fsListed", response);
   }
 
-  async function fsRead(daemonId: string, workspaceId: string, path: string): Promise<FsReadResult> {
+  /** `knownRevision` makes the read conditional (plan 20261001-terminal-file-tab); without it the
+   * request is byte-identical to what an older client sends. */
+  async function fsRead(daemonId: string, workspaceId: string, path: string, knownRevision?: string): Promise<FsReadResult> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "fsRead",
-      value: { requestId: randomUUID(), workspaceId, path },
+      value: { requestId: randomUUID(), workspaceId, path, knownRevision: knownRevision || undefined },
     });
     if (response.case === "fsReadResult") return response.value;
     throw unexpectedResponse("fsReadResult", response);
+  }
+
+  /** Batched existence check (plan 20261001-terminal-file-tab). On a channel whose worker already
+   * proved too old for it, fails with DAEMON_OUTDATED_CODE without sending. */
+  async function fsStat(daemonId: string, workspaceId: string, paths: string[]): Promise<DeviceFsStatResult> {
+    const route = routeFor(daemonId);
+    if (fsStatUnsupportedNow(route)) throw fsOutdatedError();
+    const response = await request(daemonId, DeviceScope.RPC, {
+      case: "fsStat",
+      value: { requestId: randomUUID(), workspaceId, paths },
+    });
+    if (response.case === "fsStatResult") return response.value;
+    throw unexpectedResponse("fsStatResult", response);
   }
 
   /** `uncommitted` false is the branch scope, byte-identical to what an older client sends. */
@@ -2925,6 +2982,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     exec,
     fsList,
     fsRead,
+    fsStat,
     fsWrite,
     changesList,
     changesFile,
@@ -2958,6 +3016,7 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "execRun":
     case "fsList":
     case "fsRead":
+    case "fsStat":
     case "fsWrite":
     case "portsRequest":
     case "secretAnswer":
@@ -2989,6 +3048,7 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "execResult":
     case "fsListed":
     case "fsReadResult":
+    case "fsStatResult":
     case "fsWriteResult":
     case "portsResult":
     case "secretAnswerAck":
@@ -3028,6 +3088,11 @@ function isAnnotationPayload(payload: RuntimeDevicePayload): boolean {
     default:
       return false;
   }
+}
+
+/** The worker predates `fsStat` (plan 20261001-terminal-file-tab). */
+function fsOutdatedError(): Error {
+  return new DeviceRouteError(FILES_DAEMON_OUTDATED_MESSAGE, DAEMON_OUTDATED_CODE);
 }
 
 function annotationsUnsupportedError(): Error {

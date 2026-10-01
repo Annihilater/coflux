@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
@@ -24,6 +24,10 @@ import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
 import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
+import type { FileRuntime } from "@/components/workbench/file-runtime";
+import { fileTabTitle } from "@/components/workbench/file-tabs";
+import { FileView } from "@/components/workbench/file-view";
+import { FileTypeIcon } from "@/components/workbench/changes-file-icon";
 import { BrowserTabGlyph } from "@/components/workbench/browser-view";
 import { desktop } from "@/config";
 import type { TerminalAttach } from "@/components/workbench/terminal-attach";
@@ -35,6 +39,7 @@ import {
   groupBodyStyle,
   groupFrameStyle,
   isBrowserTabId,
+  isFileTabId,
   isScreenTabId,
   layoutGeometry,
   moveTabToGroup,
@@ -169,6 +174,8 @@ export type WorkspaceLayoutActions = {
   createScreenTab: (workspaceId: string, groupId: string) => void;
   /** A screen tab's close button / context menu: ends the remote session, no confirmation. */
   closeScreenTab: (workspaceId: string, tabId: string) => void;
+  /** A file tab's close button / context menu (plan 20261001-terminal-file-tab): removes the tab, no confirmation. */
+  closeFileTab: (workspaceId: string, tabId: string) => void;
 };
 
 type WorkspaceTerminalProps = {
@@ -195,6 +202,8 @@ type WorkspaceTerminalProps = {
   browser: BrowserRuntime;
   /** Remote screen tabs' records for their strip chips (plan 20260929-remote-desktop). */
   screens: ScreenRuntime;
+  /** File tabs' records and views (plan 20261001-terminal-file-tab). */
+  files: FileRuntime;
   /** Whether 屏幕 is offered in this workspace's ＋ menu: its device advertises the helper and is not this Mac. */
   canOpenScreen: boolean;
   /** The group whose ＋ menu is open, if it is in this workspace. */
@@ -250,9 +259,13 @@ function NewTabMenu({
   // from the last committed render, so it is switched off while the menu is open and stays off until
   // the trigger loses focus or the pointer comes back to it.
   const [tooltipQuiet, setTooltipQuiet] = useState(false);
-  useEffect(() => {
+  // Quieted when the menu opens: adjusted during render when `open` flips (null: not synced yet), so
+  // it is committed together with the open menu.
+  const [syncedOpen, setSyncedOpen] = useState<boolean | null>(null);
+  if (open !== syncedOpen) {
+    setSyncedOpen(open);
     if (open) setTooltipQuiet(true);
-  }, [open]);
+  }
   useEffect(() => {
     const trigger = anchorRef.current;
     if (!tooltipQuiet || !trigger) return;
@@ -375,6 +388,8 @@ type DragGhost = {
   browser: { favicon: string | null } | null;
   /** A screen tab's ghost shows the monitor glyph (plan 20260929-remote-desktop). */
   screen: boolean;
+  /** A file tab's ghost shows its file-type icon (plan 20261001-terminal-file-tab): the file's path. */
+  file: string | null;
   width: number;
   offsetX: number;
   offsetY: number;
@@ -426,7 +441,9 @@ function GroupSash({
   // cursor and text selection back, and tell the owner the drag is over. Pointer capture dies with
   // the element.
   const onEndRef = useRef(onEnd);
-  onEndRef.current = onEnd;
+  useLayoutEffect(() => {
+    onEndRef.current = onEnd;
+  });
   useEffect(
     () => () => {
       const drag = dragRef.current;
@@ -514,6 +531,7 @@ export function WorkspaceTerminal({
   actions,
   browser,
   screens,
+  files,
   canOpenScreen,
   newTabMenuGroupId,
   agentTabs,
@@ -534,6 +552,7 @@ export function WorkspaceTerminal({
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
   const screenTabs = useStore(screens.tabs, (state) => state.tabs);
+  const fileTabs = useStore(files.tabs, (state) => state.tabs);
   const daemons = useStore(client.store, (state) => state.daemons);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
@@ -563,7 +582,7 @@ export function WorkspaceTerminal({
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
-  const seenDoneRef = useRef(new Set<string>());
+  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -573,11 +592,13 @@ export function WorkspaceTerminal({
   const dragEndedRef = useRef(true);
   // The drawn drag image: captured at dragstart, moved by a window dragover listener straight on the
   // DOM node (one transform per frame, no React render per pointer move).
+  // The state copy is what the ghost renders from; the ref is what the dragover listener moves.
   const dragGhostRef = useRef<DragGhost | null>(null);
+  const [dragGhost, setDragGhost] = useState<DragGhost | null>(null);
   const ghostNodeRef = useRef<HTMLDivElement | null>(null);
   // The last zone each group highlighted, so a highlight fading out stays where it was instead of
   // snapping back to the centre while it fades.
-  const lastZoneRef = useRef(new Map<string, LayoutSide | "center">());
+  const [lastZones, setLastZones] = useState<ReadonlyMap<string, LayoutSide | "center">>(() => new Map());
 
   useEffect(() => {
     if (!dragTaskId) return;
@@ -635,9 +656,8 @@ export function WorkspaceTerminal({
   }
 
   // pending 收敛：store 中分支已到目标值即清除；20s 兜底解锁（上报丢失时下次快照仍会纠正显示）
-  useEffect(() => {
-    if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
-  }, [pendingBranch, workspace?.branch]);
+  // Cleared during render as soon as the reported branch has reached the target.
+  if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
   useEffect(() => {
     if (!pendingBranch) return;
     const timer = window.setTimeout(() => setPendingBranch(null), 20_000);
@@ -650,11 +670,36 @@ export function WorkspaceTerminal({
   const geometry = layoutGeometry(layout);
   const singleGroup = geometry.groups.length === 1;
 
+  // Which finished agents have been seen, as of this render: a session is forgotten once its agent
+  // works again, and marked seen when its tab is on screen (this workspace is shown, the changes
+  // overlay is closed, and it is its group's active tab). Adjusted during render; the tabs below
+  // render from `seenNow`.
+  let seenNext = seenDone;
+  for (const { group } of geometry.groups) {
+    for (const taskId of group.tabs) {
+      if (isBrowserTabId(taskId) || isScreenTabId(taskId)) continue;
+      const sessionId = taskById.get(taskId)?.sessionId;
+      if (!sessionId) continue;
+      const agentState = sessionAgents[sessionId]?.state;
+      const done = agentState === "done" || agentState === "waiting";
+      if (agentState && !done && seenNext.has(sessionId)) {
+        const next = new Set(seenNext);
+        next.delete(sessionId);
+        seenNext = next;
+      } else if (done && active && !changesOpen && group.activeTabId === taskId && !seenNext.has(sessionId)) {
+        seenNext = new Set(seenNext).add(sessionId);
+      }
+    }
+  }
+  if (seenNext !== seenDone) setSeenDone(seenNext);
+  const seenNow = seenNext;
+
   function endDrag() {
     setDragTaskId(null);
     setDropTarget(null);
+    setDragGhost(null);
     dragGhostRef.current = null;
-    lastZoneRef.current.clear();
+    setLastZones((current) => (current.size === 0 ? current : new Map()));
   }
 
   function dropOnStrip(group: LayoutGroup, index: number) {
@@ -687,7 +732,7 @@ export function WorkspaceTerminal({
   }
 
   /** Native HTML5 drag of any tab (terminal or browser); its payload is not a file type. */
-  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], screenGhost = false) {
+  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], screenGhost = false, fileGhost: string | null = null) {
     return {
       draggable: true,
       onDragStart: (event: ReactDragEvent<HTMLDivElement>) => {
@@ -699,6 +744,7 @@ export function WorkspaceTerminal({
           title,
           browser: browserGhost,
           screen: screenGhost,
+          file: fileGhost,
           width: tabRect.width,
           offsetX: event.clientX - tabRect.left,
           offsetY: event.clientY - tabRect.top,
@@ -708,7 +754,9 @@ export function WorkspaceTerminal({
         // Changing the DOM inside dragstart can cancel the drag in Chromium; let it start first.
         dragEndedRef.current = false;
         window.setTimeout(() => {
-          if (!dragEndedRef.current) setDragTaskId(tabId);
+          if (dragEndedRef.current) return;
+          setDragTaskId(tabId);
+          setDragGhost(dragGhostRef.current);
         }, 0);
       },
       onDragEnd: () => {
@@ -856,6 +904,79 @@ export function WorkspaceTerminal({
     );
   }
 
+  /**
+   * A file tab's chip (plan 20261001-terminal-file-tab): the file-type icon, the file name (the
+   * workspace-relative path in a tooltip, since names collide and truncate), a close button — the
+   * same chrome, drag and split behaviour as the other tabs. Closing needs no confirmation.
+   */
+  function renderFileTab(
+    group: LayoutGroup,
+    tabId: string,
+    isActive: boolean,
+    bright: boolean,
+    activeClass: string,
+    idleClass: string,
+    indicators: ReactNode,
+  ) {
+    const record = fileTabs[tabId];
+    const path = record?.path ?? "";
+    const label = path ? fileTabTitle(path) : "文件";
+    const canSplit = group.tabs.length > 1;
+    return (
+      <div
+        key={tabId}
+        data-tab-slot
+        className={cn("relative shrink-0", dragTaskId === tabId && "opacity-50")}
+        style={NO_DRAG_REGION_STYLE}
+        {...tabDragProps(tabId, label, null, false, path)}
+      >
+        <ContextMenu
+          label={`标签页「${label}」操作`}
+          size="sm"
+          items={[
+            { label: "复制路径", isDisabled: !path, onClick: () => desktop.writeClipboard(path) },
+            { type: "divider" },
+            {
+              label: "移到右侧新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "right")),
+            },
+            {
+              label: "移到下方新分组",
+              isDisabled: !canSplit,
+              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "down")),
+            },
+            { type: "divider" },
+            { label: "关闭标签页", onClick: () => actions.closeFileTab(workspaceId, tabId) },
+          ]}
+        >
+          <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
+            <button className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left" onClick={() => actions.activateTab(workspaceId, tabId)}>
+              <FileTypeIcon path={path} className={bright ? "opacity-90" : "opacity-70"} />
+              {path ? (
+                <Tooltip content={path} placement="below">
+                  <span className="truncate">{label}</span>
+                </Tooltip>
+              ) : (
+                <span className="truncate">{label}</span>
+              )}
+            </button>
+            {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
+            <Tooltip content={bright ? `关闭标签页 ${modPrefix}W` : "关闭标签页"} placement="below">
+              <button
+                className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                onClick={() => actions.closeFileTab(workspaceId, tabId)}
+              >
+                <X className="size-3" />
+              </button>
+            </Tooltip>
+          </div>
+        </ContextMenu>
+        {indicators}
+      </div>
+    );
+  }
+
   function renderTab(group: LayoutGroup, taskId: string, index: number, groupFocused: boolean) {
     const isActive = group.activeTabId === taskId;
     // The focused group's active tab carries the full highlight; other groups' active tabs a weaker one.
@@ -892,6 +1013,7 @@ export function WorkspaceTerminal({
 
     if (isBrowserTabId(taskId)) return renderBrowserTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
     if (isScreenTabId(taskId)) return renderScreenTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
+    if (isFileTabId(taskId)) return renderFileTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
 
     const task = taskById.get(taskId);
     if (!task) return null;
@@ -902,14 +1024,7 @@ export function WorkspaceTerminal({
     const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
-    if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
-      seenDoneRef.current.delete(sessionId);
-    }
-    // Seen only when it is on screen: this workspace is shown, the changes overlay is closed, and it is its group's active tab.
-    if (active && !changesOpen && isActive && sessionId && (agentState === "done" || agentState === "waiting")) {
-      seenDoneRef.current.add(sessionId);
-    }
-    const seenDone = Boolean(sessionId && seenDoneRef.current.has(sessionId));
+    const tabSeenDone = Boolean(sessionId && seenNow.has(sessionId));
     // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
     const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
     // Moving a group's only tab into a new group beside that group would leave nothing behind.
@@ -960,7 +1075,7 @@ export function WorkspaceTerminal({
               ) : state === "detached" ? (
                 <Unplug className="size-3 shrink-0 text-warning" />
               ) : agentEntry ? (
-                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={seenDone} className={bright ? "opacity-90" : "opacity-70"} />
+                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={tabSeenDone} className={bright ? "opacity-90" : "opacity-70"} />
               ) : launchedAgent ? (
                 <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
               ) : (
@@ -1103,6 +1218,12 @@ export function WorkspaceTerminal({
             as a whole), so the empty state, the creating placeholder and the banners here still get clicks;
             banners are z-10, above the pane. */}
         <div className="relative min-h-0 min-w-0 flex-1 bg-terminal">
+          {/* A file tab's view (plan 20261001-terminal-file-tab) lives in the group body: no pane layer,
+              no webview. It remounts when its group's active tab changes; the runtime keeps what it
+              showed, so it comes back at once and only asks whether the file changed. */}
+          {group.activeTabId && isFileTabId(group.activeTabId) ? (
+            <FileView key={group.activeTabId} runtime={files} client={client} tabId={group.activeTabId} onScreen={active && !changesOpen} />
+          ) : null}
           {showsPending && pending ? (
             // pending tab 的主区（plan 078）：不挂 TerminalPane（假 id 不产生请求），只显示创建中。
             <div className="absolute inset-0 flex items-center justify-center">
@@ -1202,8 +1323,7 @@ export function WorkspaceTerminal({
       {dragTaskId && !changesOpen
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
-            if (target) lastZoneRef.current.set(group.id, target);
-            const shownZone = target ?? lastZoneRef.current.get(group.id) ?? "center";
+            const shownZone = target ?? lastZones.get(group.id) ?? "center";
             return (
               <div
                 key={`drop:${group.id}`}
@@ -1214,7 +1334,10 @@ export function WorkspaceTerminal({
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
                   const zone = zoneAt(event);
-                  if (target !== zone) setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  if (target === zone) return;
+                  setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  // Remembered so the highlight fades out where it was instead of snapping to the centre.
+                  setLastZones((current) => (current.get(group.id) === zone ? current : new Map(current).set(group.id, zone)));
                 }}
                 onDragLeave={(event) => {
                   const next = event.relatedTarget;
@@ -1246,25 +1369,27 @@ export function WorkspaceTerminal({
 
       {/* The drag image, drawn here (see EMPTY_DRAG_IMAGE): an opaque tab that follows the pointer.
           Positioned by the dragover listener, fixed to the viewport, never a pointer target. */}
-      {dragTaskId && dragGhostRef.current ? (
+      {dragTaskId && dragGhost ? (
         <div
           ref={ghostNodeRef}
           aria-hidden
           className="pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
-          style={{ transform: `translate3d(${dragGhostRef.current.x - dragGhostRef.current.offsetX}px, ${dragGhostRef.current.y - dragGhostRef.current.offsetY}px, 0)` }}
+          style={{ transform: `translate3d(${dragGhost.x - dragGhost.offsetX}px, ${dragGhost.y - dragGhost.offsetY}px, 0)` }}
         >
           <div
             className="flex h-7 max-w-52 items-center gap-1.5 rounded-md border border-border bg-popover px-2.5 text-sm text-foreground shadow-lg transition-[opacity,transform] duration-150 ease-out starting:scale-95 starting:opacity-0"
-            style={{ minWidth: Math.min(dragGhostRef.current.width, 208) }}
+            style={{ minWidth: Math.min(dragGhost.width, 208) }}
           >
-            {dragGhostRef.current.browser ? (
-              <BrowserTabGlyph favicon={dragGhostRef.current.browser.favicon} loading={false} className="opacity-90" />
-            ) : dragGhostRef.current.screen ? (
+            {dragGhost.browser ? (
+              <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
+            ) : dragGhost.screen ? (
               <Monitor className="size-3 shrink-0 opacity-90" />
+            ) : dragGhost.file !== null ? (
+              <FileTypeIcon path={dragGhost.file} />
             ) : (
               <SquareTerminal className="size-3 shrink-0 opacity-90" />
             )}
-            <span className="truncate">{dragGhostRef.current.title}</span>
+            <span className="truncate">{dragGhost.title}</span>
           </div>
         </div>
       ) : null}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type KeyboardEvent } from "react";
 import { Check, Plus } from "lucide-react";
 import { Divider } from "@astryxdesign/core/Divider";
 import { DropdownMenu, DropdownMenuItem, type DropdownMenuButtonProps } from "@astryxdesign/core/DropdownMenu";
@@ -68,9 +68,11 @@ function BranchMenuPanel(props: BranchMenuProps & { close: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Loaded once per panel (the panel is rebuilt on every open), with the listBranches of that open.
+  const listBranches = useEffectEvent(() => props.listBranches());
   useEffect(() => {
     let cancelled = false;
-    void props.listBranches().then((result) => {
+    void listBranches().then((result) => {
       if (cancelled) return;
       setBranches(result.branches);
       if (!result.ok) setLoadError(result.error);
@@ -81,7 +83,6 @@ function BranchMenuPanel(props: BranchMenuProps & { close: () => void }) {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const trimmed = query.trim();
@@ -97,11 +98,12 @@ function BranchMenuPanel(props: BranchMenuProps & { close: () => void }) {
   const isCurrent = (entry: Entry) => entry.kind === "branch" && entry.name === props.currentBranch;
   const actionable = (entry: Entry) => entry.kind === "create" || entry.taken === undefined || isCurrent(entry);
 
-  useEffect(() => {
+  // 只随查询/数据变化复位高亮: adjusted during render when either changes (null: not synced yet).
+  const [highlightFor, setHighlightFor] = useState<{ query: string; branches: string[] | null } | null>(null);
+  if (highlightFor === null || highlightFor.query !== query || highlightFor.branches !== branches) {
+    setHighlightFor({ query, branches });
     setHighlight(entries.findIndex(actionable));
-    // 只随查询/数据变化复位高亮
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, branches]);
+  }
 
   useEffect(() => {
     if (highlight < 0) return;
