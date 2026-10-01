@@ -251,11 +251,23 @@ impl Inner {
     }
 
     fn reserve_worker_slot(&self) -> bool {
-        self.worker_connections
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < self.limits.worker_connections).then_some(count + 1)
-            })
-            .is_ok()
+        // A compare-exchange loop rather than `fetch_update`, deprecated in favour of `try_update`,
+        // which older stable toolchains lack.
+        let mut count = self.worker_connections.load(Ordering::Acquire);
+        loop {
+            if count >= self.limits.worker_connections {
+                return false;
+            }
+            match self.worker_connections.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => count = current,
+            }
+        }
     }
 
     fn open(self: &Arc<Self>, open: DeviceLoopbackOpen) {
