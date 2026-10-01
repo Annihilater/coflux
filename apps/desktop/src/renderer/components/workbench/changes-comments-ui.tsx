@@ -278,7 +278,7 @@ export function CommentsHandOffMenu({ agents, disabled, onHandOff }: { agents: r
           variant: "ghost",
           size: "sm",
           isDisabled: disabled,
-          style: { height: 24, paddingInline: 6, gap: 4, flexShrink: 0 },
+          style: { color: "var(--muted-foreground)", height: 24, paddingInline: 6, gap: 4, flexShrink: 0 },
         }}
       >
         {agents.length === 0 ? (

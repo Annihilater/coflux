@@ -140,14 +140,19 @@ export function ChangesDiffPane(props: DiffPaneProps) {
   );
 }
 
-function HeaderButton({
+/** The changes view's icon button: the same 24 px ghost square as the browser toolbar's. */
+export function HeaderButton({
   label,
   pressed,
+  disabled,
+  className,
   onClick,
   children,
 }: {
   label: string;
   pressed?: boolean;
+  disabled?: boolean;
+  className?: string;
   onClick: () => void;
   children: ReactNode;
 }) {
@@ -157,9 +162,11 @@ function HeaderButton({
         type="button"
         aria-label={label}
         aria-pressed={pressed}
+        disabled={disabled}
         className={cn(
-          "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors",
+          "flex size-6 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-35 disabled:hover:bg-transparent",
           pressed ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          className,
         )}
         onClick={onClick}
       >

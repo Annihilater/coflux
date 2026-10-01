@@ -4,12 +4,12 @@ import { AlertCircle, Check, FileDiff, LoaderCircle, RefreshCw } from "lucide-re
 
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
-import { IconButton } from "@astryxdesign/core/IconButton";
 import { useToast } from "@astryxdesign/core/Toast";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient } from "@coflux/client";
 import { AnnotationPutSchema, create, type Annotation, type AnnotationCodeSide } from "@coflux/protocol";
 import { desktop } from "@/config";
+import { cn } from "@/lib/utils";
 import { agentTerminals, codeAnnotations, HAND_OFF_INSTRUCTION } from "@/components/workbench/browser-annotations";
 import { annotationsModelFor, useWorkspaceAnnotations } from "@/components/workbench/browser-annotations-model";
 import { useAnnotationUndo } from "@/components/workbench/browser-annotations-ui";
@@ -23,7 +23,7 @@ import {
   type LineRange,
 } from "@/components/workbench/changes-comments";
 import { OtherCommentsSection, type CodeCommentsController } from "@/components/workbench/changes-comments-ui";
-import { ChangesDiffPane, type ChangeFileData, type CurrentChange, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
+import { ChangesDiffPane, HeaderButton, type ChangeFileData, type CurrentChange, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
 import { ChangesFileTree, isVisibleTypingTarget } from "@/components/workbench/changes-file-tree";
 import { stepChange, type ChangeNavKind } from "@/components/workbench/changes-navigation";
 import { setChangesPreference, useChangesPreferences, type ChangesScope } from "@/components/workbench/changes-preferences";
@@ -487,16 +487,9 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
 
   const scopeMenu = <ScopeMenu scope={scope} onChange={(next) => setChangesPreference("scope", next)} />;
   const refreshButton = (
-    <IconButton
-      className="ml-auto"
-      label="刷新变更"
-      tooltip="刷新变更"
-      variant="ghost"
-      size="sm"
-      icon={<RefreshCw className="size-3.5" />}
-      isLoading={listLoading}
-      onClick={requestRefresh}
-    />
+    <HeaderButton className="ml-auto" label="刷新变更" disabled={listLoading} onClick={requestRefresh}>
+      <RefreshCw className={cn("size-3.5", listLoading && "animate-spin")} />
+    </HeaderButton>
   );
 
   if (listError || shownList === null || shownList.files.length === 0) {
