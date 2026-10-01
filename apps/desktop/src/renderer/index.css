@@ -270,14 +270,14 @@
    so a focused item that is not :focus-visible (and not hovered) is drawn
    transparent. Keyboard navigation (:focus-visible) keeps the background.
    !important beats StyleX's :not(#\#) specificity boost.
-   The ＋ new-tab menu's own list (.new-tab-menu) is exempt: ⌘T opens it from the
+   The ＋ new-tab menu's own list (.coflux-new-tab-menu) is exempt: ⌘T opens it from the
    keyboard, but Chromium does not count a ⌘-chord as keyboard input for
    :focus-visible, so after any mouse click its focused first item would vanish.
    Pointer opens of that menu need no rule, because Astryx DropdownMenu focuses
    the container, not an item. The exclusion sits on the item's ancestor menu, so
    the Agent ▸ flyout (its own role="menu", possibly a DOM descendant of the list)
    is still covered. */
-[role="menu"]:not(.new-tab-menu) [role="menuitem"]:focus:not(:focus-visible):not(:hover) {
+[role="menu"]:not(.coflux-new-tab-menu) [role="menuitem"]:focus:not(:focus-visible):not(:hover) {
   background-color: transparent !important;
 }
 
