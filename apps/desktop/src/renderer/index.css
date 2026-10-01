@@ -264,11 +264,20 @@
   outline: none;
 }
 
-/* Astryx 菜单项的 :focus 背景与 hover 同色（.x1c52tdz:focus），右键打开自动聚焦首项时
-   看起来"常亮"。指针模态（:focus 但非 :focus-visible）不显示焦点背景；
-   键盘方向键导航（:focus-visible）保留背景作为焦点指示。!important 用于压过 StyleX 的
-   :not(#\#) 提权。 */
-[role="menu"] [role="menuitem"]:focus:not(:focus-visible):not(:hover) {
+/* Astryx menu items have no hover background: hover moves focus, and the only
+   highlight is the :focus background. Context menus and submenu flyouts focus
+   their first item from script on a pointer open, which would look pre-selected,
+   so a focused item that is not :focus-visible (and not hovered) is drawn
+   transparent. Keyboard navigation (:focus-visible) keeps the background.
+   !important beats StyleX's :not(#\#) specificity boost.
+   The ＋ new-tab menu's own list (.coflux-new-tab-menu) is exempt: ⌘T opens it from the
+   keyboard, but Chromium does not count a ⌘-chord as keyboard input for
+   :focus-visible, so after any mouse click its focused first item would vanish.
+   Pointer opens of that menu need no rule, because Astryx DropdownMenu focuses
+   the container, not an item. The exclusion sits on the item's ancestor menu, so
+   the Agent ▸ flyout (its own role="menu", possibly a DOM descendant of the list)
+   is still covered. */
+[role="menu"]:not(.coflux-new-tab-menu) [role="menuitem"]:focus:not(:focus-visible):not(:hover) {
   background-color: transparent !important;
 }
 

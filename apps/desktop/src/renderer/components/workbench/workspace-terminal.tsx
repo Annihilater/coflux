@@ -294,6 +294,9 @@ function NewTabMenu({
         isMenuOpen={open}
         onOpenChange={changeOpen}
         menuWidth={200}
+        // Lands on the role="menu" list; index.css exempts it from the no-pre-highlight rule so the
+        // first item ⌘T focuses stays visible.
+        className="coflux-new-tab-menu"
         hasChevron={false}
         placement="below"
         alignment="start"
