@@ -41,9 +41,15 @@ type BoundLaunch = {
   heldSince: number | null;
 };
 
+/** A launch failure shown to the user. Desktop-local: never the client's `lastError` (see below). */
+export type AgentLaunchNotice = { id: number; message: string };
+
 export type AgentLaunches = {
   /** Task id → agent id of terminals opened as an agent, for their tab icon. */
   records: AgentTabRecords;
+  /** The latest launch failure, until dismissed. */
+  notice: AgentLaunchNotice | null;
+  dismissNotice: () => void;
   /** A pending create was started for an agent. */
   beginCreate: (pendingId: string, request: AgentLaunchRequest) => void;
   /** The pending create was dropped (its timeout or an error broadcast): its launch command goes with it. */
@@ -64,8 +70,12 @@ export type AgentLaunches = {
  * is typed once this client holds the terminal, on the first live prompt-start mark or after
  * PROMPT_FALLBACK_MS, command and Enter in one write; it is discarded when the task is removed or
  * exits, or when its pending create is dropped. Holding the terminal is not under the renderer's
- * control (a hidden group, an offline device), so a launch may wait indefinitely for it. A send that
- * fails is reported on the client's global error channel.
+ * control (a hidden group, an offline device), so a launch may wait indefinitely for it.
+ *
+ * A send that fails, or a created task that does not answer this create, is reported as a
+ * desktop-local notice, deliberately not through `client.reportLocalError`: the client's `lastError`
+ * stops every terminal mid-attach (terminal-attach.ts) and drops every in-flight create
+ * (workbench.tsx) — including the very terminal just created.
  */
 export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }: { tasks: readonly Task[]; snapshotReady: boolean }): AgentLaunches {
   const [records, setRecords] = useState<AgentTabRecords>(() => readAgentTabRecords(AGENT_TAB_STORE));
@@ -73,6 +83,12 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
   const pendingRef = useRef(new Map<string, AgentLaunchRequest>());
   const launchesRef = useRef(new Map<string, BoundLaunch>());
   const pollRef = useRef<number | undefined>(undefined);
+  const [notice, setNotice] = useState<AgentLaunchNotice | null>(null);
+  const noticeSeqRef = useRef(0);
+
+  function reportNotice(message: string) {
+    setNotice({ id: ++noticeSeqRef.current, message });
+  }
 
   function commitRecords(next: AgentTabRecords) {
     if (next === recordsRef.current) return;
@@ -92,7 +108,7 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
     launchesRef.current.delete(taskId);
     if (launchesRef.current.size === 0) stopPolling();
     if (!client.typeIntoHeldTerminal(taskId, `${launch.command}\r`)) {
-      client.reportLocalError(`没能把 ${agentDefinition(launch.agentId).name} 的启动命令送进终端，请在终端里手动输入。`);
+      reportNotice(`没能把 ${agentDefinition(launch.agentId).name} 的启动命令送进终端，请在终端里手动输入。`);
     }
   }
 
@@ -137,6 +153,8 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
 
   return {
     records,
+    notice,
+    dismissNotice: () => setNotice(null),
     beginCreate: (pendingId, request) => {
       pendingRef.current.set(pendingId, request);
     },
@@ -149,7 +167,7 @@ export function useAgentLaunches(client: CofluxClient, { tasks, snapshotReady }:
       pendingRef.current.delete(pendingId);
       const task = client.store.getState().tasks.find((item) => item.id === taskId);
       if (!answersAgentCreate(task?.title, request.title)) {
-        client.reportLocalError(
+        reportNotice(
           `没有启动 ${agentDefinition(request.agentId).name}：新出现的终端不是这次创建的那个，启动命令没有输入。`,
         );
         return;

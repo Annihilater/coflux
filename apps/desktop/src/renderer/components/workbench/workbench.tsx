@@ -1744,17 +1744,37 @@ export function Workbench({ client }: { client: CofluxClient }) {
         </div>
       ) : null}
 
-      {showError ? (
-        <div className="fixed bottom-4 right-4 z-40 flex max-w-md items-start gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-3 text-sm shadow-2xl">
-          <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <span className="leading-5 text-foreground">{displayError}</span>
-          <button
-            className="ml-2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => setDismissedErrorId(lastError!.id)}
-            title="关闭"
-          >
-            <X className="size-3.5" />
-          </button>
+      {showError || agentLaunches.notice ? (
+        <div className="fixed bottom-4 right-4 z-40 flex flex-col items-end gap-2">
+          {showError ? (
+            <div className="flex max-w-md items-start gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-3 text-sm shadow-2xl">
+              <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span className="leading-5 text-foreground">{displayError}</span>
+              <button
+                className="ml-2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={() => setDismissedErrorId(lastError!.id)}
+                title="关闭"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ) : null}
+          {/* Agent-launch failures (plan 20261001-desktop-agents): the same toast, but desktop-local —
+              never the client's lastError, whose side effects stop launching terminals and drop
+              every in-flight create. */}
+          {agentLaunches.notice ? (
+            <div className="flex max-w-md items-start gap-3 rounded-lg border border-destructive/30 bg-popover px-4 py-3 text-sm shadow-2xl">
+              <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span className="leading-5 text-foreground">{agentLaunches.notice.message}</span>
+              <button
+                aria-label="关闭"
+                className="ml-2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={agentLaunches.dismissNotice}
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
