@@ -3359,13 +3359,52 @@ impl DeviceRuntime {
                         "workspaceId 不属于本 daemon 当前清单",
                     );
                 };
-                let (ok, content, error) = crate::ops::read_file_text(&root, &request.path).await;
-                device_envelope::Payload::FsReadResult(wire::FsReadResult {
-                    request_id: request.request_id,
-                    ok,
-                    content,
-                    error,
+                let mut result = crate::ops::read_file_text(
+                    &root,
+                    &request.path,
+                    request.known_revision.as_deref(),
+                )
+                .await;
+                result.request_id = request.request_id;
+                device_envelope::Payload::FsReadResult(result)
+            }
+            // Terminal file links (plan 20261001-terminal-file-tab): anchored like FsRead.
+            device_envelope::Payload::FsStat(request) => {
+                let Some(root) = workspace_root(&services.state, &request.workspace_id) else {
+                    return device_error(
+                        Some(request.request_id),
+                        "workspace_unknown",
+                        "workspaceId 不属于本 daemon 当前清单",
+                    );
+                };
+                let failed = |request_id: String, error: &str| {
+                    device_envelope::Payload::FsStatResult(wire::DeviceFsStatResult {
+                        request_id,
+                        ok: false,
+                        error: Some(error.into()),
+                        entries: Vec::new(),
+                    })
+                };
+                if request.paths.len() > crate::ops::MAX_STAT_PATHS {
+                    return failed(request.request_id, "一次查询的路径过多");
+                }
+                let paths = request.paths;
+                let stat = tokio::task::spawn_blocking(move || {
+                    crate::ops::stat_paths(&root, &paths)
                 })
+                .await;
+                match stat {
+                    Ok(Some(entries)) => {
+                        device_envelope::Payload::FsStatResult(wire::DeviceFsStatResult {
+                            request_id: request.request_id,
+                            ok: true,
+                            error: None,
+                            entries,
+                        })
+                    }
+                    Ok(None) => failed(request.request_id, "工作区根目录不可用"),
+                    Err(_) => failed(request.request_id, "文件查询失败"),
+                }
             }
             device_envelope::Payload::FsWrite(request) => {
                 let Some(root) = workspace_root(&services.state, &request.workspace_id) else {
@@ -4621,6 +4660,7 @@ fn clear_request_id(payload: &mut device_envelope::Payload) {
         device_envelope::Payload::ExecRun(value) => value.request_id.clear(),
         device_envelope::Payload::FsList(value) => value.request_id.clear(),
         device_envelope::Payload::FsRead(value) => value.request_id.clear(),
+        device_envelope::Payload::FsStat(value) => value.request_id.clear(),
         device_envelope::Payload::FsWrite(value) => value.request_id.clear(),
         device_envelope::Payload::PortsRequest(value) => value.request_id.clear(),
         device_envelope::Payload::ChangesListRequest(value) => value.request_id.clear(),
@@ -4652,6 +4692,7 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::ExecResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsListed(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsReadResult(value) => value.request_id = request_id.to_string(),
+        device_envelope::Payload::FsStatResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::FsWriteResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::PortsResult(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::ChangesList(value) => value.request_id = request_id.to_string(),
@@ -4745,6 +4786,7 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         device_envelope::Payload::ExecRun(_)
         | device_envelope::Payload::FsList(_)
         | device_envelope::Payload::FsRead(_)
+        | device_envelope::Payload::FsStat(_)
         | device_envelope::Payload::FsWrite(_)
         | device_envelope::Payload::PortsRequest(_)
         | device_envelope::Payload::ChangesListRequest(_)
@@ -4814,6 +4856,7 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         device_envelope::Payload::ExecResult(_)
         | device_envelope::Payload::FsListed(_)
         | device_envelope::Payload::FsReadResult(_)
+        | device_envelope::Payload::FsStatResult(_)
         | device_envelope::Payload::FsWriteResult(_)
         | device_envelope::Payload::PortsResult(_)
         | device_envelope::Payload::ChangesList(_)
@@ -4872,6 +4915,7 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         device_envelope::Payload::ExecRun(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsList(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsRead(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::FsStat(value) => Some(value.request_id.clone()),
         device_envelope::Payload::FsWrite(value) => Some(value.request_id.clone()),
         device_envelope::Payload::PortsRequest(value) => Some(value.request_id.clone()),
         device_envelope::Payload::ChangesListRequest(value) => Some(value.request_id.clone()),
@@ -5367,6 +5411,7 @@ mod tests {
             ok: true,
             content: "x".repeat(4096),
             error: None,
+            ..Default::default()
         });
 
         let (waiters, cached) =

@@ -8,8 +8,9 @@
  * link would all "click" it. The rule therefore takes the button and whether the gesture left a
  * selection; the right click has its own menu (在系统浏览器中打开 / 在内置浏览器中打开 / 复制链接).
  *
- * File references (`src/a.ts:12:5`) are not web links and keep plan 109's gate: ⌘ (or Ctrl) + a
- * primary click copies the path.
+ * File links (`src/a.ts:12:5`, plan 20261001-terminal-file-tab) keep plan 109's gate: ⌘ (or Ctrl)
+ * + a primary click opens the file in a tab. A plain click does nothing — it is how the user
+ * selects text in a terminal. Copying the path moved to the right-click menu.
  *
  * Pure and fed plain fields: the renderer's unit tests run under Node with no DOM, so nothing here
  * may touch a MouseEvent or window at runtime.
@@ -32,7 +33,7 @@ export function shouldOpenTerminalWebLink(click: TerminalLinkClick, hasSelection
   return isPrimary(click) && !hasSelection;
 }
 
-/** A file reference is copied on ⌘/Ctrl + a primary click only. */
-export function shouldCopyTerminalFileReference(click: TerminalLinkClick): boolean {
+/** A file link opens on ⌘/Ctrl + a primary click only. */
+export function shouldOpenTerminalFileLink(click: TerminalLinkClick): boolean {
   return isPrimary(click) && (click.metaKey === true || click.ctrlKey === true);
 }

@@ -119,6 +119,73 @@ public enum Coflux_V1_FsEntryKind: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+/// The typed outcome of an fs read (plan 20261001-terminal-file-tab).
+public enum Coflux_V1_FsReadStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// `content` is the whole file (lossy UTF-8) and `revision` is its revision.
+  case ok // = 1
+
+  /// The request's `known_revision` equals the file's current revision; `content` is empty.
+  case notModified // = 2
+
+  /// The path does not exist (or a link in it is dangling).
+  case notFound // = 3
+
+  /// The path exists but is not a regular file.
+  case notFile // = 4
+
+  /// The file is larger than the worker's read cap (2 MB).
+  case tooLarge // = 5
+
+  /// Anything else: the path resolves outside the workspace, an I/O failure.
+  case error // = 6
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .ok
+    case 2: self = .notModified
+    case 3: self = .notFound
+    case 4: self = .notFile
+    case 5: self = .tooLarge
+    case 6: self = .error
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .ok: return 1
+    case .notModified: return 2
+    case .notFound: return 3
+    case .notFile: return 4
+    case .tooLarge: return 5
+    case .error: return 6
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_FsReadStatus] = [
+    .unspecified,
+    .ok,
+    .notModified,
+    .notFound,
+    .notFile,
+    .tooLarge,
+    .error,
+  ]
+
+}
+
 public struct Coflux_V1_DaemonInfo: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -458,6 +525,7 @@ public struct Coflux_V1_FsReadResult: Sendable {
 
   public var content: String = String()
 
+  /// Free-form, human-readable text. Clients decide every state from `status`, never from this.
   public var error: String {
     get {_error ?? String()}
     set {_error = newValue}
@@ -467,11 +535,48 @@ public struct Coflux_V1_FsReadResult: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
+  /// Opaque revision of the file the answer describes (plan 20261001-terminal-file-tab), derived by
+  /// the worker from file metadata; clients only compare it for equality. A worker that knows this
+  /// field always sets it on OK and NOT_MODIFIED; an OK answer with an empty revision comes from a
+  /// worker that predates it.
+  public var revision: String = String()
+
+  /// UNSPECIFIED only from a worker that predates the field.
+  public var status: Coflux_V1_FsReadStatus = .unspecified
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _error: String? = nil
+}
+
+/// One entry of a DeviceFsStatResult, in request order (plan 20261001-terminal-file-tab).
+public struct Coflux_V1_FsStatEntry: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Echo of the requested path, byte for byte.
+  public var path: String = String()
+
+  /// The path resolves (links followed) to something inside the workspace root. False for a
+  /// missing path, a dangling link and a path that resolves outside the root.
+  public var exists: Bool = false
+
+  /// The resolved target is a regular file.
+  public var isFile: Bool = false
+
+  /// The file's revision, comparable with FsReadResult.revision; empty unless `is_file`.
+  public var revision: String = String()
+
+  /// Set when `exists`: the canonical path relative to the canonicalised root ("~" expanded,
+  /// links and ".." resolved, absolute inputs made relative); empty for the root itself.
+  public var relativePath: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 public struct Coflux_V1_FsWriteResult: Sendable {
@@ -691,6 +796,10 @@ extension Coflux_V1_TaskStatus: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_FsEntryKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0FS_ENTRY_KIND_UNSPECIFIED\0\u{1}FS_ENTRY_KIND_FILE\0\u{1}FS_ENTRY_KIND_DIR\0\u{1}FS_ENTRY_KIND_SYMLINK\0\u{1}FS_ENTRY_KIND_OTHER\0")
+}
+
+extension Coflux_V1_FsReadStatus: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0FS_READ_STATUS_UNSPECIFIED\0\u{1}FS_READ_STATUS_OK\0\u{1}FS_READ_STATUS_NOT_MODIFIED\0\u{1}FS_READ_STATUS_NOT_FOUND\0\u{1}FS_READ_STATUS_NOT_FILE\0\u{1}FS_READ_STATUS_TOO_LARGE\0\u{1}FS_READ_STATUS_ERROR\0")
 }
 
 extension Coflux_V1_DaemonInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -1337,7 +1446,7 @@ extension Coflux_V1_FsListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
 
 extension Coflux_V1_FsReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FsReadResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}content\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}content\0\u{1}error\0\u{1}revision\0\u{1}status\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1349,6 +1458,8 @@ extension Coflux_V1_FsReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageI
       case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.content) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.revision) }()
+      case 6: try { try decoder.decodeSingularEnumField(value: &self.status) }()
       default: break
       }
     }
@@ -1371,6 +1482,12 @@ extension Coflux_V1_FsReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     try { if let v = self._error {
       try visitor.visitSingularStringField(value: v, fieldNumber: 4)
     } }()
+    if !self.revision.isEmpty {
+      try visitor.visitSingularStringField(value: self.revision, fieldNumber: 5)
+    }
+    if self.status != .unspecified {
+      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1379,6 +1496,58 @@ extension Coflux_V1_FsReadResult: SwiftProtobuf.Message, SwiftProtobuf._MessageI
     if lhs.ok != rhs.ok {return false}
     if lhs.content != rhs.content {return false}
     if lhs._error != rhs._error {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_FsStatEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FsStatEntry"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{1}exists\0\u{3}is_file\0\u{1}revision\0\u{3}relative_path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.exists) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.isFile) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.revision) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.relativePath) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    if self.exists != false {
+      try visitor.visitSingularBoolField(value: self.exists, fieldNumber: 2)
+    }
+    if self.isFile != false {
+      try visitor.visitSingularBoolField(value: self.isFile, fieldNumber: 3)
+    }
+    if !self.revision.isEmpty {
+      try visitor.visitSingularStringField(value: self.revision, fieldNumber: 4)
+    }
+    if !self.relativePath.isEmpty {
+      try visitor.visitSingularStringField(value: self.relativePath, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_FsStatEntry, rhs: Coflux_V1_FsStatEntry) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs.exists != rhs.exists {return false}
+    if lhs.isFile != rhs.isFile {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.relativePath != rhs.relativePath {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
