@@ -16,7 +16,7 @@ import type { NativeTransportBridge } from "./native-transport";
  * - stopped：已接入但 launchd 里没有活进程
  * - pending-auth：在跑、还没有 credentials.json（authToken 有值时可用当前登录态兑现）
  * - running：在跑、已登记
- * - update-ready：在跑、已登记、内置 supervisor 比在跑的新（只提示，点「重启」才换二进制）
+ * - update-ready：在跑、已登记、内置 supervisor 与在跑的不是同一个；怎么换见 `runtimeUpdate`
  * 完全磁盘访问单独用 fda 表达，与上面任一状态可叠加。
  */
 export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" | "running" | "update-ready";
@@ -26,8 +26,22 @@ export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" |
  * `connect` is the account check that runs before an enrollment. It is its own action rather than
  * part of `start` because it fails for its own reasons — no network, another account owns this Mac —
  * while the local runtime may be running perfectly; borrowing `start`'s label would misname the cause.
+ * `update` is a restart that moves the runtime onto the bundled version (automatic or 「重试」);
+ * its failure line must read as an update that did not apply, not as a restart that failed.
  */
-export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "stop" | "remove";
+export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "update" | "stop" | "remove";
+
+/**
+ * How a stale local runtime (status `update-ready`) gets onto the bundled version
+ * (plan 20261002-runtime-follows-app):
+ * - automatic: the running supervisor keeps its terminals in ptyd, so the main process replaces it
+ *   by itself, at most once per app launch per bundled runtime; nothing to click
+ * - failed: that attempt did not come up and the previous version was restored; the panel offers
+ *   「重试」, which runs the same replacement again
+ * - manual: the running supervisor predates ptyd (or ptyd is not there), replacing it ends the
+ *   terminals; the panel keeps 「更新」 and the main process asks for confirmation
+ */
+export type DesktopRuntimeUpdate = "automatic" | "failed" | "manual";
 
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
@@ -40,6 +54,8 @@ export type DesktopDaemonState = {
    * 「更新终端组件」：它会结束本机终端，所以要确认；普通的 supervisor 更新不受它影响、也不清它。
    */
   ptydUpdateReady?: boolean;
+  /** Present exactly when the running runtime is not the bundled one (status `update-ready`). */
+  runtimeUpdate?: DesktopRuntimeUpdate;
   status: DesktopDaemonStatus;
   /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
   bundled: boolean;

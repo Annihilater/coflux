@@ -11,6 +11,7 @@ import { buildDaemonSettings, daemonSettingsJson, parseCredentialsDaemonId, pars
 import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
 import { bundlePtydId, bundleRuntimeId, leaveRuntime, ptydStatus, runtimeStatus, runtimeSupportsLeave, stageRuntime, startPtyd, startRuntime, stopPtyd, stopRuntime, type PtydStatus, type RuntimeStatus } from "./desktop-runtime";
+import { resolveRuntimeUpdate, shouldFollowBundledRuntime, type RuntimeFollowFacts } from "./runtime-follow";
 import { replaceSupervisor, shouldRestartSupervisor } from "./runtime-replace";
 
 /**
@@ -58,7 +59,12 @@ export type DaemonManager = {
    */
   verifyAccount: (check: () => Promise<void>) => Promise<boolean>;
   enroll: () => Promise<void>;
-  /** 重启 / 更新 supervisor：终端留在 ptyd 里，不确认；新版起不来自动回滚到上一版 */
+  /**
+   * 重启 / 更新 supervisor：终端留在 ptyd 里，不确认；新版起不来自动回滚到上一版。
+   * A stale leave-capable runtime is replaced automatically once per launch
+   * (plan 20261002-runtime-follows-app); this verb is 「重试」 after that attempt failed, and the
+   * confirmed 「更新」 for a supervisor that predates ptyd.
+   */
   restart: () => Promise<void>;
   /** 更新 ptyd 本身：会结束终端，确认后停掉两者再从内置版本起 */
   updatePtyd: () => Promise<void>;
@@ -110,15 +116,30 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
   let disposed = false;
   let action: Promise<void> | null = null;
   let lastAutoRestartFailureAt: number | null = null;
+  /**
+   * Bundled runtime ids an automatic replacement was dispatched for during this app launch
+   * (plan 20261002-runtime-follows-app). Never cleared: a version that failed to start does not
+   * get a second automatic try; only the user's 「重试」 does, and an app restart starts afresh.
+   */
+  const followAttempted = new Set<string>();
   let state = derive();
 
   function liveTerminals(): number {
     if (ptyd) return ptyd.sessions.filter((session) => !session.exited).length;
     return runtime?.sessions.length ?? 0;
   }
+  function followFacts(): RuntimeFollowFacts {
+    return {
+      bundledId: desiredId,
+      running: runtime ? { runtimeId: runtime.runtimeId, supportsLeave: runtimeSupportsLeave(runtime) } : null,
+      ptydAlive: ptyd !== null,
+      attempted: followAttempted,
+    };
+  }
   function derive(): DesktopDaemonState {
     const registered = existsSync(paths.credentials);
     const installed = existsSync(marker);
+    const runtimeUpdate = resolveRuntimeUpdate(followFacts());
     const facts: DaemonFacts = {
       bundle: bundle ? { version: bundle.version } : null,
       installationExists: installed, supervisorExists: installed, workerExists: installed,
@@ -129,7 +150,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       fda: options.platform === "darwin" ? appFdaStatus() : parseFdaStatus(readText(paths.fdaStatus)),
       runningVersion: runtime?.version ?? parseSupervisorVersion(readText(paths.supervisorVersion)),
       binDir: paths.binDir,
-      updateReadyOverride: !!(runtime && desiredId && runtime.runtimeId !== desiredId),
+      updateReadyOverride: runtimeUpdate !== null,
       ...(busy ? { busy } : {}), ...((error ?? refreshError) ? { error: error ?? refreshError } : {}),
     };
     return {
@@ -138,6 +159,7 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
       legacyInstallation: !installed && existsSync(paths.plist),
       // ptyd 的身份单独比：只换 supervisor 的更新不清这个标志，也不会把旧 ptyd 当成已更新。
       ptydUpdateReady: !!(ptyd && desiredPtydId && ptyd.identity !== desiredPtydId),
+      ...(runtimeUpdate ? { runtimeUpdate } : {}),
     };
   }
   function emit(): void { if (!disposed) { state = derive(); for (const listener of listeners) listener(state); } }
@@ -148,6 +170,21 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     catch (failure) { log.warn("读取本机终端托管进程状态失败", String(failure)); ptyd = null; }
     emit();
     watchdog();
+    follow();
+  }
+  /**
+   * The runtime follows the app (plan 20261002-runtime-follows-app): a running, leave-capable
+   * supervisor on another runtimeId than the bundled one is replaced without a click — on app
+   * start, including the restart after an app auto-update. Terminals stay in ptyd. Once per launch
+   * per bundled id: the attempt is recorded before it runs, so a failure (rolled back by
+   * `restartSupervisor`) stays on the panel as 「更新未能应用」 + 「重试」 and never loops.
+   */
+  function follow(): void {
+    if (disposed || !desiredId) return;
+    if (!shouldFollowBundledRuntime({ ...followFacts(), busy: action !== null })) return;
+    followAttempted.add(desiredId);
+    log.info("本机运行组件与内置版本不同，自动更新到内置版本", { running: runtime?.runtimeId, bundled: desiredId });
+    void run("update", restartSupervisor);
   }
   /** supervisor 崩了（ptyd 还在、标记还在、没有动作在跑）：从标记指向的目录把它拉起来，不停在「已停止」等人点。 */
   function watchdog(): void {
@@ -319,7 +356,9 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     onChange: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     verifyAccount,
     enroll: () => run("start", start),
-    restart: () => run("restart", restartSupervisor),
+    // A restart that lands on another runtime is an update (「重试」 / the pre-ptyd 「更新」): its
+    // status line and failure line must say so.
+    restart: () => run(resolveRuntimeUpdate(followFacts()) ? "update" : "restart", restartSupervisor),
     updatePtyd: () => run("restart", async () => { if (await stopConfirmed("update-ptyd")) await start(); }),
     stop: () => run("stop", async () => { await stopConfirmed("stop"); }),
     remove: () => run("remove", async () => { if (await stopConfirmed("stop")) rmSync(marker, { force: true }); }),
