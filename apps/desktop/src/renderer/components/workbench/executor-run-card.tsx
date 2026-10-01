@@ -181,7 +181,7 @@ export function ExecutorRunCards({
   }, [panelOpen, focused, collapse]);
 
   // Hand the deck its runs after every render, before paint: a new card is placed before it shows.
-  // oxlint-disable-next-line react/exhaustive-deps -- runs after every render on purpose (see above); the setState calls only sit inside callbacks the deck invokes later on user input, never synchronously here
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- runs after every render on purpose (see above); the setState calls only sit inside callbacks the deck invokes later on user input, never synchronously here
   useLayoutEffect(() => {
     controller.setCallbacks({
       bringToFront: (runId) =>
