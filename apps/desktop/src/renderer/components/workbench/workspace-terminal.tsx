@@ -1384,8 +1384,8 @@ export function WorkspaceTerminal({
               <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
             ) : dragGhost.screen ? (
               <Monitor className="size-3 shrink-0 opacity-90" />
-            ) : dragGhostRef.current.file !== null ? (
-              <FileTypeIcon path={dragGhostRef.current.file} />
+            ) : dragGhost.file !== null ? (
+              <FileTypeIcon path={dragGhost.file} />
             ) : (
               <SquareTerminal className="size-3 shrink-0 opacity-90" />
             )}
