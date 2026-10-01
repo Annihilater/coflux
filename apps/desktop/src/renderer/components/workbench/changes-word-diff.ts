@@ -8,6 +8,8 @@
  * so a rewritten line keeps its plain line tint instead of turning into confetti.
  */
 
+import type { WhitespaceMode } from "@coflux/client";
+
 /** Character range `[start, end)` within one line. */
 export type WordRange = { start: number; end: number };
 export type WordEmphasis = { old: WordRange[]; new: WordRange[] };
@@ -33,15 +35,17 @@ export function tokenizeWords(line: string): Token[] {
 }
 
 /**
- * The changed ranges of each side, or null when the pair should get no word emphasis. With
- * `ignoreWhitespace`, whitespace never counts as a changed word: runs of different width compare
- * equal and unmatched whitespace is never emphasised.
+ * The changed ranges of each side, or null when the pair should get no word emphasis. The
+ * whitespace mode mirrors git's flag: from `ignoreAtEol` on, trailing whitespace is never
+ * emphasised; from `ignoreChange` on, runs of different width compare equal; with `ignoreAll`,
+ * unmatched whitespace is never emphasised anywhere.
  */
-export function wordEmphasis(oldLine: string, newLine: string, ignoreWhitespace: boolean): WordEmphasis | null {
+export function wordEmphasis(oldLine: string, newLine: string, whitespace: WhitespaceMode): WordEmphasis | null {
   if (oldLine.length > MAX_LINE_CHARS || newLine.length > MAX_LINE_CHARS) return null;
   const left = tokenizeWords(oldLine);
   const right = tokenizeWords(newLine);
-  const key = (token: Token) => (ignoreWhitespace && token.space ? " " : token.text);
+  const runsEqual = whitespace === "ignoreChange" || whitespace === "ignoreAll";
+  const key = (token: Token) => (runsEqual && token.space ? " " : token.text);
 
   let prefix = 0;
   while (prefix < left.length && prefix < right.length && key(left[prefix]!) === key(right[prefix]!)) prefix += 1;
@@ -88,8 +92,8 @@ export function wordEmphasis(oldLine: string, newLine: string, ignoreWhitespace:
   if (total > 0 && kept / total < MIN_SIMILARITY) return null;
 
   return {
-    old: changedRanges(left, leftMatched, ignoreWhitespace),
-    new: changedRanges(right, rightMatched, ignoreWhitespace),
+    old: changedRanges(left, leftMatched, whitespace),
+    new: changedRanges(right, rightMatched, whitespace),
   };
 }
 
@@ -122,12 +126,12 @@ function matchMiddle(a: string[], b: string[], mark: (aIndex: number, bIndex: nu
   }
 }
 
-/** Unmatched tokens as merged ranges; whitespace is skipped when it does not count. */
-function changedRanges(tokens: Token[], matched: boolean[], ignoreWhitespace: boolean): WordRange[] {
+/** Unmatched tokens as merged ranges; whitespace is skipped when the mode does not count it. */
+function changedRanges(tokens: Token[], matched: boolean[], whitespace: WhitespaceMode): WordRange[] {
   const ranges: WordRange[] = [];
   tokens.forEach((token, index) => {
     if (matched[index]) return;
-    if (ignoreWhitespace && token.space) return;
+    if (token.space && (whitespace === "ignoreAll" || (whitespace !== "show" && index === tokens.length - 1))) return;
     const last = ranges[ranges.length - 1];
     if (last && last.end === token.start) last.end = token.end;
     else ranges.push({ start: token.start, end: token.end });

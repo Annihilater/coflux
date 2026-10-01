@@ -145,3 +145,36 @@ export function ancestorKeys(nodes: readonly TreeNode[], path: string): string[]
   walk(nodes);
   return keys;
 }
+
+/* ----- Filter ----- */
+
+/** The filter box's terms: whitespace-separated, lowercased; empty means no filter. */
+export function filterTerms(query: string): string[] {
+  return query.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/** Every term is in the file's path (or a rename's old path), so `renderer/` narrows to a folder. */
+export function matchesFilter(file: ChangedFile, terms: readonly string[]): boolean {
+  const path = file.path.toLowerCase();
+  const oldPath = file.oldPath?.toLowerCase();
+  return terms.every((term) => path.includes(term) || Boolean(oldPath?.includes(term)));
+}
+
+/** Where the terms occur in a row's label, merged and in order, for highlighting. */
+export function filterHighlights(label: string, terms: readonly string[]): { start: number; end: number }[] {
+  const lower = label.toLowerCase();
+  const ranges: { start: number; end: number }[] = [];
+  for (const term of terms) {
+    for (let at = lower.indexOf(term); at >= 0; at = lower.indexOf(term, at + term.length)) {
+      ranges.push({ start: at, end: at + term.length });
+    }
+  }
+  ranges.sort((left, right) => left.start - right.start);
+  const merged: { start: number; end: number }[] = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}

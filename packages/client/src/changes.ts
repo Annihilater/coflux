@@ -1,4 +1,4 @@
-import { DeviceChangeStatus, type DeviceChangesFile, type DeviceChangesList } from "@coflux/protocol";
+import { ChangesWhitespace, DeviceChangeStatus, type DeviceChangesFile, type DeviceChangesList } from "@coflux/protocol";
 
 import { DAEMON_OUTDATED_CODE } from "./device-router";
 
@@ -18,8 +18,13 @@ export type ChangedFile = {
   /** The larger of the two sides in bytes. */
   size: number;
 };
+/**
+ * Which whitespace changes a file's patch leaves out, one git flag per level: none, trailing
+ * (`--ignore-space-at-eol`), amount (`-b`, which includes trailing) and all (`-w`).
+ */
+export type WhitespaceMode = "show" | "ignoreAtEol" | "ignoreChange" | "ignoreAll";
 /** An option of the changes RPCs that a worker must echo back to prove it honoured it. */
-export type ChangesOption = "uncommitted" | "ignoreWhitespace";
+export type ChangesOption = "uncommitted" | "whitespace";
 /**
  * `daemonOutdated`: the device's worker is too old. Without `outdatedOption` it predates the
  * changes RPCs altogether; with it, it answered but ignored that option (the default branch scope
@@ -35,7 +40,7 @@ export type ChangeFileResult =
       newExists: boolean;
       oldContent: string;
       newContent: string;
-      /** `git diff -U0` of the pair (with `-w` when asked); empty when a side is missing or both are equal. */
+      /** `git diff -U0` of the pair (with the whitespace mode's flag); empty when a side is missing or both are equal. */
       patch: string;
       binary: boolean;
     }
@@ -43,7 +48,7 @@ export type ChangeFileResult =
 
 export const CHANGES_OPTION_OUTDATED_MESSAGE: Record<ChangesOption, string> = {
   uncommitted: "这台设备的 daemon 版本过旧，不支持「未提交」。更新 daemon 后重试。",
-  ignoreWhitespace: "这台设备的 daemon 版本过旧，不支持「忽略空白」。更新 daemon 后重试。",
+  whitespace: "这台设备的 daemon 版本过旧，不支持这个空白处理方式。更新 daemon 后重试。",
 };
 
 function changedFileStatus(status: DeviceChangeStatus): ChangedFileStatus {
@@ -97,10 +102,22 @@ export function toChangesListResult(result: DeviceChangesList, uncommitted: bool
   };
 }
 
-/** A file response as the view sees it; a missing whitespace echo means the patch is not `-w`. */
-export function toChangeFileResult(result: DeviceChangesFile, ignoreWhitespace: boolean): ChangeFileResult {
+const WHITESPACE_WIRE: Record<WhitespaceMode, ChangesWhitespace> = {
+  show: ChangesWhitespace.UNSPECIFIED,
+  ignoreAtEol: ChangesWhitespace.IGNORE_AT_EOL,
+  ignoreChange: ChangesWhitespace.IGNORE_CHANGE,
+  ignoreAll: ChangesWhitespace.IGNORE_ALL,
+};
+
+export function whitespaceWire(mode: WhitespaceMode): ChangesWhitespace {
+  return WHITESPACE_WIRE[mode];
+}
+
+/** A file response as the view sees it; an echo other than the requested mode means the worker
+ * did not apply it (it predates the field, or the level). */
+export function toChangeFileResult(result: DeviceChangesFile, whitespace: WhitespaceMode): ChangeFileResult {
   if (!result.ok) return { ok: false, error: result.error || "读取文件失败", daemonOutdated: false };
-  if (ignoreWhitespace && !result.ignoreWhitespace) return optionOutdated("ignoreWhitespace");
+  if (result.whitespace !== WHITESPACE_WIRE[whitespace]) return optionOutdated("whitespace");
   return {
     ok: true,
     oldExists: result.oldExists,

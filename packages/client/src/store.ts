@@ -229,8 +229,8 @@ export type FsWriteResult = { ok: boolean; path?: string; error: string };
 
 /* Workspace changes (plans 20260929-changes-file-tree, 20261001-changes-review-polish): the shapes
  * and the response mapping live in ./changes. */
-import { changesFailure, toChangeFileResult, toChangesListResult, type ChangeFileResult, type ChangesListResult } from "./changes";
-export type { ChangedFile, ChangedFileStatus, ChangesFailure, ChangesListResult, ChangeFileResult, ChangesOption } from "./changes";
+import { changesFailure, toChangeFileResult, toChangesListResult, whitespaceWire, type ChangeFileResult, type ChangesListResult, type WhitespaceMode } from "./changes";
+export type { ChangedFile, ChangedFileStatus, ChangesFailure, ChangesListResult, ChangeFileResult, ChangesOption, WhitespaceMode } from "./changes";
 /** 设备授权兑现结果（plan 112；与桌面版 plan 113 的契约）：失败文案来自服务端 `deviceAuthorizeInfo{ ok:false }`
  * 或本地（未登录 / 连接未就绪 / 断连 / 超时）。 */
 export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
@@ -1470,21 +1470,21 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   /**
    * One changed file's two sides, against the `base` a previous `listWorkspaceChanges` returned.
-   * `ignoreWhitespace` asks for a `-w` patch; an old worker that ignores it is `daemonOutdated`.
+   * `whitespace` picks the patch's whitespace flag; a worker that does not apply it is `daemonOutdated`.
    */
   async function readWorkspaceChangeFile(
     workspaceId: string,
     base: string,
     path: string,
     oldPath?: string,
-    options: { ignoreWhitespace?: boolean } = {},
+    options: { whitespace?: WhitespaceMode } = {},
   ): Promise<ChangeFileResult> {
     const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
     if (!workspace) return { ok: false, error: "工作区不存在", daemonOutdated: false };
-    const ignoreWhitespace = options.ignoreWhitespace === true;
+    const whitespace = options.whitespace ?? "show";
     try {
-      const result = await deviceRouter.changesFile(workspace.daemonId, workspaceId, base, path, oldPath, ignoreWhitespace);
-      return toChangeFileResult(result, ignoreWhitespace);
+      const result = await deviceRouter.changesFile(workspace.daemonId, workspaceId, base, path, oldPath, whitespaceWire(whitespace));
+      return toChangeFileResult(result, whitespace);
     } catch (error) {
       return changesFailure(error);
     }

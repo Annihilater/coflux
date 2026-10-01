@@ -138,5 +138,15 @@
     "path": "coflux/v1/device.proto",
     "type": "FIELD_NO_DELETE",
     "message": "Previously present field \"8\" with name \"source\" on message \"Annotation\" was deleted."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"6\" with name \"ignore_whitespace\" on message \"DeviceChangesFileRequest\" was deleted."
+  },
+  {
+    "path": "coflux/v1/device.proto",
+    "type": "FIELD_NO_DELETE",
+    "message": "Previously present field \"10\" with name \"ignore_whitespace\" on message \"DeviceChangesFile\" was deleted."
   }
 ]

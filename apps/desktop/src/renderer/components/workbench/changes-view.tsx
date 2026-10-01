@@ -6,7 +6,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
 import { useToast } from "@astryxdesign/core/Toast";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient } from "@coflux/client";
+import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient, WhitespaceMode } from "@coflux/client";
 import { AnnotationPutSchema, create, type Annotation, type AnnotationCodeSide } from "@coflux/protocol";
 import { desktop } from "@/config";
 import { cn } from "@/lib/utils";
@@ -24,11 +24,11 @@ import {
 } from "@/components/workbench/changes-comments";
 import { OtherCommentsSection, type CodeCommentsController } from "@/components/workbench/changes-comments-ui";
 import { ChangesDiffPane, HeaderButton, type ChangeFileData, type CurrentChange, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
-import { ChangesFileTree, isVisibleTypingTarget } from "@/components/workbench/changes-file-tree";
+import { ChangesFileTree, ChangesFilterInput, isVisibleTypingTarget, type ChangesTreeHandle } from "@/components/workbench/changes-file-tree";
 import { stepChange, type ChangeNavKind } from "@/components/workbench/changes-navigation";
 import { setChangesPreference, useChangesPreferences, type ChangesScope } from "@/components/workbench/changes-preferences";
 import { shouldRefreshChanges, type ChangesRefreshObservation } from "@/components/workbench/changes-refresh";
-import { ancestorKeys, buildChangesTree, pickSelection, treeFileOrder } from "@/components/workbench/changes-tree";
+import { ancestorKeys, buildChangesTree, filterTerms, matchesFilter, pickSelection, treeFileOrder } from "@/components/workbench/changes-tree";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { usePaneWidth } from "@/components/workbench/use-pane-width";
@@ -47,7 +47,7 @@ type ChangesViewProps = {
  * device RPC; only the selected file's content is fetched, against the base the list returned.
  *
  * Plan 20261001-changes-review-polish adds the comparison scope (「分支全部改动」 / 「未提交」),
- * 忽略空白, F7 / ⇧F7 stepping across files, word emphasis (in the diff pane) and a file menu. What
+ * the whitespace mode, F7 / ⇧F7 stepping across files, word emphasis (in the diff pane) and a file menu. What
  * the view newly needs — the workspace's device and path, this machine's own daemon — it reads
  * itself, so its contract with the workbench is unchanged. */
 
@@ -65,6 +65,7 @@ const SCOPE_LABEL: Record<ChangesScope, string> = {
   uncommitted: "未提交",
 };
 
+const NO_FOLDERS: ReadonlySet<string> = new Set();
 const F7_SKIP_FOCUS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], dialog';
 
 /** `uncommitted`: which scope this list answers, so a list of the other scope is never shown. */
@@ -74,7 +75,7 @@ type ListError = { message: string; daemonOutdated: boolean; outdatedOption?: Ch
 type ContentState =
   | { key: string; status: "loading" }
   | { key: string; status: "error"; message: string; outdated: boolean }
-  | { key: string; status: "ready"; data: ChangeFileData; ignoreWhitespace: boolean };
+  | { key: string; status: "ready"; data: ChangeFileData; whitespace: WhitespaceMode };
 /** F7 / ⇧F7 position: the current change of `path`, or a landing still waiting for its content. */
 type Cursor = { path: string; index: number | null; pending: "first" | "last" | null; seq: number };
 
@@ -93,8 +94,8 @@ function wantsContent(file: ChangedFile, forced: ReadonlySet<string>): boolean {
 }
 
 /** The whitespace flag is part of the key: toggling it must not keep showing cached content. */
-function contentKey(base: string, file: ChangedFile, ignoreWhitespace: boolean): string {
-  return `${base}\0${file.oldPath ?? ""}\0${file.path}\0${ignoreWhitespace ? "w" : ""}`;
+function contentKey(base: string, file: ChangedFile, whitespace: WhitespaceMode): string {
+  return `${base}\0${file.oldPath ?? ""}\0${file.path}\0${whitespace}`;
 }
 
 function daemonOutdatedMessage(): string {
@@ -127,7 +128,7 @@ function commentFailureText(result: AnnotationFailure, action: string): string {
 }
 
 export function ChangesView({ workspaceId, active, client, defaultBranch, additions, deletions }: ChangesViewProps) {
-  const { mode, scope, ignoreWhitespace } = useChangesPreferences();
+  const { mode, scope, whitespace } = useChangesPreferences();
   const uncommitted = scope === "uncommitted";
   const [list, setList] = useState<ListState | null>(null);
   const [listError, setListError] = useState<ListError | null>(null);
@@ -137,6 +138,12 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   // folded folders and the forced large files survive closing and reopening the overlay.
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const [filter, setFilter] = useState("");
+  /** Folders folded while filtering, for the terms in `key` only: new terms start fully expanded,
+   * and clearing the filter brings back `collapsed` untouched. */
+  const [filterFolded, setFilterFolded] = useState<{ key: string; folded: ReadonlySet<string> }>(() => ({ key: "", folded: new Set() }));
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const treeHandleRef = useRef<ChangesTreeHandle | null>(null);
   const [forced, setForced] = useState<ReadonlySet<string>>(() => new Set());
   const [content, setContent] = useState<ContentState | null>(null);
   /** Bumped after every list load and on retry: the current file is refetched even if unchanged. */
@@ -185,18 +192,32 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   const shownList = list && list.uncommitted === uncommitted ? list : null;
   const tree = useMemo(() => buildChangesTree(shownList?.files ?? []), [shownList]);
   const fileByPath = useMemo(() => new Map((shownList?.files ?? []).map((file) => [file.path, file])), [shownList]);
+
+  /* ----- Filter ----- */
+  const terms = useMemo(() => filterTerms(filter), [filter]);
+  const termsKey = terms.join(" ");
+  const filtering = terms.length > 0;
+  const filteredFiles = useMemo(
+    () => (filtering ? (shownList?.files ?? []).filter((file) => matchesFilter(file, terms)) : (shownList?.files ?? [])),
+    [filtering, shownList, terms],
+  );
+  const filteredTree = useMemo(() => (filtering ? buildChangesTree(filteredFiles) : tree), [filtering, filteredFiles, tree]);
+  /** The files F7 walks: the filtered ones while filtering. */
+  const navOrder = useMemo(() => (filtering ? treeFileOrder(filteredTree) : (shownList?.order ?? [])), [filtering, filteredTree, shownList]);
+  const filterCollapsed = filterFolded.key === termsKey ? filterFolded.folded : NO_FOLDERS;
+
   const selectedFile = selectedPath ? (fileByPath.get(selectedPath) ?? null) : null;
   const groupedComments = useMemo(() => groupCommentsByFile(codeComments, shownList?.files ?? []), [codeComments, shownList]);
   const commentCounts = useMemo(() => pendingCommentCounts(groupedComments.byPath), [groupedComments]);
   const totals = useMemo(() => {
     let added = 0;
     let deleted = 0;
-    for (const file of shownList?.files ?? []) {
+    for (const file of filteredFiles) {
       added += file.additions;
       deleted += file.deletions;
     }
     return { added, deleted };
-  }, [shownList]);
+  }, [filteredFiles]);
 
   /** `opening`: the overlay was just opened. A vanished selection then falls back to the first file;
    * during a refresh while open it moves to its neighbour in tree order instead. Started only by the
@@ -248,7 +269,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision, uncommitted]);
 
   const wantedKey =
-    active && shownList && selectedFile && wantsContent(selectedFile, forced) ? contentKey(shownList.base, selectedFile, ignoreWhitespace) : null;
+    active && shownList && selectedFile && wantsContent(selectedFile, forced) ? contentKey(shownList.base, selectedFile, whitespace) : null;
 
   // Only the selected file is fetched, and only while the view is active: a background workspace
   // never fetches. A refresh of the same file keeps its current content on screen until the new
@@ -258,15 +279,14 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   const fetchContent = useEffectEvent((key: string): (() => void) | undefined => {
     if (!shownList || !selectedFile || listInFlightRef.current) return;
     let cancelled = false;
-    const whitespace = ignoreWhitespace;
     setContent((current) => (current?.key === key && current.status === "ready" ? current : { key, status: "loading" }));
     void client
-      .readWorkspaceChangeFile(workspaceId, shownList.base, selectedFile.path, selectedFile.oldPath, { ignoreWhitespace: whitespace })
+      .readWorkspaceChangeFile(workspaceId, shownList.base, selectedFile.path, selectedFile.oldPath, { whitespace })
       .then((result) => {
         if (cancelled) return;
         if (result.ok) {
           const { ok: _ok, ...data } = result;
-          setContent({ key, status: "ready", data, ignoreWhitespace: whitespace });
+          setContent({ key, status: "ready", data, whitespace });
         } else {
           const outdatedOption = Boolean(result.outdatedOption);
           setContent({
@@ -291,6 +311,13 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }
 
   function setExpanded(key: string, expanded: boolean) {
+    if (filtering) {
+      const folded = new Set(filterCollapsed);
+      if (expanded) folded.delete(key);
+      else folded.add(key);
+      setFilterFolded({ key: termsKey, folded });
+      return;
+    }
     setCollapsed((current) => {
       if (expanded === !current.has(key)) return current;
       const next = new Set(current);
@@ -305,9 +332,9 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     if (isRenameOnly(file)) return { kind: "rename-only", from: file.oldPath ?? "" };
     if (file.size > MAX_FILE_BYTES) return { kind: "large", canLoad: false };
     if (isLarge(file) && !forced.has(file.path)) return { kind: "large", canLoad: true };
-    const key = shownList ? contentKey(shownList.base, file, ignoreWhitespace) : null;
+    const key = shownList ? contentKey(shownList.base, file, whitespace) : null;
     if (!content || content.key !== key) return { kind: "loading" };
-    if (content.status === "ready") return { kind: "ready", data: content.data, ignoreWhitespace: content.ignoreWhitespace };
+    if (content.status === "ready") return { kind: "ready", data: content.data, whitespace: content.whitespace };
     if (content.status === "error") return { kind: "error", message: content.message, outdated: content.outdated };
     return { kind: "loading" };
   }
@@ -330,7 +357,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   function step(delta: 1 | -1) {
     if (!shownList) return;
     const index = cursorHere && cursorHere.pending === null ? cursorHere.index : null;
-    const result = stepChange(shownList.order, selectedFile?.path ?? null, index, selectedCount, delta, navKind);
+    const result = stepChange(navOrder, selectedFile?.path ?? null, index, selectedCount, delta, navKind);
     if (result.kind === "none") return;
     seqRef.current += 1;
     if (result.kind === "change") {
@@ -338,7 +365,14 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       return;
     }
     setSelectedPath(result.path);
-    revealInTree(tree, result.path);
+    if (filtering) {
+      const ancestors = ancestorKeys(filteredTree, result.path);
+      if (ancestors.some((key) => filterCollapsed.has(key))) {
+        setFilterFolded({ key: termsKey, folded: new Set([...filterCollapsed].filter((key) => !ancestors.includes(key))) });
+      }
+    } else {
+      revealInTree(tree, result.path);
+    }
     setCursor({ path: result.path, index: null, pending: result.land, seq: seqRef.current });
   }
 
@@ -373,6 +407,25 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       event.preventDefault();
       event.stopPropagation();
       stepRef.current(event.shiftKey ? -1 : 1);
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [active]);
+
+  // ⌘F focuses the filter. No terminal holds ⌘F while the overlay is open: the workbench focuses
+  // no terminal pane then.
+  useEffect(() => {
+    if (!active) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.code !== "KeyF" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.defaultPrevented) return;
+      const input = filterInputRef.current;
+      if (!input) return;
+      const focused = document.activeElement;
+      if (focused instanceof Element && focused.closest(F7_SKIP_FOCUS)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      input.focus();
+      input.select();
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
@@ -539,23 +592,32 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       <div className="relative flex shrink-0 flex-col border-r border-border bg-background" style={{ width: treeWidth.width }}>
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border pl-1.5 pr-1.5 text-sm text-muted-foreground">
           {scopeMenu}
-          <span className="shrink-0 whitespace-nowrap">{shownList.files.length} 个文件</span>
+          <span className="shrink-0 whitespace-nowrap">
+            {filtering ? `${filteredFiles.length} / ${shownList.files.length}` : shownList.files.length} 个文件
+          </span>
           <span className="min-w-0 truncate font-mono tabular-nums">
             <span className="text-success">+{totals.added}</span> <span className="text-destructive">−{totals.deleted}</span>
           </span>
           {refreshButton}
         </div>
+        <ChangesFilterInput value={filter} onChange={setFilter} onEnterTree={() => treeHandleRef.current?.enter()} inputRef={filterInputRef} />
         <div className="min-h-0 flex-1">
-          <ChangesFileTree
-            nodes={tree}
-            collapsed={collapsed}
-            onSetExpanded={setExpanded}
-            selectedPath={selectedPath}
-            onSelect={setSelectedPath}
-            active={active}
-            fileMenuItems={fileMenuItems}
-            commentCounts={commentCounts}
-          />
+          {filtering && filteredFiles.length === 0 ? (
+            <p className="px-3 py-4 text-center text-sm text-muted-foreground">没有匹配的文件</p>
+          ) : (
+            <ChangesFileTree
+              nodes={filteredTree}
+              collapsed={filtering ? filterCollapsed : collapsed}
+              onSetExpanded={setExpanded}
+              selectedPath={selectedPath}
+              onSelect={setSelectedPath}
+              active={active}
+              fileMenuItems={fileMenuItems}
+              commentCounts={commentCounts}
+              terms={terms}
+              handle={treeHandleRef}
+            />
+          )}
         </div>
         {otherComments(groupedComments.others, commentsReadOnly)}
         <SidebarResizeHandle control={treeWidth} />
@@ -567,8 +629,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
             state={selectedState}
             mode={mode}
             onModeChange={(next) => setChangesPreference("mode", next)}
-            ignoreWhitespace={ignoreWhitespace}
-            onIgnoreWhitespaceChange={(next) => setChangesPreference("ignoreWhitespace", next)}
+            whitespace={whitespace}
+            onWhitespaceChange={(next) => setChangesPreference("whitespace", next)}
             onRetry={() => setContentRevision((revision) => revision + 1)}
             onForceLoad={() => setForced((current) => new Set(current).add(selectedFile.path))}
             onStep={step}

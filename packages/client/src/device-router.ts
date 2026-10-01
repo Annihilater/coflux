@@ -1,5 +1,6 @@
 import {
   create,
+  ChangesWhitespace,
   clampDim,
   decodeDeviceEnvelope,
   encodeDeviceEnvelope,
@@ -2508,11 +2509,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     base: string,
     path: string,
     oldPath?: string,
-    ignoreWhitespace = false,
+    whitespace = ChangesWhitespace.UNSPECIFIED,
   ): Promise<DeviceChangesFile> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "changesFileRequest",
-      value: { requestId: randomUUID(), workspaceId, base, path, oldPath, ignoreWhitespace },
+      value: { requestId: randomUUID(), workspaceId, base, path, oldPath, whitespace },
     }, CHANGES_FILE_TIMEOUT_MS);
     if (response.case === "changesFile") return response.value;
     throw unexpectedResponse("changesFile", response);
