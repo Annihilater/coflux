@@ -1778,6 +1778,29 @@ pub struct AnnotationFollowUp {
     #[prost(double, tag="3")]
     pub created_at: f64,
 }
+/// Where a code comment sits: lines of one file of the workspace, as the changes view showed them
+/// (plan 20261001-changes-review-comments). An annotation carries either this or page targets.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnnotationCodeAnchor {
+    /// Worktree-relative path on that side (a rename's old path for a base-side anchor).
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(enumeration="AnnotationCodeSide", tag="2")]
+    pub side: i32,
+    /// First and last commented line, 1-based and inclusive, on that side. A hint: the desktop
+    /// re-finds the lines by `excerpt` when the file has changed since.
+    #[prost(uint32, tag="3")]
+    pub start_line: u32,
+    #[prost(uint32, tag="4")]
+    pub end_line: u32,
+    /// The commented lines' text when the comment was written, one line per line (capped by the
+    /// worker).
+    #[prost(string, tag="5")]
+    pub excerpt: ::prost::alloc::string::String,
+    /// For a base-side anchor, the commit the lines were read from; empty for the working tree.
+    #[prost(string, tag="6")]
+    pub base_commit: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Annotation {
     /// Assigned by the worker on creation.
@@ -1807,7 +1830,7 @@ pub struct Annotation {
     pub updated_at: f64,
     #[prost(double, tag="14")]
     pub resolved_at: f64,
-    /// The elements the annotation points at, at least one. Target 0 is the anchor: the clicked
+    /// The elements the annotation points at, at least one unless `code` is set. Target 0 is the anchor: the clicked
     /// element, the first of a shift-click selection, or the element containing `region`. For a
     /// region annotation the other targets are the top-level elements inside the region.
     #[prost(message, repeated, tag="15")]
@@ -1815,6 +1838,10 @@ pub struct Annotation {
     /// Set when the user dragged a region instead of picking elements.
     #[prost(message, optional, tag="16")]
     pub region: ::core::option::Option<AnnotationRegion>,
+    /// A code comment written in the changes view (plan 20261001-changes-review-comments): set
+    /// instead of `targets` (an annotation has one or the other). An edit that sends none keeps it.
+    #[prost(message, optional, tag="17")]
+    pub code: ::core::option::Option<AnnotationCodeAnchor>,
 }
 /// An image uploaded with a put. `data` is the encoded image (PNG, JPEG, WebP or GIF).
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1827,7 +1854,7 @@ pub struct AnnotationImageUpload {
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
 /// Create (empty annotation_id) or edit an annotation. On edit only the comment, the targets, the
-/// region and the images change; status and numbering are the worker's.
+/// region, the code anchor and the images change; status and numbering are the worker's.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AnnotationPut {
     #[prost(message, optional, tag="1")]
@@ -1884,6 +1911,11 @@ pub struct DeviceAnnotationsListed {
     pub revision: u32,
     #[prost(message, repeated, tag="5")]
     pub annotations: ::prost::alloc::vec::Vec<Annotation>,
+    /// Set by every worker that stores code anchors (plan 20261001-changes-review-comments), on every
+    /// response including `ok: false`: it means "this worker decodes Annotation.code", not that the
+    /// store is healthy. Without it the changes view offers no code comments.
+    #[prost(bool, tag="6")]
+    pub code_comments: bool,
 }
 /// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3153,6 +3185,38 @@ impl AnnotationImageKind {
             "ANNOTATION_IMAGE_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "ANNOTATION_IMAGE_KIND_SCREENSHOT" => Some(Self::Screenshot),
             "ANNOTATION_IMAGE_KIND_REFERENCE" => Some(Self::Reference),
+            _ => None,
+        }
+    }
+}
+/// Which side of a diff a code comment's lines are on (plan 20261001-changes-review-comments).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AnnotationCodeSide {
+    Unspecified = 0,
+    /// The comparison base: the commit the changes view compared against (`base_commit`).
+    Base = 1,
+    /// The workspace's working tree.
+    WorkingTree = 2,
+}
+impl AnnotationCodeSide {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ANNOTATION_CODE_SIDE_UNSPECIFIED",
+            Self::Base => "ANNOTATION_CODE_SIDE_BASE",
+            Self::WorkingTree => "ANNOTATION_CODE_SIDE_WORKING_TREE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ANNOTATION_CODE_SIDE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ANNOTATION_CODE_SIDE_BASE" => Some(Self::Base),
+            "ANNOTATION_CODE_SIDE_WORKING_TREE" => Some(Self::WorkingTree),
             _ => None,
         }
     }

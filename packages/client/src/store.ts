@@ -116,7 +116,9 @@ export type AnnotationSummaryState = {
  * reply, never a timeout); `unreachable` = the device could not be reached or did not answer;
  * `refused` = the worker answered and refused (the message says why). */
 export type AnnotationFailure = { ok: false; reason: "unsupported" | "unreachable" | "refused"; error: string };
-export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[] } | AnnotationFailure;
+/** `codeComments`: the device's worker stores code comments (annotations with a code anchor, plan
+ * 20261001-changes-review-comments); an older worker lists only page annotations. */
+export type AnnotationListResult = { ok: true; revision: number; annotations: Annotation[]; codeComments: boolean } | AnnotationFailure;
 /** `removedIds`: for a delete or clear-resolved, exactly the ids it removed — what one 「撤销」
  * (`restore`) brings back within the worker's undo window (plan 20260929-annotation-polish). */
 export type AnnotationMutateResult = { ok: true; revision: number; annotation?: Annotation; removedIds: string[] } | AnnotationFailure;
@@ -1533,7 +1535,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     try {
       const result = await deviceRouter.listAnnotations(daemonId, workspaceId);
       if (!result.ok) return { ok: false, reason: "refused", error: result.error };
-      return { ok: true, revision: result.revision, annotations: result.annotations };
+      return { ok: true, revision: result.revision, annotations: result.annotations, codeComments: result.codeComments };
     } catch (error) {
       return annotationFailure(error);
     }

@@ -19,6 +19,11 @@
 //! One annotation points at one or more elements, optionally narrowed to a dragged region (plan
 //! 20260929-annotation-polish): `targets[0]` is the anchor, the region is stored relative to it.
 //!
+//! A code comment (plan 20261001-changes-review-comments) is the same record with a code anchor —
+//! lines of one file on one side of the changes view's diff — instead of targets. It shares the
+//! numbering, the undo window, the summary counts and the agent commands with page annotations.
+//! The anchor is an additive optional field: the index format stays version 2.
+//!
 //! Deleting is undoable (plan 20260929-annotation-polish): a delete, confirm or clear-resolved moves
 //! the records to the index's `deleted` list — gone at once from every listing, count and agent
 //! output — and keeps them (image files included) restorable for [`UNDO_WINDOW_MS`]. Expired ones
@@ -73,6 +78,12 @@ const MAX_MAP_ITEMS: usize = 40;
 const MAX_FOLLOW_UPS: usize = 50;
 /// Elements one annotation points at (a shift-click selection, or a region's inner elements).
 const MAX_TARGETS: usize = 24;
+/// Characters of a code comment's commented lines kept with it (its excerpt).
+const MAX_EXCERPT_CHARS: usize = 8_000;
+/// Characters of a code anchor's path.
+const MAX_PATH_CHARS: usize = 1_000;
+/// Lines one code comment may span.
+const MAX_CODE_LINES: u32 = 10_000;
 /// How long a deleted annotation stays restorable (「撤销」); comfortably longer than the toast.
 pub const UNDO_WINDOW_MS: f64 = 60_000.0;
 /// Workspaces listed in one summary; the center applies the same cap.
@@ -80,6 +91,9 @@ const MAX_SUMMARY_WORKSPACES: usize = 1024;
 
 pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_RESOLVED: &str = "resolved";
+/// A code anchor's side: the comparison base, or the working tree.
+pub const SIDE_BASE: &str = "base";
+pub const SIDE_WORKING_TREE: &str = "working-tree";
 const KIND_SCREENSHOT: &str = "screenshot";
 const KIND_REFERENCE: &str = "reference";
 
@@ -94,9 +108,12 @@ pub struct StoredAnnotation {
     pub page_url: String,
     pub page_title: String,
     pub comment: String,
-    /// At least one; `targets[0]` is the anchor (see the module comment).
+    /// At least one unless `code` is set; `targets[0]` is the anchor (see the module comment).
     pub targets: Vec<StoredTarget>,
     pub region: Option<StoredRegion>,
+    /// Set for a code comment, which has no targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<StoredCodeAnchor>,
     pub images: Vec<StoredImage>,
     pub resolution_note: String,
     pub follow_ups: Vec<StoredFollowUp>,
@@ -133,6 +150,21 @@ pub struct StoredRegion {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// Where a code comment sits: lines `start_line..=end_line` (1-based) of `path` on `side`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StoredCodeAnchor {
+    pub path: String,
+    /// [`SIDE_BASE`] or [`SIDE_WORKING_TREE`].
+    pub side: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// The commented lines' text when the comment was written.
+    pub excerpt: String,
+    /// The commit a base-side anchor's lines were read from; empty for the working tree.
+    pub base_commit: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -332,6 +364,76 @@ fn region_from_wire(region: Option<&wire::AnnotationRegion>) -> Option<StoredReg
         width,
         height,
     })
+}
+
+/// Truncates to `max_chars` without trimming: a code excerpt's indentation is part of it.
+fn clip_raw(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
+}
+
+/// A worktree-relative path as the changes view names it: no absolute path, no `..` step.
+fn code_path(value: &str) -> Result<String, String> {
+    let path = clip(value, MAX_PATH_CHARS);
+    let path = path.trim_start_matches("./").to_string();
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\0')
+        || path.split('/').any(|segment| segment == ".." || segment.is_empty())
+    {
+        return Err("a code comment needs a relative file path".into());
+    }
+    Ok(path)
+}
+
+/// Validates a code anchor from a put. `None` when the put carries none.
+fn code_from_wire(code: Option<&wire::AnnotationCodeAnchor>) -> Result<Option<StoredCodeAnchor>, String> {
+    let Some(code) = code else {
+        return Ok(None);
+    };
+    let path = code_path(&code.path)?;
+    let side = match wire::AnnotationCodeSide::try_from(code.side) {
+        Ok(wire::AnnotationCodeSide::Base) => SIDE_BASE,
+        Ok(wire::AnnotationCodeSide::WorkingTree) => SIDE_WORKING_TREE,
+        _ => return Err("a code comment needs the side of the diff it is on".into()),
+    };
+    if code.start_line == 0 || code.end_line < code.start_line || code.end_line - code.start_line >= MAX_CODE_LINES {
+        return Err("a code comment needs a valid line range".into());
+    }
+    let base_commit = if side == SIDE_BASE {
+        let commit = clip(&code.base_commit, 64);
+        if !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid base commit".into());
+        }
+        commit
+    } else {
+        String::new()
+    };
+    Ok(Some(StoredCodeAnchor {
+        path,
+        side: side.into(),
+        start_line: code.start_line,
+        end_line: code.end_line,
+        excerpt: clip_raw(&code.excerpt, MAX_EXCERPT_CHARS),
+        base_commit,
+    }))
+}
+
+fn code_to_wire(code: &StoredCodeAnchor) -> wire::AnnotationCodeAnchor {
+    wire::AnnotationCodeAnchor {
+        path: code.path.clone(),
+        side: if code.side == SIDE_BASE {
+            wire::AnnotationCodeSide::Base as i32
+        } else {
+            wire::AnnotationCodeSide::WorkingTree as i32
+        },
+        start_line: code.start_line,
+        end_line: code.end_line,
+        excerpt: code.excerpt.clone(),
+        base_commit: code.base_commit.clone(),
+    }
 }
 
 fn element_to_wire(element: &StoredElement) -> wire::AnnotationElement {
@@ -638,8 +740,12 @@ impl AnnotationStore {
             return Err("an annotation needs a comment".into());
         }
         let targets = targets_from_wire(&incoming.targets);
-        if incoming.annotation_id.is_empty() && targets.is_empty() {
-            return Err("an annotation needs at least one element".into());
+        let code = code_from_wire(incoming.code.as_ref())?;
+        if !targets.is_empty() && code.is_some() {
+            return Err("an annotation points at page elements or at code, not both".into());
+        }
+        if incoming.annotation_id.is_empty() && targets.is_empty() && code.is_none() {
+            return Err("an annotation needs at least one element or a code location".into());
         }
         let mut inner = self.inner.lock().unwrap();
         let mut index = self.index(&mut inner, workspace_id)?.clone();
@@ -734,10 +840,16 @@ impl AnnotationStore {
             annotation.page_url = clip(&incoming.page_url, MAX_URL_CHARS);
             annotation.page_title = clip(&incoming.page_title, MAX_TITLE_CHARS);
         }
-        // Targets and region change together; an edit that sends no targets keeps both.
+        // Targets and region change together; an edit that sends no targets keeps both. Likewise an
+        // edit without a code anchor keeps the stored one. Either kind of location replaces the other.
         if !targets.is_empty() {
             annotation.targets = targets;
             annotation.region = region_from_wire(incoming.region.as_ref());
+            annotation.code = None;
+        } else if let Some(code) = code {
+            annotation.code = Some(code);
+            annotation.targets.clear();
+            annotation.region = None;
         }
         annotation.updated_at = now;
         let stored = annotation.clone();
@@ -946,6 +1058,7 @@ impl AnnotationStore {
                 width: region.width,
                 height: region.height,
             }),
+            code: annotation.code.as_ref().map(code_to_wire),
             images: annotation
                 .images
                 .iter()
@@ -1002,14 +1115,27 @@ impl AnnotationStore {
                 })
             })
             .collect();
+        // A code comment carries its location instead of a page and targets.
+        let code = annotation.code.as_ref().map(|code| {
+            serde_json::json!({
+                "path": code.path,
+                "side": code.side,
+                "startLine": code.start_line,
+                "endLine": code.end_line,
+                "lines": code.excerpt,
+                "baseCommit": if code.base_commit.is_empty() { serde_json::Value::Null } else { serde_json::Value::from(code.base_commit.clone()) },
+            })
+        });
         serde_json::json!({
             "id": annotation.id,
             "number": annotation.number,
+            "kind": if code.is_some() { "code" } else { "page" },
             "status": annotation.status,
             "comment": annotation.comment,
             "page": { "url": annotation.page_url, "title": annotation.page_title },
             "targets": targets,
             "region": annotation.region,
+            "code": code,
             "images": images,
             "followUps": annotation.follow_ups,
             "resolutionNote": annotation.resolution_note,
@@ -1207,6 +1333,137 @@ mod tests {
         let mut empty = put_new("no element", 0);
         empty.annotation.as_mut().unwrap().targets.clear();
         assert!(reopened.put("ws-1", empty).is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    fn code_anchor(path: &str, side: wire::AnnotationCodeSide, start: u32, end: u32) -> wire::AnnotationCodeAnchor {
+        wire::AnnotationCodeAnchor {
+            path: path.into(),
+            side: side as i32,
+            start_line: start,
+            end_line: end,
+            excerpt: "    let x = 1;\n    let y = 2;".into(),
+            base_commit: if side == wire::AnnotationCodeSide::Base { "0a1b2c3d".into() } else { String::new() },
+        }
+    }
+
+    fn put_code(comment: &str, code: wire::AnnotationCodeAnchor) -> wire::AnnotationPut {
+        wire::AnnotationPut {
+            annotation: Some(wire::Annotation {
+                comment: comment.into(),
+                code: Some(code),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn code_comments_round_trip_share_numbering_and_keep_their_anchor_on_edit() {
+        let (store, home, _rx) = store();
+        let (_, page) = store.put("ws-1", put_new("page one", 0)).unwrap();
+        let (_, working) = store
+            .put("ws-1", put_code("rename this", code_anchor("src/a.rs", wire::AnnotationCodeSide::WorkingTree, 3, 4)))
+            .unwrap();
+        let (_, base) = store
+            .put("ws-1", put_code("why was this removed?", code_anchor("./src/old.rs", wire::AnnotationCodeSide::Base, 10, 10)))
+            .unwrap();
+        assert_eq!((page.number, working.number, base.number), (1, 2, 3));
+        assert!(working.targets.is_empty());
+        let anchor = working.code.as_ref().unwrap();
+        assert_eq!((anchor.path.as_str(), anchor.side.as_str(), anchor.start_line, anchor.end_line), ("src/a.rs", SIDE_WORKING_TREE, 3, 4));
+        // The excerpt keeps its indentation; a working-tree anchor never keeps a base commit.
+        assert_eq!(anchor.excerpt, "    let x = 1;\n    let y = 2;");
+        assert!(anchor.base_commit.is_empty());
+        let base_anchor = base.code.as_ref().unwrap();
+        assert_eq!((base_anchor.path.as_str(), base_anchor.side.as_str(), base_anchor.base_commit.as_str()), ("src/old.rs", SIDE_BASE, "0a1b2c3d"));
+
+        // Survives a new store (persisted in the same version-2 index).
+        let (tx, _rx2) = mpsc::channel(4);
+        let reopened = AnnotationStore::new(&home.to_string_lossy(), tx);
+        let (_, list) = reopened.list("ws-1").unwrap();
+        assert_eq!(list[1].code, working.code);
+        let wire = reopened.to_wire("ws-1", &list[2]);
+        let wire_code = wire.code.as_ref().unwrap();
+        assert_eq!(wire_code.side, wire::AnnotationCodeSide::Base as i32);
+        assert_eq!((wire_code.start_line, wire_code.end_line), (10, 10));
+        assert!(reopened.to_wire("ws-1", &list[0]).code.is_none());
+
+        // Agent JSON: kind, location, lines and base commit.
+        let json = reopened.agent_json("ws-1", &list[2]);
+        assert_eq!(json["kind"], "code");
+        assert_eq!(json["code"]["path"], "src/old.rs");
+        assert_eq!(json["code"]["side"], "base");
+        assert_eq!(json["code"]["startLine"], 10);
+        assert_eq!(json["code"]["baseCommit"], "0a1b2c3d");
+        assert_eq!(json["code"]["lines"], "    let x = 1;\n    let y = 2;");
+        let json = reopened.agent_json("ws-1", &list[1]);
+        assert!(json["code"]["baseCommit"].is_null());
+        let json = reopened.agent_json("ws-1", &list[0]);
+        assert_eq!(json["kind"], "page");
+        assert!(json["code"].is_null());
+
+        // Editing the text without an anchor keeps it.
+        let edit = wire::AnnotationPut {
+            annotation: Some(wire::Annotation {
+                annotation_id: working.id.clone(),
+                comment: "rename this to total".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_, edited) = reopened.put("ws-1", edit).unwrap();
+        assert_eq!(edited.comment, "rename this to total");
+        assert_eq!(edited.code, working.code);
+        assert!(edited.targets.is_empty());
+
+        // Resolving and confirming work as for page annotations, undo included.
+        reopened.resolve("ws-1", "#2", "renamed").unwrap();
+        let (_, removed) = reopened.delete("ws-1", &[working.id.clone()]).unwrap();
+        let (_, restored) = reopened.restore("ws-1", &removed).unwrap();
+        assert_eq!(restored, removed);
+        assert_eq!(reopened.list("ws-1").unwrap().1[1].code, working.code);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_annotation_needs_targets_or_a_valid_code_anchor() {
+        let (store, home, _rx) = store();
+        // Neither: rejected.
+        let neither = wire::AnnotationPut {
+            annotation: Some(wire::Annotation {
+                comment: "where?".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(store.put("ws-1", neither).is_err());
+        // Both: rejected.
+        let mut both = put_new("both", 0);
+        both.annotation.as_mut().unwrap().code = Some(code_anchor("a.rs", wire::AnnotationCodeSide::WorkingTree, 1, 1));
+        assert!(store.put("ws-1", both).is_err());
+        // Invalid anchors: no side, bad ranges, escaping paths.
+        for bad in [
+            code_anchor("a.rs", wire::AnnotationCodeSide::Unspecified, 1, 1),
+            code_anchor("a.rs", wire::AnnotationCodeSide::WorkingTree, 0, 1),
+            code_anchor("a.rs", wire::AnnotationCodeSide::WorkingTree, 5, 4),
+            code_anchor("/etc/passwd", wire::AnnotationCodeSide::WorkingTree, 1, 1),
+            code_anchor("src/../../x", wire::AnnotationCodeSide::WorkingTree, 1, 1),
+            code_anchor("", wire::AnnotationCodeSide::WorkingTree, 1, 1),
+            wire::AnnotationCodeAnchor {
+                base_commit: "not a commit".into(),
+                ..code_anchor("a.rs", wire::AnnotationCodeSide::Base, 1, 1)
+            },
+        ] {
+            assert!(store.put("ws-1", put_code("x", bad)).is_err());
+        }
+        assert!(!store.workspace_dir("ws-1").join(INDEX_FILE).exists());
+        // Either alone is accepted.
+        store.put("ws-1", put_new("page", 0)).unwrap();
+        store
+            .put("ws-1", put_code("code", code_anchor("a.rs", wire::AnnotationCodeSide::WorkingTree, 1, 2)))
+            .unwrap();
+        assert_eq!(store.list("ws-1").unwrap().1.len(), 2);
         let _ = fs::remove_dir_all(&home);
     }
 

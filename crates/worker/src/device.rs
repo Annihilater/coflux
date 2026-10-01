@@ -2158,6 +2158,9 @@ impl DeviceRuntime {
             error,
             revision,
             annotations,
+            // Plan 20261001-changes-review-comments: this worker stores code anchors. Set on every
+            // response, failures included — it describes the worker, not the store.
+            code_comments: true,
         })
     }
 

@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, get a secret (API key, password) from the user without the value entering your context, pick up the elements the user annotated in Coflux's built-in browser and mark them done, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, get a secret (API key, password) from the user without the value entering your context, pick up the elements the user annotated in Coflux's built-in browser and the comments they wrote on lines of the diff, and mark them done, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
 ---
 
 # Working inside coflux
@@ -14,7 +14,7 @@ and a way to operate the other workspaces and devices under the account when you
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor/secret/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, get a secret from the user, implement the user's browser annotations, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
+| Local commands `coflux terminal/progress/notify/ports/executor/secret/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, get a secret from the user, implement the user's browser annotations and code comments, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
 
 Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor`/`annotations` complete
@@ -517,7 +517,7 @@ executor cannot use `coflux secret` (it is not a terminal process). And it preve
 a determined agent: once a value is in an environment variable or a file you can read, printing it
 on purpose would leak it — never do that.
 
-### Implement the user's browser annotations
+### Implement the user's annotations: browser annotations and code comments
 
 ```sh
 coflux annotations list
@@ -525,17 +525,32 @@ coflux annotations resolve 3 --note "Primary button now uses the brand token; sp
 coflux annotations watch
 ```
 
-The user can point at elements of a page in Coflux's built-in browser tab ("this element — change it
-like so") and hand them to you; the desktop then types an instruction into your terminal, or they
-simply ask you to handle the annotations. They belong to the workspace your cwd is in and live on
+Annotations come in two kinds that share one numbered list (#1, #2…):
+
+- **Browser annotations**: the user points at elements of a page in Coflux's built-in browser tab
+  ("this element — change it like so").
+- **Code comments**: the user reviews this workspace's diff in Coflux's changes view and comments
+  on a line or a range of lines ("rename this", "this breaks when the list is empty").
+
+The user hands them to you from the desktop, which types an instruction into your terminal, or
+simply asks you to handle the annotations. They belong to the workspace your cwd is in and live on
 this machine, so they are there whether or not a desktop is open.
 
-- `list` prints the pending ones as markdown: the user's comment (and, for a reopened one, your
-  earlier note and what the user answered), the page, the component chain and source location when
-  the page exposed them, the element's selector, DOM path and key computed styles, and the paths of
-  its images. It always names the workspace it resolved: an empty list in the wrong workspace means
-  you moved (`coflux workspace`). Add `--json` for structured output.
-- One annotation is not always one element. When the user selected several elements together, it
+- `list` prints the pending ones, both kinds, as markdown: the user's comment (and, for a reopened
+  one, your earlier note and what the user answered), then where it points. It always names the
+  workspace it resolved: an empty list in the wrong workspace means you moved (`coflux workspace`).
+  Add `--json` for structured output (`kind` is `page` or `code`).
+- A **code comment** gives the file, the line range and the side of the diff, then the commented
+  lines in a fenced block. `in the working tree` means the current file; `on the base side` means
+  the version the changes are compared against (with its commit), typically lines the change
+  removed or replaced — read that version with `git show <commit>:<path>` if you need more context.
+  The line numbers are where the lines were when the comment was written: if the file has changed
+  since, find the commented lines by their text. The comment is about those lines, but the fix may
+  belong elsewhere (a caller, a test); make the change the comment asks for.
+- A **browser annotation** gives the page, the component chain and source location when the page
+  exposed them, the element's selector, DOM path and key computed styles, and the paths of its
+  images.
+- A browser annotation is not always one element. When the user selected several elements together, it
   lists each one with its own component chain and context under "Element 1 of n": the comment
   applies to all of them, so change them consistently and resolve the annotation once. When the user
   dragged a **region**, it gives the region's size and offset, the *container* (the innermost
@@ -548,7 +563,8 @@ this machine, so they are there whether or not a desktop is open.
 - The images are local files: read them. A *screenshot of the current state* shows the element as
   the user saw it; a *reference image* is what the user wants or pointed at.
 - After implementing each annotation, run `resolve <id or number> --note "<what you changed>"`.
-  The note is what the user reads to review the change; the pin on their page turns into a check.
+  The note is what the user reads to review the change; the pin on their page (or the comment card
+  under the diff line) turns into a check.
   They confirm it (it disappears) or reopen it with a comment, and it comes back in `list`. Resolve
   only what you actually changed; if you cannot or should not do one, resolve it with a note that
   says why rather than leaving it pending silently.
