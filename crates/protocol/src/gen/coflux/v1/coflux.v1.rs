@@ -1604,9 +1604,14 @@ pub struct DeviceChangesListRequest {
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub workspace_id: ::prost::alloc::string::String,
+    /// false (the default, and all an older client sends): the branch scope described below.
+    /// true: only uncommitted changes — `base` is HEAD (plan 20261001-changes-review-polish).
+    /// A worker that predates this field ignores it, answers the branch scope and never echoes it.
+    #[prost(bool, tag="3")]
+    pub uncommitted: bool,
 }
 /// worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
-/// file; the totals equal the workspace's diff stat.
+/// file; in the branch scope the totals equal the workspace's diff stat.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceChangesList {
     #[prost(string, tag="1")]
@@ -1615,13 +1620,17 @@ pub struct DeviceChangesList {
     pub ok: bool,
     #[prost(string, optional, tag="3")]
     pub error: ::core::option::Option<::prost::alloc::string::String>,
-    /// The commit every per-file request must compare against: merge-base of the default branch and
-    /// HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
-    /// untracked files are listed.
+    /// The commit every per-file request must compare against. Branch scope: merge-base of the default
+    /// branch and HEAD, falling back to HEAD. Uncommitted scope: HEAD. Empty when HEAD does not
+    /// resolve (an unborn branch): then only untracked files are listed.
     #[prost(string, tag="4")]
     pub base: ::prost::alloc::string::String,
     #[prost(message, repeated, tag="5")]
     pub files: ::prost::alloc::vec::Vec<DeviceChangedFile>,
+    /// Echo of the request's `uncommitted`, set on every response including `ok: false`. A client that
+    /// asked for true and reads false is talking to a worker too old to honour the scope.
+    #[prost(bool, tag="6")]
+    pub uncommitted: bool,
 }
 /// client→worker (RPC): the content of one changed file.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1638,9 +1647,13 @@ pub struct DeviceChangesFileRequest {
     /// The base-side path of a rename.
     #[prost(string, optional, tag="5")]
     pub old_path: ::core::option::Option<::prost::alloc::string::String>,
+    /// Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
+    #[prost(bool, tag="6")]
+    pub ignore_whitespace: bool,
 }
 /// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-/// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+/// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
+/// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceChangesFile {
     #[prost(string, tag="1")]
@@ -1662,6 +1675,10 @@ pub struct DeviceChangesFile {
     /// Either side contains NUL; contents are then left empty.
     #[prost(bool, tag="9")]
     pub binary: bool,
+    /// Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
+    /// (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+    #[prost(bool, tag="10")]
+    pub ignore_whitespace: bool,
 }
 /// Enough about the annotated element to find it again on the page and in the code. Every field is
 /// best effort; the desktop fills what it could read.

@@ -250,10 +250,22 @@ fn worktree_size(worktree: &str, rel: &str) -> u64 {
 /// Lists every changed file of a worktree. Untracked files are counted by reading them directly,
 /// exactly like `git::diff_stat` does, so the totals match the dock's `+X −Y`; files that stat skips
 /// (over 1 MB, or containing NUL) are still listed, with zero lines.
-pub(crate) async fn list_changes(worktree: &str, default_branch: &str) -> Result<(String, Vec<wire::DeviceChangedFile>), String> {
-    let base = match merge_base(worktree, default_branch).await {
-        Some(oid) => Some(oid),
-        None => head_oid(worktree).await,
+///
+/// `uncommitted` picks the scope (plan 20261001-changes-review-polish): false compares the
+/// diff-stat base (merge-base of the default branch and HEAD, falling back to HEAD); true compares
+/// HEAD, i.e. staged plus unstaged changes. Untracked files are listed in both scopes.
+pub(crate) async fn list_changes(
+    worktree: &str,
+    default_branch: &str,
+    uncommitted: bool,
+) -> Result<(String, Vec<wire::DeviceChangedFile>), String> {
+    let base = if uncommitted {
+        head_oid(worktree).await
+    } else {
+        match merge_base(worktree, default_branch).await {
+            Some(oid) => Some(oid),
+            None => head_oid(worktree).await,
+        }
     };
 
     let mut files: Vec<wire::DeviceChangedFile> = Vec::new();
@@ -424,7 +436,21 @@ fn file_error(request_id: String, error: String) -> wire::DeviceChangesFile {
 }
 
 /// One changed file's two sides and the `-U0` patch between them, against the list's base.
+///
+/// The response always echoes `ignore_whitespace`, whatever path produced it (an error, a missing
+/// side, binary content, equal sides): the echo tells the client this worker decoded the field,
+/// not that a diff ran (plan 20261001-changes-review-polish).
 pub(crate) async fn read_change_file(
+    worktree: &str,
+    request: wire::DeviceChangesFileRequest,
+) -> wire::DeviceChangesFile {
+    let ignore_whitespace = request.ignore_whitespace;
+    let mut response = read_change_sides(worktree, request).await;
+    response.ignore_whitespace = ignore_whitespace;
+    response
+}
+
+async fn read_change_sides(
     worktree: &str,
     request: wire::DeviceChangesFileRequest,
 ) -> wire::DeviceChangesFile {
@@ -433,6 +459,7 @@ pub(crate) async fn read_change_file(
         base,
         path,
         old_path,
+        ignore_whitespace,
         ..
     } = request;
     if !base.is_empty() && !is_object_id(&base) {
@@ -470,10 +497,13 @@ pub(crate) async fn read_change_file(
                     "-M",
                     "--src-prefix=a/",
                     "--dst-prefix=b/",
-                    base.as_str(),
-                    "--",
-                    path.as_str(),
                 ];
+                // `-w` drops whitespace-only hunks; a patch left without any hunk then means
+                // "only whitespace changed", which the client shows as such.
+                if ignore_whitespace {
+                    args.push("-w");
+                }
+                args.extend([base.as_str(), "--", path.as_str()]);
                 if let Some(old_path) = old_path.as_deref() {
                     args.push(old_path);
                 }
@@ -504,6 +534,8 @@ pub(crate) async fn read_change_file(
         new_content: text(&new),
         patch,
         binary,
+        // Set by `read_change_file` on every response.
+        ignore_whitespace: false,
     }
 }
 
@@ -599,5 +631,197 @@ mod tests {
         assert!(is_object_id(OLD));
         assert!(!is_object_id("HEAD"));
         assert!(!is_object_id("--output=/tmp/x"));
+    }
+
+    /* ===== Scope and whitespace against a real repository (plan 20261001-changes-review-polish) ===== */
+
+    use super::{list_changes, read_change_file};
+    use coflux_protocol::wire;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A throwaway repository on `main`, removed on drop. Commits ignore the user's git config so a
+    /// signing or hook setup cannot interfere.
+    struct Repo(PathBuf);
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl Repo {
+        fn new() -> Repo {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.subsec_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "coflux-changes-{}-{}-{nanos}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).expect("create the test repository");
+            let repo = Repo(dir);
+            repo.git(&["init", "-q"]);
+            repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+            repo
+        }
+
+        fn root(&self) -> &str {
+            self.0.to_str().expect("utf-8 temp path")
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.0)
+                .args([
+                    "-c",
+                    "user.name=coflux",
+                    "-c",
+                    "user.email=coflux@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        fn write(&self, path: &str, content: &[u8]) {
+            let full = Path::new(&self.0).join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("create parent");
+            }
+            std::fs::write(full, content).expect("write file");
+        }
+
+        fn commit_all(&self, message: &str) {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-q", "-m", message]);
+        }
+
+        fn head(&self) -> String {
+            self.git(&["rev-parse", "HEAD"])
+        }
+    }
+
+    fn paths(files: &[wire::DeviceChangedFile]) -> Vec<String> {
+        let mut paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+        paths.sort();
+        paths
+    }
+
+    fn file_request(base: &str, path: &str, old_path: Option<&str>, ignore_whitespace: bool) -> wire::DeviceChangesFileRequest {
+        wire::DeviceChangesFileRequest {
+            request_id: "r".into(),
+            workspace_id: "w".into(),
+            base: base.into(),
+            path: path.into(),
+            old_path: old_path.map(str::to_string),
+            ignore_whitespace,
+        }
+    }
+
+    fn hunk_count(patch: &str) -> usize {
+        patch.lines().filter(|line| line.starts_with("@@ ")).count()
+    }
+
+    #[tokio::test]
+    async fn uncommitted_scope_compares_head_and_branch_scope_the_merge_base() {
+        let repo = Repo::new();
+        repo.write("committed.txt", b"one\n");
+        repo.write("unstaged.txt", b"one\n");
+        repo.commit_all("base");
+        let merge_base = repo.head();
+        repo.git(&["checkout", "-q", "-b", "feature"]);
+        repo.write("committed.txt", b"two\n");
+        repo.commit_all("feature work");
+        repo.write("unstaged.txt", b"two\n");
+        repo.write("staged.txt", b"new\n");
+        repo.git(&["add", "staged.txt"]);
+        repo.write("untracked.txt", b"loose\n");
+
+        let (base, files) = list_changes(repo.root(), "main", false).await.expect("branch scope");
+        assert_eq!(base, merge_base);
+        assert_eq!(paths(&files), ["committed.txt", "staged.txt", "unstaged.txt", "untracked.txt"]);
+
+        let (base, files) = list_changes(repo.root(), "main", true).await.expect("uncommitted scope");
+        assert_eq!(base, repo.head(), "the uncommitted scope compares HEAD");
+        assert_eq!(paths(&files), ["staged.txt", "unstaged.txt", "untracked.txt"]);
+        let unstaged = files.iter().find(|file| file.path == "unstaged.txt").unwrap();
+        assert_eq!((unstaged.additions, unstaged.deletions), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn ignore_whitespace_drops_reindent_hunks_and_keeps_real_ones() {
+        let repo = Repo::new();
+        repo.write("reindent.ts", b"if (a) {\nfoo(a, b);\nbar();\n}\n");
+        repo.write("mixed.ts", b"one();\ntwo();\nthree();\nfour();\nfive();\nsix();\n");
+        repo.commit_all("base");
+        let base = repo.head();
+        repo.write("reindent.ts", b"if (a) {\n    foo(a, b);\n    bar();\n}\n");
+        repo.write("mixed.ts", b"  one();\ntwo();\nthree();\nfour();\nfive();\nsix(changed);\n");
+
+        let plain = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, false)).await;
+        assert!(plain.ok);
+        assert!(!plain.ignore_whitespace);
+        assert_eq!(hunk_count(&plain.patch), 1);
+
+        let ignored = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, true)).await;
+        assert!(ignored.ok);
+        assert!(ignored.ignore_whitespace);
+        assert_eq!(hunk_count(&ignored.patch), 0, "a pure re-indent has no hunk under -w: {:?}", ignored.patch);
+        assert_ne!(ignored.old_content, ignored.new_content, "the sides are returned whole either way");
+
+        let plain = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, false)).await;
+        assert_eq!(hunk_count(&plain.patch), 2);
+        let ignored = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, true)).await;
+        assert_eq!(hunk_count(&ignored.patch), 1, "only the real edit is left: {:?}", ignored.patch);
+        assert!(ignored.patch.contains("@@ -6 +6 @@"), "{:?}", ignored.patch);
+    }
+
+    #[tokio::test]
+    async fn ignore_whitespace_is_echoed_on_every_file_response() {
+        let repo = Repo::new();
+        repo.write("deleted.txt", b"gone\n");
+        repo.write("moved-from.txt", b"same\n");
+        repo.write("equal.txt", b"equal\n");
+        repo.commit_all("base");
+        let base = repo.head();
+        std::fs::remove_file(Path::new(repo.root()).join("deleted.txt")).unwrap();
+        repo.git(&["mv", "moved-from.txt", "moved-to.txt"]);
+        repo.write("added.txt", b"new\n");
+        repo.write("binary.bin", b"a\0b");
+
+        let cases: Vec<(&str, wire::DeviceChangesFileRequest)> = vec![
+            ("added", file_request(&base, "added.txt", None, true)),
+            ("deleted", file_request(&base, "deleted.txt", None, true)),
+            ("binary", file_request(&base, "binary.bin", None, true)),
+            ("rename-only", file_request(&base, "moved-to.txt", Some("moved-from.txt"), true)),
+            ("equal sides", file_request(&base, "equal.txt", None, true)),
+            ("invalid path", file_request(&base, "../outside", None, true)),
+            ("invalid base", file_request("HEAD", "added.txt", None, true)),
+        ];
+        for (name, request) in cases {
+            let response = read_change_file(repo.root(), request).await;
+            assert!(response.ignore_whitespace, "{name}: the echo must be set");
+        }
+
+        let error = read_change_file(repo.root(), file_request(&base, "../outside", None, true)).await;
+        assert!(!error.ok);
+        let added = read_change_file(repo.root(), file_request(&base, "added.txt", None, true)).await;
+        assert!(added.ok && !added.old_exists && added.new_exists && added.patch.is_empty());
+        let binary = read_change_file(repo.root(), file_request(&base, "binary.bin", None, true)).await;
+        assert!(binary.ok && binary.binary);
+        let not_asked = read_change_file(repo.root(), file_request(&base, "added.txt", None, false)).await;
+        assert!(!not_asked.ignore_whitespace, "the echo mirrors the request, it is not a capability flag");
     }
 }

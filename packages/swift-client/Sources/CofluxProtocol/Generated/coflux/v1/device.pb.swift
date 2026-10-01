@@ -2974,13 +2974,18 @@ public struct Coflux_V1_DeviceChangesListRequest: Sendable {
 
   public var workspaceID: String = String()
 
+  /// false (the default, and all an older client sends): the branch scope described below.
+  /// true: only uncommitted changes — `base` is HEAD (plan 20261001-changes-review-polish).
+  /// A worker that predates this field ignores it, answers the branch scope and never echoes it.
+  public var uncommitted: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
 
 /// worker→client (RPC). Files are the diff of `base` against the working tree plus every untracked
-/// file; the totals equal the workspace's diff stat.
+/// file; in the branch scope the totals equal the workspace's diff stat.
 public struct Coflux_V1_DeviceChangesList: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2999,12 +3004,16 @@ public struct Coflux_V1_DeviceChangesList: Sendable {
   /// Clears the value of `error`. Subsequent reads from it will return its default value.
   public mutating func clearError() {self._error = nil}
 
-  /// The commit every per-file request must compare against: merge-base of the default branch and
-  /// HEAD, falling back to HEAD. Empty when HEAD does not resolve (an unborn branch): then only
-  /// untracked files are listed.
+  /// The commit every per-file request must compare against. Branch scope: merge-base of the default
+  /// branch and HEAD, falling back to HEAD. Uncommitted scope: HEAD. Empty when HEAD does not
+  /// resolve (an unborn branch): then only untracked files are listed.
   public var base: String = String()
 
   public var files: [Coflux_V1_DeviceChangedFile] = []
+
+  /// Echo of the request's `uncommitted`, set on every response including `ok: false`. A client that
+  /// asked for true and reads false is talking to a worker too old to honour the scope.
+  public var uncommitted: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3038,6 +3047,9 @@ public struct Coflux_V1_DeviceChangesFileRequest: Sendable {
   /// Clears the value of `oldPath`. Subsequent reads from it will return its default value.
   public mutating func clearOldPath() {self._oldPath = nil}
 
+  /// Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
+  public var ignoreWhitespace: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -3046,7 +3058,8 @@ public struct Coflux_V1_DeviceChangesFileRequest: Sendable {
 }
 
 /// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-/// `patch` is `git diff -U0` of the pair and is empty when a side is missing or both are equal.
+/// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
+/// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
 public struct Coflux_V1_DeviceChangesFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3077,6 +3090,10 @@ public struct Coflux_V1_DeviceChangesFile: Sendable {
 
   /// Either side contains NUL; contents are then left empty.
   public var binary: Bool = false
+
+  /// Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
+  /// (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+  public var ignoreWhitespace: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -9558,7 +9575,7 @@ extension Coflux_V1_DeviceChangedFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceChangesListRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesListRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}uncommitted\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9568,6 +9585,7 @@ extension Coflux_V1_DeviceChangesListRequest: SwiftProtobuf.Message, SwiftProtob
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.uncommitted) }()
       default: break
       }
     }
@@ -9580,12 +9598,16 @@ extension Coflux_V1_DeviceChangesListRequest: SwiftProtobuf.Message, SwiftProtob
     if !self.workspaceID.isEmpty {
       try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
     }
+    if self.uncommitted != false {
+      try visitor.visitSingularBoolField(value: self.uncommitted, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Coflux_V1_DeviceChangesListRequest, rhs: Coflux_V1_DeviceChangesListRequest) -> Bool {
     if lhs.requestID != rhs.requestID {return false}
     if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.uncommitted != rhs.uncommitted {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9593,7 +9615,7 @@ extension Coflux_V1_DeviceChangesListRequest: SwiftProtobuf.Message, SwiftProtob
 
 extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesList"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}base\0\u{1}files\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}base\0\u{1}files\0\u{1}uncommitted\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9606,6 +9628,7 @@ extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.base) }()
       case 5: try { try decoder.decodeRepeatedMessageField(value: &self.files) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.uncommitted) }()
       default: break
       }
     }
@@ -9631,6 +9654,9 @@ extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.files.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.files, fieldNumber: 5)
     }
+    if self.uncommitted != false {
+      try visitor.visitSingularBoolField(value: self.uncommitted, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -9640,6 +9666,7 @@ extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs._error != rhs._error {return false}
     if lhs.base != rhs.base {return false}
     if lhs.files != rhs.files {return false}
+    if lhs.uncommitted != rhs.uncommitted {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9647,7 +9674,7 @@ extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFileRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}base\0\u{1}path\0\u{3}old_path\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}base\0\u{1}path\0\u{3}old_path\0\u{3}ignore_whitespace\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9660,6 +9687,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
       case 3: try { try decoder.decodeSingularStringField(value: &self.base) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.path) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self._oldPath) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.ignoreWhitespace) }()
       default: break
       }
     }
@@ -9685,6 +9713,9 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
     try { if let v = self._oldPath {
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
     } }()
+    if self.ignoreWhitespace != false {
+      try visitor.visitSingularBoolField(value: self.ignoreWhitespace, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -9694,6 +9725,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
     if lhs.base != rhs.base {return false}
     if lhs.path != rhs.path {return false}
     if lhs._oldPath != rhs._oldPath {return false}
+    if lhs.ignoreWhitespace != rhs.ignoreWhitespace {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9701,7 +9733,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
 
 extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFile"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}old_exists\0\u{3}new_exists\0\u{3}old_content\0\u{3}new_content\0\u{1}patch\0\u{1}binary\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}old_exists\0\u{3}new_exists\0\u{3}old_content\0\u{3}new_content\0\u{1}patch\0\u{1}binary\0\u{3}ignore_whitespace\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9718,6 +9750,7 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 7: try { try decoder.decodeSingularStringField(value: &self.newContent) }()
       case 8: try { try decoder.decodeSingularStringField(value: &self.patch) }()
       case 9: try { try decoder.decodeSingularBoolField(value: &self.binary) }()
+      case 10: try { try decoder.decodeSingularBoolField(value: &self.ignoreWhitespace) }()
       default: break
       }
     }
@@ -9755,6 +9788,9 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.binary != false {
       try visitor.visitSingularBoolField(value: self.binary, fieldNumber: 9)
     }
+    if self.ignoreWhitespace != false {
+      try visitor.visitSingularBoolField(value: self.ignoreWhitespace, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -9768,6 +9804,7 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.newContent != rhs.newContent {return false}
     if lhs.patch != rhs.patch {return false}
     if lhs.binary != rhs.binary {return false}
+    if lhs.ignoreWhitespace != rhs.ignoreWhitespace {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

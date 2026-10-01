@@ -2492,10 +2492,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("fsReadResult", response);
   }
 
-  async function changesList(daemonId: string, workspaceId: string): Promise<DeviceChangesList> {
+  /** `uncommitted` false is the branch scope, byte-identical to what an older client sends. */
+  async function changesList(daemonId: string, workspaceId: string, uncommitted = false): Promise<DeviceChangesList> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "changesListRequest",
-      value: { requestId: randomUUID(), workspaceId },
+      value: { requestId: randomUUID(), workspaceId, uncommitted },
     });
     if (response.case === "changesList") return response.value;
     throw unexpectedResponse("changesList", response);
@@ -2507,10 +2508,11 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     base: string,
     path: string,
     oldPath?: string,
+    ignoreWhitespace = false,
   ): Promise<DeviceChangesFile> {
     const response = await request(daemonId, DeviceScope.RPC, {
       case: "changesFileRequest",
-      value: { requestId: randomUUID(), workspaceId, base, path, oldPath },
+      value: { requestId: randomUUID(), workspaceId, base, path, oldPath, ignoreWhitespace },
     }, CHANGES_FILE_TIMEOUT_MS);
     if (response.case === "changesFile") return response.value;
     throw unexpectedResponse("changesFile", response);
