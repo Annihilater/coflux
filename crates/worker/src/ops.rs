@@ -320,9 +320,28 @@ fn resolve_under(real_base: &Path, rel: &str) -> Resolved {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Resolved::Failed(e.to_string())
         }
+        // A missing path that already climbs out of the root by its ".." segments is an escape,
+        // not a missing workspace file.
+        Err(_) if !lexically_under(real_base, &joined) => Resolved::Outside,
         // Not found, a dangling link, a file used as a directory ("a.txt/b").
         Err(_) => Resolved::Missing,
     }
+}
+
+/// Whether `path`, with "." and ".." applied textually, stays under `base`.
+fn lexically_under(base: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.starts_with(base)
 }
 
 /// An opaque file revision from metadata: modification time in nanoseconds, size and inode.
