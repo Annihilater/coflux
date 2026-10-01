@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Folder, GitBranch, Globe, Monitor, SquareTerminal, type LucideIcon } from "lucide-react";
 import {
   CommandPalette,
@@ -212,16 +212,19 @@ export function NavigationPalette(props: NavigationPaletteProps) {
   const [filter, setFilter] = useState<PaletteFilter>("all");
 
   // Adjusted during render when `isOpen` flips: the state updates re-run this render before it
-  // commits, so the instance that mounts already has its key and its frozen data.
+  // commits, so the instance that mounts already has its key.
   if (props.isOpen !== wasOpen) {
     setWasOpen(props.isOpen);
-    // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
-    filterRef.current = "all";
     setFilter("all");
-    if (props.isOpen) {
-      setOpenEpoch((epoch) => epoch + 1);
+    if (props.isOpen) setOpenEpoch((epoch) => epoch + 1);
+  }
+
+  // The frozen data is written in the commit that opens (or closes) the palette: layout effects run
+  // before the new instance's own effect bootstraps the search source, which reads these refs.
+  const freeze = useEffectEvent((isOpen: boolean) => {
+    filterRef.current = "all";
+    if (isOpen) {
       const state = props.client.store.getState();
-      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       snapshotRef.current = buildPaletteSnapshot({
         projects: state.projects,
         workspaces: state.workspaces,
@@ -233,16 +236,17 @@ export function NavigationPalette(props: NavigationPaletteProps) {
         canOpenBrowserTab: Boolean(props.onNewBrowserTab && props.current.workspaceId),
         canOpenScreenTab: Boolean(props.onNewScreenTab && props.current.workspaceId),
       });
-      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       recentRef.current = readRecentPlaces(props.recentStore);
     } else {
       // Nothing of the closed palette stays reachable: the next open builds its own.
-      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       snapshotRef.current = EMPTY_PALETTE_SNAPSHOT;
-      // oxlint-disable-next-line react/refs -- the frozen data of this open is written during the render that opens the palette, before its new instance mounts and runs the search source, which reads these refs synchronously
       recentRef.current = [];
     }
-  }
+  });
+  const isOpen = props.isOpen;
+  useLayoutEffect(() => {
+    freeze(isOpen);
+  }, [isOpen]);
 
   const searchSource = useMemo<SearchSource<PaletteItem>>(
     () => ({
