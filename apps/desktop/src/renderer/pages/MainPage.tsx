@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { removeLegacyAgentSettings } from "@/components/settings/agent-settings-store";
 import { Workbench } from "@/components/workbench/workbench";
 import { createCofluxClient } from "@coflux/client";
 import { BUILD_ID, SERVER_URL, desktop } from "@/config";
@@ -31,6 +32,8 @@ export function MainPage({ initialToken }: { initialToken: string }) {
     }),
   );
   useEffect(() => () => client.disconnect(), [client]);
+  // 2.14.0's per-Mac agent settings are discarded, not migrated (plan 20261002-account-agent-settings).
+  useEffect(() => removeLegacyAgentSettings(), []);
 
   // 不挂 beforeunload：Electron 对它的 preventDefault 不弹框而是直接取消关闭，会让窗口关不掉；
   // ⌘W 由页面处理为关闭终端 Tab，关窗是 ⇧⌘W / 红灯，没有误触问题。

@@ -31,7 +31,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "agents",
     label: "Agents",
-    description: "在新建标签页菜单里直接启动的编码 agent，以及各自的启动命令。只保存在这台 Mac 上。",
+    description: "在新建标签页菜单里直接启动的编码 agent，以及各自的启动命令。配置存在账号上，账号下的所有设备共用。",
     group: 1,
   },
   {
