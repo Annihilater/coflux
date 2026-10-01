@@ -203,7 +203,18 @@ function AgentRow({
 
   // Editing stopped being possible (offline, account changed, a reconnect not yet synced): drop what
   // was not sent, show the account's value, and let writes still in flight settle without touching
-  // the fields (their failure is still reported).
+  // the fields (their failure is still reported). The overlays are discarded while rendering, when
+  // `editable` flips (null: not synced yet), so the account's value shows in the same commit and a
+  // stale draft cannot come back once editing is possible again.
+  const [syncedEditable, setSyncedEditable] = useState<boolean | null>(null);
+  if (editable !== syncedEditable) {
+    setSyncedEditable(editable);
+    if (!editable) {
+      setDraft(null);
+      setPendingEnabled(null);
+    }
+  }
+  // The refs and the waiting write are not render state: they are reset after that commit.
   useEffect(() => {
     if (editable) return;
     if (takeTimer()) onErrorRef.current(DROPPED_EDIT);
@@ -213,8 +224,6 @@ function AgentRow({
     switchSeqRef.current += 1;
     draftRef.current = null;
     pendingEnabledRef.current = null;
-    setDraft(null);
-    setPendingEnabled(null);
   }, [editable]);
 
   // Leaving the section with typing still waiting for its pause sends it (the client refuses it if
