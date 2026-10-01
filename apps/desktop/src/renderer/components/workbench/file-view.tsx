@@ -33,7 +33,14 @@ const ROW_BLOCK = 120;
 const OVERSCAN_ROWS = 40;
 /** git's binary heuristic: a NUL among the first 8000 characters. */
 const BINARY_SNIFF_CHARS = 8000;
-const OUTDATED_MESSAGE = "这台设备的 daemon 版本过旧，不支持查看文件。更新 daemon 后重试。";
+/**
+ * The opened line's tint and its gutter marker: the terminal palette's blue (the link colour,
+ * `#6b9bd1`), quiet but visibly lighter than the `#0a0a0a` paper. Not the `--accent` token — in this
+ * app that is the dark hover surface `#262624`, invisible at any low alpha on the paper.
+ */
+const HIGHLIGHT_MARKER = "#6b9bd1";
+const HIGHLIGHT_ROW_BACKGROUND = "rgba(107, 155, 209, 0.16)";
+const OUTDATED_MESSAGE ="这台设备的 daemon 版本过旧，不支持查看文件。更新 daemon 后重试。";
 
 type FileViewProps = {
   runtime: FileRuntime;
@@ -278,12 +285,21 @@ export function FileView({ runtime, client, tabId, onScreen }: FileViewProps) {
     const text = lines[index] ?? "";
     const lineTokens = tokens?.[index];
     const matching = lineTokens && lineTokens.map((token) => token.content).join("") === text ? lineTokens : null;
+    const highlighted = highlight === index + 1;
     return (
-      <div key={index} className={cn("relative flex", highlight === index + 1 && "bg-(--color-accent)/15")} style={{ height: ROW_HEIGHT_PX }}>
+      <div
+        key={index}
+        className="relative flex"
+        style={{ height: ROW_HEIGHT_PX, backgroundColor: highlighted ? HIGHLIGHT_ROW_BACKGROUND : undefined }}
+      >
         <span
-          className="sticky left-0 shrink-0 select-none bg-terminal pr-3 text-right tabular-nums text-muted-foreground/60"
+          className={cn(
+            "sticky left-0 shrink-0 select-none bg-terminal pr-3 text-right tabular-nums",
+            highlighted ? "text-foreground" : "text-muted-foreground/60",
+          )}
           style={{ width: gutterWidth }}
         >
+          {highlighted ? <span aria-hidden className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: HIGHLIGHT_MARKER }} /> : null}
           {index + 1}
         </span>
         <span className="whitespace-pre pr-4">
