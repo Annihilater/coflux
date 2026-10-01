@@ -15,6 +15,9 @@ use serde_json::json;
 
 use crate::{manager::Manager, sessions::Sessions};
 
+/// How long a starting supervisor waits for an exiting predecessor to release runtime.lock.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -43,8 +46,18 @@ impl RuntimeControl {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(format!("{home}/runtime.lock"))?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error());
+        // A predecessor that just acknowledged `leave` removes runtime.sock before it exits, so the
+        // app can launch us while that process still holds the lock. Wait a bounded moment for it to
+        // go; a supervisor that keeps the lock is a live instance and we must not start.
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK)
+                || std::time::Instant::now() >= deadline
+            {
+                return Err(error);
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
         // 只有拿到独占锁后才能清理崩溃留下的 socket。
         let path = format!("{home}/runtime.sock");
