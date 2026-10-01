@@ -427,6 +427,63 @@ export function isDirWorkspace(workspace: Workspace): boolean {
   return !workspace.projectId;
 }
 
+/* Optimistic removal (plan 20261002-optimistic-removal): a pending removal leaves the visible
+ * arrays at once and its last server copy is parked by id until the centre settles it or it rolls back. */
+type RemovalKind = "task" | "workspace" | "project";
+const REMOVAL_KINDS: readonly RemovalKind[] = ["task", "workspace", "project"];
+/** Fallback when the centre never answers (it sends no acknowledgement): on the order of its
+ * prepared-operation TTL, since `git worktree remove --force` on a large tree is legitimately slow. */
+const REMOVAL_FALLBACK_TIMEOUT_MS = 5 * 60_000;
+type PendingRemoval = {
+  kind: RemovalKind;
+  id: string;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  /** The subscribe epoch the request was sent in; null = still queued (terminal close while offline). */
+  sentEpoch: number | null;
+};
+/** Parked copies of hidden entities, with their position in the visible array when they were hidden
+ * and the order they were hidden in (restoring in reverse undoes the hides exactly). */
+type Parked<T> = Map<string, { item: T; index: number; seq: number }>;
+let parkSequence = 0;
+
+/** Moves now-hidden items from `visible` into `parked`, and parked items no longer hidden back to their old position. */
+function partitionVisible<T extends { id: string }>(visible: T[], parked: Parked<T>, hidden: (item: T) => boolean): T[] {
+  let next = visible;
+  if (visible.some(hidden)) {
+    next = [];
+    for (const item of visible) {
+      // As if hidden one at a time: its position among the items still visible at that moment.
+      if (hidden(item)) parked.set(item.id, { item, index: next.length, seq: ++parkSequence });
+      else next.push(item);
+    }
+  }
+  const back = [...parked.values()].filter((entry) => !hidden(entry.item)).sort((left, right) => right.seq - left.seq);
+  if (back.length > 0) {
+    next = next.slice();
+    for (const entry of back) {
+      parked.delete(entry.item.id);
+      if (next.some((item) => item.id === entry.item.id)) continue;
+      next.splice(Math.min(entry.index, next.length), 0, entry.item);
+    }
+  }
+  return next;
+}
+
+/** An incoming upsert that respects pending removals: a hidden entity only refreshes its parked copy. */
+function upsertVisible<T extends { id: string }>(visible: T[], parked: Parked<T>, item: T, hidden: (item: T) => boolean): T[] {
+  const entry = parked.get(item.id);
+  if (hidden(item)) {
+    if (entry) {
+      parked.set(item.id, { ...entry, item });
+      return visible;
+    }
+    return partitionVisible(upsert(visible, item, (value) => value.id === item.id), parked, hidden);
+  }
+  // Moved out of a hidden scope (e.g. a worktree follow out of a workspace being removed): visible again.
+  if (entry) parked.delete(item.id);
+  return upsert(visible, item, (value) => value.id === item.id);
+}
+
 function withoutSetValue(values: Set<string>, value: string): Set<string> {
   if (!values.has(value)) return values;
   const next = new Set(values);
@@ -478,6 +535,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
   const pendingTaskReads = new Map<string, { promise: Promise<TaskReadResult>; resolve: (result: TaskReadResult) => void; timer: ReturnType<typeof setTimeout> }>();
   // 中心离线期间已在本机 stop、但还没能删除的 catalog task；重连认证后补投（见 removeTask）。
   const pendingTaskRemovals = new Set<string>();
+  // Optimistic removal (plan 20261002-optimistic-removal). Hidden = pending itself or inside a pending
+  // workspace/project (cascade mirrors the centre's workspaceRemoved/projectRemoved broadcasts).
+  const removals: Record<RemovalKind, Map<string, PendingRemoval>> = { task: new Map(), workspace: new Map(), project: new Map() };
+  const parkedProjects: Parked<Project> = new Map();
+  const parkedWorkspaces: Parked<Workspace> = new Map();
+  const parkedTasks: Parked<Task> = new Map();
+  /** Terminals pending removal whose pane released the session while the stop may still be running:
+   * releasing it then would reject closeTask's stop. taskId → session to release once settled or rolled back. */
+  const deferredSessionReleases = new Map<string, { daemonId: string; sessionId: string }>();
+  /** Bumped right before each clientSubscribe: a snapshot answers the subscribe of the current epoch. */
+  let subscribeEpoch = 0;
+  const projectHidden = (project: Project) => removals.project.has(project.id);
+  const workspaceHidden = (workspace: Workspace) =>
+    removals.workspace.has(workspace.id) || (!!workspace.projectId && removals.project.has(workspace.projectId));
+  const taskHidden = (task: Task) =>
+    removals.task.has(task.id) || removals.workspace.has(task.workspaceId) || (!!task.projectId && removals.project.has(task.projectId));
   // plan 112：在飞的 deviceAuthorize（回应不带 request id，一次只允许一个在飞）。
   let pendingDeviceAuthorize: { resolve: (result: DeviceAuthorizeResult) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
@@ -609,9 +682,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       authState: "authed",
       loginName: catalog.loginName,
       daemons: catalog.daemons,
-      projects: catalog.projects,
-      workspaces: catalog.workspaces,
-      tasks: catalog.tasks,
+      ...visibleCatalog(catalog),
       ports: catalog.ports,
       sessionAgents: catalog.sessionAgents,
       snapshotRevision: state.snapshotRevision + 1,
@@ -668,6 +739,11 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   function markSessionExited(daemonId: string, taskId: string, sessionId: string, exitCode: number): void {
     liveSessionIds.delete(sessionId);
+    // A hidden (closing) terminal gets the same local fact, so a rollback never restores a dead session.
+    const parked = parkedTasks.get(taskId);
+    if (parked && parked.item.sessionId === sessionId) {
+      parkedTasks.set(taskId, { ...parked, item: { ...parked.item, status: TaskStatus.EXITED, sessionId: undefined, exitCode } });
+    }
     store.setState((state) => {
       const existing = state.localSessions.find((item) => item.daemonId === daemonId && item.sessionId === sessionId);
       const local: LocalSessionState = {
@@ -808,7 +884,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
 
   function sendInput(sessionId: string, data: string) {
     const bytes = new TextEncoder().encode(data);
-    const task = store.getState().tasks.find((item) => item.sessionId === sessionId);
+    const task = taskOfSession(sessionId);
     if (task) {
       deviceRouter.sendInput(task.daemonId, sessionId, bytes);
       return;
@@ -817,7 +893,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   function resizeSession(sessionId: string, cols: number, rows: number) {
-    const task = store.getState().tasks.find((item) => item.sessionId === sessionId);
+    const task = taskOfSession(sessionId);
     if (task) {
       deviceRouter.resize(task.daemonId, sessionId, cols, rows);
       return;
@@ -826,13 +902,15 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   function registerSessionConsumer(sessionId: string, consumer: SessionConsumer) {
-    const routedTask = store.getState().tasks.find((task) => task.sessionId === sessionId);
+    const routedTask = taskOfSession(sessionId);
     let consumers = sessionConsumers.get(sessionId);
     if (!consumers) {
       consumers = new Set<SessionConsumer>();
       sessionConsumers.set(sessionId, consumers);
     }
     consumers.add(consumer);
+    // A remounted pane (e.g. after a rollback) owns the session's life cycle again.
+    if (routedTask && deferredSessionReleases.get(routedTask.id)?.sessionId === sessionId) deferredSessionReleases.delete(routedTask.id);
     const checkpoint = store.getState().sessionCheckpoints[sessionId];
     if (checkpoint && !liveSessionIds.has(sessionId)) consumer(checkpoint.ansiSnapshot, true);
     return () => {
@@ -842,9 +920,158 @@ export function createCofluxClient(options: CofluxClientOptions) {
       if (current.size === 0) {
         sessionConsumers.delete(sessionId);
         liveSessionIds.delete(sessionId);
-        if (routedTask) deviceRouter.suspendSession(routedTask.daemonId, sessionId);
+        if (!routedTask) return;
+        // Hiding a closing terminal unmounts its pane; releasing the session here would reject
+        // closeTask's stop (it waits for the holder), so the release waits for the removal to end.
+        if (removals.task.has(routedTask.id)) deferredSessionReleases.set(routedTask.id, { daemonId: routedTask.daemonId, sessionId });
+        else deviceRouter.suspendSession(routedTask.daemonId, sessionId);
       }
     };
+  }
+
+  /** The task routing a session, hidden ones included: a closing terminal still receives local facts. */
+  function taskOfSession(sessionId: string): Task | undefined {
+    const visible = store.getState().tasks.find((task) => task.sessionId === sessionId);
+    if (visible) return visible;
+    for (const entry of parkedTasks.values()) if (entry.item.sessionId === sessionId) return entry.item;
+    return undefined;
+  }
+
+  function taskById(taskId: string): Task | undefined {
+    return store.getState().tasks.find((task) => task.id === taskId) ?? parkedTasks.get(taskId)?.item;
+  }
+
+  /* ---------------- optimistic removal (plan 20261002-optimistic-removal) ---------------- */
+
+  /** The visible arrays after the current pending-removal sets: hides newly hidden entities, restores rolled-back ones. */
+  function visibleCatalog(catalog: Pick<CofluxState, "projects" | "workspaces" | "tasks">): Pick<CofluxState, "projects" | "workspaces" | "tasks"> {
+    return {
+      projects: partitionVisible(catalog.projects, parkedProjects, projectHidden),
+      workspaces: partitionVisible(catalog.workspaces, parkedWorkspaces, workspaceHidden),
+      tasks: partitionVisible(catalog.tasks, parkedTasks, taskHidden),
+    };
+  }
+
+  function parkedOf(removal: PendingRemoval): { daemonId: string } | undefined {
+    if (removal.kind === "task") return parkedTasks.get(removal.id)?.item;
+    if (removal.kind === "workspace") return parkedWorkspaces.get(removal.id)?.item;
+    return parkedProjects.get(removal.id)?.item;
+  }
+
+  /** Drops a pending removal's bookkeeping (settled or rolled back); the caller then repartitions. */
+  function clearRemoval(removal: PendingRemoval): void {
+    clearTimeout(removal.timer);
+    removals[removal.kind].delete(removal.id);
+    if (removal.kind === "task") pendingTaskRemovals.delete(removal.id);
+  }
+
+  /** Hides an entity now. Null when it is already pending removal. */
+  function beginRemoval(kind: RemovalKind, id: string): PendingRemoval | null {
+    if (removals[kind].has(id)) return null;
+    const removal: PendingRemoval = { kind, id, timer: undefined, sentEpoch: null };
+    removals[kind].set(id, removal);
+    store.setState((state) => visibleCatalog(state));
+    persistOfflineCatalog();
+    return removal;
+  }
+
+  function markRemovalSent(removal: PendingRemoval): void {
+    removal.sentEpoch = subscribeEpoch;
+    clearTimeout(removal.timer);
+    // The centre's silent returns leave nothing to report: the timeout restores without an error.
+    removal.timer = setTimeout(() => {
+      if (removals[removal.kind].get(removal.id) === removal) rollbackRemovals([removal]);
+    }, REMOVAL_FALLBACK_TIMEOUT_MS);
+  }
+
+  function rollbackRemovals(list: readonly PendingRemoval[]): void {
+    if (list.length === 0) return;
+    for (const removal of list) clearRemoval(removal);
+    store.setState((state) => visibleCatalog(state));
+    persistOfflineCatalog();
+    releaseDeferredSessions();
+  }
+
+  /** The centre reported a task gone (directly, by cascade, or by its absence from a snapshot). */
+  function settleTask(taskId: string): void {
+    const removal = removals.task.get(taskId);
+    if (removal) clearRemoval(removal);
+    parkedTasks.delete(taskId);
+  }
+
+  function settleWorkspace(workspaceId: string): void {
+    const removal = removals.workspace.get(workspaceId);
+    if (removal) clearRemoval(removal);
+    parkedWorkspaces.delete(workspaceId);
+    for (const [taskId, entry] of parkedTasks) if (entry.item.workspaceId === workspaceId) settleTask(taskId);
+  }
+
+  function settleProject(projectId: string): void {
+    const removal = removals.project.get(projectId);
+    if (removal) clearRemoval(removal);
+    parkedProjects.delete(projectId);
+    for (const [workspaceId, entry] of parkedWorkspaces) if (entry.item.projectId === projectId) settleWorkspace(workspaceId);
+    for (const [taskId, entry] of parkedTasks) if (entry.item.projectId === projectId) settleTask(taskId);
+  }
+
+  /** Releases sessions deferred by a closing terminal once its removal ended, unless a remounted pane took it over. */
+  function releaseDeferredSessions(): void {
+    if (![...deferredSessionReleases.keys()].some((taskId) => !removals.task.has(taskId))) return;
+    // After a tick: a rolled-back terminal's pane remounts first and takes the session over.
+    setTimeout(() => {
+      for (const [taskId, deferred] of deferredSessionReleases) {
+        if (removals.task.has(taskId)) continue;
+        deferredSessionReleases.delete(taskId);
+        if (!sessionConsumers.has(deferred.sessionId)) deviceRouter.suspendSession(deferred.daemonId, deferred.sessionId);
+      }
+    }, 0);
+  }
+
+  function clearRemovals(): void {
+    for (const kind of REMOVAL_KINDS) {
+      for (const removal of removals[kind].values()) clearTimeout(removal.timer);
+      removals[kind].clear();
+    }
+    parkedProjects.clear();
+    parkedWorkspaces.clear();
+    parkedTasks.clear();
+    deferredSessionReleases.clear();
+  }
+
+  /**
+   * Removes a workspace optimistically: it (and its terminals) leave the visible state now and come
+   * back if the centre reports an error or never answers. Not optimistic while the control
+   * connection is not authenticated — the request would be dropped — so it reports an error and
+   * returns false; true when the removal was sent.
+   */
+  function removeWorkspace(workspaceId: string): boolean {
+    if (!controlAuthenticated) {
+      reportLocalError("与服务器的连接未就绪，暂时无法删除工作区");
+      return false;
+    }
+    const removal = beginRemoval("workspace", workspaceId);
+    if (!removal) return false;
+    send({ case: "workspaceRemove", value: { workspaceId } });
+    markRemovalSent(removal);
+    return true;
+  }
+
+  /** Removes a project optimistically, with its workspaces and terminals; same contract as removeWorkspace. */
+  function removeProject(projectId: string): boolean {
+    if (!controlAuthenticated) {
+      reportLocalError("与服务器的连接未就绪，暂时无法移除项目");
+      return false;
+    }
+    const removal = beginRemoval("project", projectId);
+    if (!removal) return false;
+    send({ case: "projectRemove", value: { projectId } });
+    markRemovalSent(removal);
+    return true;
+  }
+
+  /** Ids of workspaces hidden by a pending removal: they may still come back (plan 078's create adoption must know them). */
+  function hiddenWorkspaceIds(): string[] {
+    return [...parkedWorkspaces.keys()];
   }
 
   // 快照/增量按到达顺序应用（server 保证 stateSnapshot 先于其后的广播），不做乱序缓冲。
@@ -884,6 +1111,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
           token = value.clientToken;
           options.tokenStorage.write(value.clientToken);
         }
+        // A removal sent from here on is handled after the snapshot this subscribe asks for.
+        subscribeEpoch += 1;
         send({ case: "clientSubscribe", value: {} });
         flushPendingTaskRemovals();
         options.onAuthenticated?.();
@@ -953,6 +1182,26 @@ export function createCofluxClient(options: CofluxClientOptions) {
           nextPorts[group.taskId] = group.ports.map((preview) => ({ port: preview.port, url: preview.url }));
         }
         const taskIds = new Set(value.tasks.map((task) => task.id));
+        // Pending removals against the snapshot: one it lacks is settled. One it still contains rolls
+        // back — the snapshot answers a reconnect, and a request sent before a silent disconnect is
+        // lost — unless it was sent after this snapshot's subscribe (e.g. terminal closes queued
+        // offline and flushed on this authOk), which the centre handles after building it.
+        const present: Record<RemovalKind, Set<string>> = {
+          task: taskIds,
+          workspace: new Set(value.workspaces.map((workspace) => workspace.id)),
+          project: new Set(value.projects.map((project) => project.id)),
+        };
+        for (const kind of REMOVAL_KINDS) {
+          for (const removal of [...removals[kind].values()]) {
+            const inFlight = removal.sentEpoch === null || removal.sentEpoch === subscribeEpoch;
+            if (inFlight && present[kind].has(removal.id)) continue;
+            clearRemoval(removal);
+          }
+        }
+        // The snapshot is authoritative: parked copies are rebuilt from it for what is still pending.
+        parkedProjects.clear();
+        parkedWorkspaces.clear();
+        parkedTasks.clear();
         store.setState((state) => {
           const tasks = value.tasks.map((task) => {
             const localExit = task.sessionId
@@ -964,9 +1213,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           });
           return {
             daemons: value.daemons,
-            projects: value.projects,
-            workspaces: value.workspaces,
-            tasks,
+            ...visibleCatalog({ projects: value.projects, workspaces: value.workspaces, tasks }),
             ports: nextPorts,
             detachedTaskIds: new Set([...state.detachedTaskIds].filter((taskId) => taskIds.has(taskId))),
             // agent presence 清零重建：server 会紧随快照按设备补发当前全量（plan 073）。
@@ -988,6 +1235,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "daemonRemoved": {
         const value = payload.value;
+        for (const kind of REMOVAL_KINDS) {
+          for (const removal of [...removals[kind].values()]) if (parkedOf(removal)?.daemonId === value.daemonId) clearRemoval(removal);
+        }
+        for (const [id, entry] of parkedProjects) if (entry.item.daemonId === value.daemonId) parkedProjects.delete(id);
+        for (const [id, entry] of parkedWorkspaces) if (entry.item.daemonId === value.daemonId) parkedWorkspaces.delete(id);
+        for (const [id, entry] of parkedTasks) if (entry.item.daemonId === value.daemonId) parkedTasks.delete(id);
         store.setState((state) => ({
           daemons: state.daemons.filter((daemon) => daemon.daemonId !== value.daemonId),
           projects: state.projects.filter((project) => project.daemonId !== value.daemonId),
@@ -1003,11 +1256,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
       case "projectCreated": {
         const project = payload.value.project;
         if (!project) break;
-        store.setState((state) => ({ projects: upsert(state.projects, project, (item) => item.id === project.id) }));
+        store.setState((state) => ({ projects: upsertVisible(state.projects, parkedProjects, project, projectHidden) }));
         break;
       }
       case "projectRemoved": {
         const value = payload.value;
+        settleProject(value.projectId);
         store.setState((state) => ({
           projects: state.projects.filter((project) => project.id !== value.projectId),
           workspaces: state.workspaces.filter((workspace) => workspace.projectId !== value.projectId),
@@ -1018,11 +1272,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
       case "workspaceCreated": {
         const workspace = payload.value.workspace;
         if (!workspace) break;
-        store.setState((state) => ({ workspaces: upsert(state.workspaces, workspace, (item) => item.id === workspace.id) }));
+        store.setState((state) => ({ workspaces: upsertVisible(state.workspaces, parkedWorkspaces, workspace, workspaceHidden) }));
         break;
       }
       case "workspaceRemoved": {
         const value = payload.value;
+        settleWorkspace(value.workspaceId);
         store.setState((state) => ({
           workspaces: state.workspaces.filter((workspace) => workspace.id !== value.workspaceId),
           tasks: state.tasks.filter((task) => task.workspaceId !== value.workspaceId),
@@ -1040,7 +1295,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
             ? { ...serverTask, status: TaskStatus.EXITED, sessionId: undefined, exitCode: localExit.exitCode }
             : serverTask;
           return {
-            tasks: upsert(state.tasks, task, (item) => item.id === task.id),
+            tasks: upsertVisible(state.tasks, parkedTasks, task, taskHidden),
             detachedTaskIds: task.status !== TaskStatus.RUNNING ? withoutSetValue(state.detachedTaskIds, task.id) : state.detachedTaskIds,
           };
         });
@@ -1048,8 +1303,12 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "taskRemoved": {
         const value = payload.value;
-        const removed = store.getState().tasks.find((task) => task.id === value.taskId);
-        const removedSessionId = removed?.sessionId ?? store.getState().localSessions.find((session) => session.taskId === value.taskId)?.sessionId;
+        // A closing terminal is hidden: its sessionId and daemonId come from the parked copy.
+        const removed = taskById(value.taskId);
+        const deferred = deferredSessionReleases.get(value.taskId);
+        deferredSessionReleases.delete(value.taskId);
+        settleTask(value.taskId);
+        const removedSessionId = removed?.sessionId ?? deferred?.sessionId ?? store.getState().localSessions.find((session) => session.taskId === value.taskId)?.sessionId;
         store.setState((state) => {
           let ports = state.ports;
           let inputStates = state.inputStates;
@@ -1092,7 +1351,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState((state) => ({
           sessionCheckpoints: { ...state.sessionCheckpoints, [checkpoint.sessionId]: checkpoint },
         }));
-        const task = store.getState().tasks.find((item) => item.id === checkpoint.taskId);
+        const task = taskById(checkpoint.taskId);
         if (task) deviceRouter.seedCheckpoint(task.daemonId, checkpoint.taskId, checkpoint.sessionId, checkpoint.snapshotSeq);
         if (!liveSessionIds.has(checkpoint.sessionId)) deliverSession(checkpoint.sessionId, checkpoint.ansiSnapshot, true);
         break;
@@ -1212,7 +1471,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
       }
       case "error": {
         errorSequence += 1;
-        store.setState({ lastError: { id: errorSequence, message: payload.value.message } });
+        // The centre's failure reply carries no request id: any error rolls back every pending
+        // workspace and project removal (a false positive only flashes the row back until its
+        // removed broadcast). Terminals are not rolled back here — the usual answer to a failed
+        // taskRemove is that the task is already gone.
+        for (const kind of ["workspace", "project"] as const) {
+          for (const removal of [...removals[kind].values()]) clearRemoval(removal);
+        }
+        store.setState((state) => ({ ...visibleCatalog(state), lastError: { id: errorSequence, message: payload.value.message } }));
         break;
       }
       // plan 112：设备授权兑现的两种回音。deviceAuthorized = 成功；deviceAuthorizeInfo{ ok:false } = 拒绝（无效/已用/
@@ -1242,6 +1508,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       default:
         break;
     }
+    releaseDeferredSessions();
     persistOfflineCatalog();
   }
 
@@ -1326,6 +1593,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     settleDeviceAuthorize({ ok: false, error: "已登出" });
     failJoinKeys("已登出");
     pendingTaskRemovals.clear();
+    clearRemovals();
     clearOfflineTimer();
     clearOfflineCatalog();
     void deviceRouter.reset(true);
@@ -1365,7 +1633,10 @@ export function createCofluxClient(options: CofluxClientOptions) {
     send({ case: "taskStart", value: { taskId, cols, rows } });
   }
 
+  // The tab is hidden at once (plan 20261002-optimistic-removal) and comes back only if the stop fails.
   async function closeTask(task: Task): Promise<void> {
+    const removal = beginRemoval("task", task.id);
+    if (!removal) return;
     if (task.status === TaskStatus.RUNNING && task.sessionId) {
       try {
         deviceRouter.attachSession(task.daemonId, task.id, task.sessionId, 80, 24, true);
@@ -1374,10 +1645,14 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // session_not_found 是「设备侧已经没有它」的确定答复（daemon/supervisor 重启后的残留
         // task 都是这种），继续删 catalog task 才能收敛；其余错误仍然中止，不猜测本机状态。
         if ((error as { code?: string }).code !== "session_not_found") {
+          // Settled meanwhile (the centre reported it gone): nothing to bring back or report.
+          if (removals.task.get(task.id) !== removal) return;
+          rollbackRemovals([removal]);
           reportLocalError(error instanceof Error ? error.message : String(error));
           return;
         }
       }
+      if (removals.task.get(task.id) !== removal) return;
       // 本地 stop 是独立设备事实；中心离线时排队，重连认证后补投删除。
       removeTask(task.id);
       return;
@@ -1392,10 +1667,16 @@ export function createCofluxClient(options: CofluxClientOptions) {
       return;
     }
     connection.send({ case: "taskRemove", value: { taskId } });
+    const removal = removals.task.get(taskId);
+    if (removal) markRemovalSent(removal);
   }
 
   function flushPendingTaskRemovals(): void {
-    for (const taskId of pendingTaskRemovals) connection.send({ case: "taskRemove", value: { taskId } });
+    for (const taskId of pendingTaskRemovals) {
+      connection.send({ case: "taskRemove", value: { taskId } });
+      const removal = removals.task.get(taskId);
+      if (removal) markRemovalSent(removal);
+    }
     pendingTaskRemovals.clear();
   }
 
@@ -1698,6 +1979,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     controlAuthenticated = false;
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     failJoinKeys("客户端已断开");
+    clearRemovals();
     clearOfflineTimer();
     deviceRouter.destroy();
     connection.stop();
@@ -1717,6 +1999,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
     resizeSession,
     startTask,
     closeTask,
+    removeWorkspace,
+    removeProject,
+    hiddenWorkspaceIds,
     retainDevice,
     /** executor（plan 116）：订阅 daemon 推来的四条；返回退订函数。至多一个订阅者。 */
     subscribeExecutor(listener: (event: ExecutorClientEvent) => void): () => void {
