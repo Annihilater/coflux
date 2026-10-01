@@ -1305,6 +1305,95 @@ test("an id-less empty_payload on the session lane is still the heartbeat's and 
   h.router.destroy();
 });
 
+/* ===== Old worker vs fsStat (plan 20261001-terminal-file-tab) =====
+ * Hovering puts several fsStat requests in flight; a worker that predates fsStat answers each one
+ * with its own request-id-less `empty_payload` on the elevated lane. All of them must fail as
+ * daemon-outdated, none may reach onError, and the heartbeat must not claim any. */
+
+test("three id-less empty_payload replies to three fsStat requests fail all three quietly and leave the heartbeat alone", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const session = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(session);
+  await flush();
+  const ping = payloads(session).find((payload) => payload?.case === "ping");
+  if (ping?.case !== "ping") throw new Error("the session lane should send a ping once open");
+
+  const outcomes = [["a.ts"], ["b.ts"], ["c.ts", "d.ts"]].map((paths) =>
+    h.router.fsStat("daemon-1", "workspace-1", paths).then(() => undefined, (error: unknown) => error),
+  );
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  assert.equal(payloads(elevated).filter((payload) => payload?.case === "fsStat").length, 3, "all three go out on the elevated lane");
+
+  const errorsBefore = h.errors.length;
+  for (let i = 0; i < 3; i += 1) {
+    h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  }
+  await flush();
+  for (const outcome of outcomes) {
+    const error = await outcome;
+    assert.ok(error instanceof Error, "each stat fails without waiting for the timeout");
+    assert.equal((error as Error & { code?: string }).code, "daemon_outdated");
+  }
+  assert.equal(h.errors.length, errorsBefore, "no stray reaches onError");
+
+  // A later stat while the same worker is connected fails at once, without being sent.
+  const opensBefore = h.adapter.opens.length;
+  const sentBefore = h.adapter.opens.reduce((count, call) => count + payloads(call).filter((payload) => payload?.case === "fsStat").length, 0);
+  const later = await h.router.fsStat("daemon-1", "workspace-1", ["e.ts"]).then(() => undefined, (error: unknown) => error);
+  await flush();
+  assert.equal((later as Error & { code?: string }).code, "daemon_outdated");
+  assert.equal(h.adapter.opens.length, opensBefore, "no lane is opened for it");
+  assert.equal(
+    h.adapter.opens.reduce((count, call) => count + payloads(call).filter((payload) => payload?.case === "fsStat").length, 0),
+    sentBefore,
+    "it is never sent",
+  );
+  assert.equal(h.errors.length, errorsBefore);
+
+  // The heartbeat did not claim any of them: its pong still yields an RTT and pings keep going.
+  h.clock.advance(7);
+  h.adapter.emit(session, { case: "pong", value: { requestId: ping.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 7);
+  const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(15_000);
+  await flush();
+  assert.equal(payloads(session).filter((payload) => payload?.case === "ping").length, pingsBefore + 1, "heartbeats keep running");
+  release();
+  h.router.destroy();
+});
+
+test("fsStat on the same elevated generation fails immediately while the lane stays up", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const listing = h.router.changesList("daemon-1", "workspace-1").catch(() => undefined);
+  const first = h.router.fsStat("daemon-1", "workspace-1", ["a.ts"]).then(() => undefined, (error: unknown) => error);
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  const errorsBefore = h.errors.length;
+  h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  assert.equal(((await first) as Error & { code?: string }).code, "daemon_outdated");
+
+  // The pending changes request keeps the elevated lane (and its generation) alive.
+  const sentBefore = payloads(elevated).filter((payload) => payload?.case === "fsStat").length;
+  const second = await h.router.fsStat("daemon-1", "workspace-1", ["b.ts"]).then(() => undefined, (error: unknown) => error);
+  await flush();
+  assert.equal((second as Error & { code?: string }).code, "daemon_outdated");
+  assert.equal(payloads(elevated).filter((payload) => payload?.case === "fsStat").length, sentBefore, "not sent");
+  assert.equal(h.errors.length, errorsBefore);
+  h.router.destroy();
+  await listing;
+});
+
 /* ===== Old worker vs executor transcript viewing (plan 20260929-executor-pip) =====
  * A transcript subscription is a long-lived frame outside pendingRequests, so the router keeps its
  * own count of viewer frames an old worker would answer with a request-id-less `empty_payload`.

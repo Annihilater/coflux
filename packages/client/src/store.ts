@@ -231,6 +231,8 @@ export type FsWriteResult = { ok: boolean; path?: string; error: string };
  * and the response mapping live in ./changes. */
 import { changesFailure, toChangeFileResult, toChangesListResult, whitespaceWire, type ChangeFileResult, type ChangesListResult, type WhitespaceMode } from "./changes";
 export type { ChangedFile, ChangedFileStatus, ChangesFailure, ChangesListResult, ChangeFileResult, ChangesOption, WhitespaceMode } from "./changes";
+import { fileReadFailure, fileStatFailure, toFileReadResult, toFileStatResult, type FileReadResult, type FileStatResult } from "./files";
+export type { FileReadResult, FileStat, FileStatResult } from "./files";
 /** 设备授权兑现结果（plan 112；与桌面版 plan 113 的契约）：失败文案来自服务端 `deviceAuthorizeInfo{ ok:false }`
  * 或本地（未登录 / 连接未就绪 / 断连 / 超时）。 */
 export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
@@ -1490,6 +1492,35 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /**
+   * Which of `paths` exist in a workspace, and what each one canonically is (plan
+   * 20261001-terminal-file-tab): one device round trip, one entry per path in order. Relative
+   * paths resolve against the workspace root.
+   */
+  async function statWorkspaceFiles(workspaceId: string, paths: string[]): Promise<FileStatResult> {
+    const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return { kind: "failed", error: "工作区不存在" };
+    try {
+      return toFileStatResult(await deviceRouter.fsStat(workspace.daemonId, workspaceId, paths));
+    } catch (error) {
+      return fileStatFailure(error);
+    }
+  }
+
+  /**
+   * One workspace file's content (plan 20261001-terminal-file-tab). With `knownRevision` the read
+   * is conditional: an unchanged file answers `notModified` without content.
+   */
+  async function readWorkspaceFile(workspaceId: string, path: string, knownRevision?: string): Promise<FileReadResult> {
+    const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return { kind: "failed", error: "工作区不存在" };
+    try {
+      return toFileReadResult(await deviceRouter.fsRead(workspace.daemonId, workspaceId, path, knownRevision));
+    } catch (error) {
+      return fileReadFailure(error);
+    }
+  }
+
   /** 终端剪贴板贴图（plan 014，temp 模式修订）：把图片字节上传落盘。
    * temp=true（终端贴图固定用法）：path 须为单段文件名，落到 daemon 侧系统临时目录，
    * 成功时 path 回带该处的绝对路径。temp=false：path 为该工作区 worktree 内相对路径，
@@ -1725,6 +1756,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     execInWorkspace,
     listWorkspaceChanges,
     readWorkspaceChangeFile,
+    statWorkspaceFiles,
+    readWorkspaceFile,
     readTask,
     sendFsWrite,
     authorizeDevice,
