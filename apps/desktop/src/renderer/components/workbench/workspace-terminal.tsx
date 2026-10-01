@@ -250,10 +250,13 @@ function NewTabMenu({
   // from the last committed render, so it is switched off while the menu is open and stays off until
   // the trigger loses focus or the pointer comes back to it.
   const [tooltipQuiet, setTooltipQuiet] = useState(false);
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- the tooltip reads isEnabled from the last committed render, so the quiet flag must be committed state set once the menu opened; `open` is driven from outside (⌘T), there is no event here to set it from
+  // Quieted when the menu opens: adjusted during render when `open` flips (null: not synced yet), so
+  // it is committed together with the open menu.
+  const [syncedOpen, setSyncedOpen] = useState<boolean | null>(null);
+  if (open !== syncedOpen) {
+    setSyncedOpen(open);
     if (open) setTooltipQuiet(true);
-  }, [open]);
+  }
   useEffect(() => {
     const trigger = anchorRef.current;
     if (!tooltipQuiet || !trigger) return;
@@ -566,7 +569,7 @@ export function WorkspaceTerminal({
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
   // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
-  const seenDoneRef = useRef(new Set<string>());
+  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -582,7 +585,7 @@ export function WorkspaceTerminal({
   const ghostNodeRef = useRef<HTMLDivElement | null>(null);
   // The last zone each group highlighted, so a highlight fading out stays where it was instead of
   // snapping back to the centre while it fades.
-  const lastZoneRef = useRef(new Map<string, LayoutSide | "center">());
+  const [lastZones, setLastZones] = useState<ReadonlyMap<string, LayoutSide | "center">>(() => new Map());
 
   useEffect(() => {
     if (!dragTaskId) return;
@@ -640,10 +643,8 @@ export function WorkspaceTerminal({
   }
 
   // pending 收敛：store 中分支已到目标值即清除；20s 兜底解锁（上报丢失时下次快照仍会纠正显示）
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- the pending branch is cleared once the device-reported branch catches up; deriving it instead would bring the pending state back if the branch moved away again before the 20s fallback
-    if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
-  }, [pendingBranch, workspace?.branch]);
+  // Cleared during render as soon as the reported branch has reached the target.
+  if (pendingBranch && workspace?.branch === pendingBranch) setPendingBranch(null);
   useEffect(() => {
     if (!pendingBranch) return;
     const timer = window.setTimeout(() => setPendingBranch(null), 20_000);
@@ -656,12 +657,36 @@ export function WorkspaceTerminal({
   const geometry = layoutGeometry(layout);
   const singleGroup = geometry.groups.length === 1;
 
+  // Which finished agents have been seen, as of this render: a session is forgotten once its agent
+  // works again, and marked seen when its tab is on screen (this workspace is shown, the changes
+  // overlay is closed, and it is its group's active tab). Adjusted during render; the tabs below
+  // render from `seenNow`.
+  let seenNext = seenDone;
+  for (const { group } of geometry.groups) {
+    for (const taskId of group.tabs) {
+      if (isBrowserTabId(taskId) || isScreenTabId(taskId)) continue;
+      const sessionId = taskById.get(taskId)?.sessionId;
+      if (!sessionId) continue;
+      const agentState = sessionAgents[sessionId]?.state;
+      const done = agentState === "done" || agentState === "waiting";
+      if (agentState && !done && seenNext.has(sessionId)) {
+        const next = new Set(seenNext);
+        next.delete(sessionId);
+        seenNext = next;
+      } else if (done && active && !changesOpen && group.activeTabId === taskId && !seenNext.has(sessionId)) {
+        seenNext = new Set(seenNext).add(sessionId);
+      }
+    }
+  }
+  if (seenNext !== seenDone) setSeenDone(seenNext);
+  const seenNow = seenNext;
+
   function endDrag() {
     setDragTaskId(null);
     setDropTarget(null);
     setDragGhost(null);
     dragGhostRef.current = null;
-    lastZoneRef.current.clear();
+    setLastZones((current) => (current.size === 0 ? current : new Map()));
   }
 
   function dropOnStrip(group: LayoutGroup, index: number) {
@@ -911,14 +936,7 @@ export function WorkspaceTerminal({
     const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
-    if (sessionId && agentState && agentState !== "done" && agentState !== "waiting") {
-      seenDoneRef.current.delete(sessionId);
-    }
-    // Seen only when it is on screen: this workspace is shown, the changes overlay is closed, and it is its group's active tab.
-    if (active && !changesOpen && isActive && sessionId && (agentState === "done" || agentState === "waiting")) {
-      seenDoneRef.current.add(sessionId);
-    }
-    const seenDone = Boolean(sessionId && seenDoneRef.current.has(sessionId));
+    const tabSeenDone = Boolean(sessionId && seenNow.has(sessionId));
     // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
     const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
     // Moving a group's only tab into a new group beside that group would leave nothing behind.
@@ -969,7 +987,7 @@ export function WorkspaceTerminal({
               ) : state === "detached" ? (
                 <Unplug className="size-3 shrink-0 text-warning" />
               ) : agentEntry ? (
-                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={seenDone} className={bright ? "opacity-90" : "opacity-70"} />
+                <AgentGlyph agent={agentEntry.agent} state={agentEntry.state} seen={tabSeenDone} className={bright ? "opacity-90" : "opacity-70"} />
               ) : launchedAgent ? (
                 <AgentLogo agent={launchedAgent} className={cn("size-3", bright ? "opacity-90" : "opacity-70")} />
               ) : (
@@ -1177,7 +1195,6 @@ export function WorkspaceTerminal({
   // workbench.tsx), so every rectangle here is relative to the terminal main area.
   return (
     <>
-      {/* oxlint-disable-next-line react/refs -- renderTab records which finished agents were seen on screen in seenDoneRef during render on purpose: a render-only marker that must not cause another render */}
       {geometry.groups.map((entry) => renderGroup(entry.group, entry.rect))}
 
       {/* Sashes: after the group chrome (later in document order than the strips' drag regions, see drag-region.ts), z-20 above the pane layer. */}
@@ -1210,11 +1227,9 @@ export function WorkspaceTerminal({
           here and never on the pane — whose drop upload only accepts files, and the tab payload is
           deliberately not a file. */}
       {dragTaskId && !changesOpen
-        // oxlint-disable-next-line react/refs -- lastZoneRef remembers each group's last highlighted zone during render so a fading highlight stays in place; state would cost a render per zone change
         ? geometry.groups.map(({ group, rect }) => {
             const target = dropTarget?.kind === "zone" && dropTarget.groupId === group.id ? dropTarget.zone : null;
-            if (target) lastZoneRef.current.set(group.id, target);
-            const shownZone = target ?? lastZoneRef.current.get(group.id) ?? "center";
+            const shownZone = target ?? lastZones.get(group.id) ?? "center";
             return (
               <div
                 key={`drop:${group.id}`}
@@ -1225,7 +1240,10 @@ export function WorkspaceTerminal({
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
                   const zone = zoneAt(event);
-                  if (target !== zone) setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  if (target === zone) return;
+                  setDropTarget({ kind: "zone", groupId: group.id, zone });
+                  // Remembered so the highlight fades out where it was instead of snapping to the centre.
+                  setLastZones((current) => (current.get(group.id) === zone ? current : new Map(current).set(group.id, zone)));
                 }}
                 onDragLeave={(event) => {
                   const next = event.relatedTarget;
