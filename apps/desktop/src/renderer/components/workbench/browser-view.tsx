@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import {
   AppWindow,
@@ -587,9 +587,8 @@ function BrowserView({
     liveRef.current = { url, title, mode, failure, visible, editing };
   });
 
-  function currentMode(): DesktopBrowserMode | null {
-    return runtime.modeOf(scope) ?? liveRef.current.mode;
-  }
+  // Read from the webview's event handlers at the moment the event fires.
+  const currentMode = useEffectEvent((): DesktopBrowserMode | null => runtime.modeOf(scope) ?? liveRef.current.mode);
 
   /** Loads a URL the address bar, a suggestion, a port or a retry resolved — always through main. */
   function navigate(target: string) {
@@ -826,7 +825,6 @@ function BrowserView({
       runtime.unbindGuest(tabId);
       setGuestId(null);
     };
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- currentMode reads the live mode through runtime and liveRef when the event fires, so the handler never sees a stale mode; it is redeclared on every render, so listing it would remove and recreate the webview on every render
   }, [prepared, runtime, tabId]);
 
   // Main-process events about this tab, and the hooks the Workbench drives it through.
