@@ -40,7 +40,7 @@ const BINARY_SNIFF_CHARS = 8000;
  */
 const HIGHLIGHT_MARKER = "#6b9bd1";
 const HIGHLIGHT_ROW_BACKGROUND = "rgba(107, 155, 209, 0.16)";
-const OUTDATED_MESSAGE ="这台设备的 daemon 版本过旧，不支持查看文件。更新 daemon 后重试。";
+const OUTDATED_MESSAGE = "这台设备的 daemon 版本过旧，不支持查看文件。更新 daemon 后重试。";
 
 type FileViewProps = {
   runtime: FileRuntime;
