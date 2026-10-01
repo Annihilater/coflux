@@ -40,6 +40,9 @@ import {
 } from "@/components/workbench/sidebar-collapse";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { useTerminalAttach } from "@/components/workbench/terminal-attach";
+import { effectiveAgents, type EffectiveAgent } from "@/components/settings/agent-settings";
+import { agentSettingsStore } from "@/components/settings/agent-settings-store";
+import { useAgentLaunches } from "@/components/workbench/use-agent-launches";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
 import { BrowserViews, type BrowserViewEntry } from "@/components/workbench/browser-view";
@@ -422,6 +425,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // Stored layouts are neither reconciled nor persisted before the first snapshot: until then the
   // task list is empty because nothing has arrived, not because everything was closed.
   const snapshotReady = snapshotRevision > 0 && authState === "authed";
+  // Agents launched from the ＋ menu (plan 20261001-desktop-agents): pending launch commands, the
+  // typing of each one once, and the tab → agent records for tab icons.
+  const agentLaunches = useAgentLaunches(client, { tasks, snapshotReady });
 
   function layoutOf(workspaceId: string): TerminalLayout {
     return layoutsRef.current[workspaceId] ?? EMPTY_LAYOUT;
@@ -553,18 +559,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
    * Opens a terminal in the focused group or, with a side, in a new group split off it (⌘\ / ⌘⇧\).
    * Optimistic (plan 078): the pending tab is a layout entry until the created task replaces it in
    * place. One create per workspace at a time; asking again while one is in flight is a no-op.
+   * With an agent (plan 20261001-desktop-agents) the terminal is titled with the agent's name and
+   * its launch command waits, bound to this pending create, for the task that answers it.
    */
-  function createTerminalIn(workspaceId: string, side: LayoutSide | null) {
+  function createTerminalIn(workspaceId: string, side: LayoutSide | null, agent: EffectiveAgent | null = null) {
     setWorkspaceChangesOpen(workspaceId, false);
     const layout = layoutOf(workspaceId);
     if (layout.pending) return;
     const known = workspaceTaskIds(client.store.getState().tasks, workspaceId);
-    const title = `终端 ${known.length + 1}`;
+    const title = agent ? agent.name : `终端 ${known.length + 1}`;
     const pendingId = `${PENDING_TAB_PREFIX}${++pendingCreateSeqRef.current}`;
     commitLayout(workspaceId, beginPendingTab(layout, { id: pendingId, title, knownTaskIds: known }, side));
+    if (agent) agentLaunches.beginCreate(pendingId, { agentId: agent.id, command: agent.command, title });
     // Local fallback: when taskCreate is answered by neither a success nor an error broadcast, drop the pending tab.
     const timer = window.setTimeout(() => {
       if (pendingCreateTimersRef.current.get(workspaceId)?.pendingId === pendingId) pendingCreateTimersRef.current.delete(workspaceId);
+      agentLaunches.discardCreate(pendingId);
       updateLayout(workspaceId, (current) => dropPendingTab(current, pendingId));
     }, PENDING_CREATE_TIMEOUT_MS);
     pendingCreateTimersRef.current.set(workspaceId, { pendingId, timer });
@@ -1225,6 +1235,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         window.clearTimeout(timer.timer);
         pendingCreateTimersRef.current.delete(workspaceId);
       }
+      // An agent create binds its launch command to this task only if the task answers it (title check).
+      agentLaunches.settleCreate(pendingId, taskId);
       const layout = layoutOf(workspaceId);
       if (groupOfTab(layout, taskId)?.activeTabId !== taskId) continue;
       attach.requestActivation(taskId);
@@ -1290,6 +1302,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (!lastError) return;
     for (const [workspaceId, entry] of pendingCreateTimersRef.current) {
       window.clearTimeout(entry.timer);
+      agentLaunches.discardCreate(entry.pendingId);
       updateLayout(workspaceId, (current) => dropPendingTab(current, entry.pendingId));
     }
     pendingCreateTimersRef.current.clear();
@@ -1417,6 +1430,13 @@ export function Workbench({ client }: { client: CofluxClient }) {
     createTerminal: (workspaceId, groupId) => {
       updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
       createTerminalIn(workspaceId, null);
+    },
+    createAgentTerminal: (workspaceId, groupId, agentId) => {
+      // Read at the moment of choosing: the command typed is the one Settings holds now.
+      const agent = effectiveAgents(agentSettingsStore.getState().settings).find((item) => item.id === agentId);
+      if (!agent) return;
+      updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
+      createTerminalIn(workspaceId, null, agent);
     },
     createBrowserTab: (workspaceId, groupId) => {
       updateLayout(workspaceId, (layout) => focusGroup(layout, groupId));
@@ -1593,6 +1613,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     screens={screens}
                     canOpenScreen={canOpenScreenOn(workspace.daemonId)}
                     newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
+                    agentTabs={agentLaunches.records}
                   />
                 </div>
               );
@@ -1607,6 +1628,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                 const target = normalizeIncomingUrl(url);
                 if (target) openBrowserTab(workspaceId, target);
               }}
+              onPromptStart={agentLaunches.handlePromptStart}
               client={client}
               attach={attach}
             />

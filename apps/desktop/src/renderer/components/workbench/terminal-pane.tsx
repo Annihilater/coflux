@@ -70,6 +70,11 @@ type TerminalPaneProps = {
   onDispose: (taskId: string, controller: TerminalController) => void;
   onSessionReady: (taskId: string, sessionId: string, controller: TerminalController) => void;
   onOutput: (taskId: string, sessionId: string) => void;
+  /**
+   * An authenticated OSC 133 prompt-start mark arrived (plan 20261001-desktop-agents: the agent
+   * launch types its command on it). Only the event leaves the pane, never the mark's payload.
+   */
+  onPromptStart?: (taskId: string) => void;
   /** 会话纸面（plan 20260919）：这个终端里跑着的 agent，null = 没有 agent，不出按钮。 */
   transcriptAgent: TranscriptAgent | null;
   /** Right click on a web link → 在内置浏览器中打开 (plan 20260924-desktop-browser-tab): a browser tab in this pane's workspace. */
@@ -220,6 +225,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // onData/onResize/粘贴/拖拽处理在挂载时注册一次，但要读到"当下"的 active/controlState/sessionId 等——
   // React 组件体每次渲染都跑而闭包只捕获创建时的值，故镜像进 ref（landmine 17：untrack 无直接对应物，
   // 这里反过来是"始终读最新"而非"读一次"，用同样的 ref 手段解决）。
+  // Read by the OSC 133 handler registered once at mount.
+  const onPromptStartRef = useRef(props.onPromptStart);
+  onPromptStartRef.current = props.onPromptStart;
   const liveRef = useRef({
     visible: props.visible,
     focused: props.focused,
@@ -476,6 +484,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       const current = commands[commands.length - 1];
       if (mark.kind === "prompt-start") {
         beginCommand();
+        onPromptStartRef.current?.(props.taskId);
       } else if (mark.kind === "command-start" && current) {
         current.start = terminal.registerMarker(0);
         current.state = "running";
