@@ -437,29 +437,30 @@ fn file_error(request_id: String, error: String) -> wire::DeviceChangesFile {
 
 /// One changed file's two sides and the `-U0` patch between them, against the list's base.
 ///
-/// The response always echoes `ignore_whitespace`, whatever path produced it (an error, a missing
-/// side, binary content, equal sides): the echo tells the client this worker decoded the field,
-/// not that a diff ran (plan 20261001-changes-review-polish).
+/// The response always echoes the whitespace level it applied, whatever path produced it (an
+/// error, a missing side, binary content, equal sides): the echo tells the client this worker
+/// decoded the field, not that a diff ran (plan 20261001-changes-review-polish). A level this
+/// worker does not know is applied, and echoed, as unspecified.
 pub(crate) async fn read_change_file(
     worktree: &str,
     request: wire::DeviceChangesFileRequest,
 ) -> wire::DeviceChangesFile {
-    let ignore_whitespace = request.ignore_whitespace;
-    let mut response = read_change_sides(worktree, request).await;
-    response.ignore_whitespace = ignore_whitespace;
+    let whitespace = wire::ChangesWhitespace::try_from(request.whitespace).unwrap_or(wire::ChangesWhitespace::Unspecified);
+    let mut response = read_change_sides(worktree, request, whitespace).await;
+    response.whitespace = whitespace as i32;
     response
 }
 
 async fn read_change_sides(
     worktree: &str,
     request: wire::DeviceChangesFileRequest,
+    whitespace: wire::ChangesWhitespace,
 ) -> wire::DeviceChangesFile {
     let wire::DeviceChangesFileRequest {
         request_id,
         base,
         path,
         old_path,
-        ignore_whitespace,
         ..
     } = request;
     if !base.is_empty() && !is_object_id(&base) {
@@ -498,10 +499,13 @@ async fn read_change_sides(
                     "--src-prefix=a/",
                     "--dst-prefix=b/",
                 ];
-                // `-w` drops whitespace-only hunks; a patch left without any hunk then means
-                // "only whitespace changed", which the client shows as such.
-                if ignore_whitespace {
-                    args.push("-w");
+                // The flag drops hunks that differ only in the whitespace it ignores; a patch left
+                // without any hunk then means "only whitespace changed", which the client shows as such.
+                match whitespace {
+                    wire::ChangesWhitespace::Unspecified => {}
+                    wire::ChangesWhitespace::IgnoreAtEol => args.push("--ignore-space-at-eol"),
+                    wire::ChangesWhitespace::IgnoreChange => args.push("-b"),
+                    wire::ChangesWhitespace::IgnoreAll => args.push("-w"),
                 }
                 args.extend([base.as_str(), "--", path.as_str()]);
                 if let Some(old_path) = old_path.as_deref() {
@@ -535,7 +539,7 @@ async fn read_change_sides(
         patch,
         binary,
         // Set by `read_change_file` on every response.
-        ignore_whitespace: false,
+        whitespace: 0,
     }
 }
 
@@ -719,14 +723,19 @@ mod tests {
         paths
     }
 
-    fn file_request(base: &str, path: &str, old_path: Option<&str>, ignore_whitespace: bool) -> wire::DeviceChangesFileRequest {
+    fn file_request(
+        base: &str,
+        path: &str,
+        old_path: Option<&str>,
+        whitespace: wire::ChangesWhitespace,
+    ) -> wire::DeviceChangesFileRequest {
         wire::DeviceChangesFileRequest {
             request_id: "r".into(),
             workspace_id: "w".into(),
             base: base.into(),
             path: path.into(),
             old_path: old_path.map(str::to_string),
-            ignore_whitespace,
+            whitespace: whitespace as i32,
         }
     }
 
@@ -761,7 +770,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ignore_whitespace_drops_reindent_hunks_and_keeps_real_ones() {
+    async fn ignore_all_drops_reindent_hunks_and_keeps_real_ones() {
+        use wire::ChangesWhitespace::{IgnoreAll, Unspecified};
         let repo = Repo::new();
         repo.write("reindent.ts", b"if (a) {\nfoo(a, b);\nbar();\n}\n");
         repo.write("mixed.ts", b"one();\ntwo();\nthree();\nfour();\nfive();\nsix();\n");
@@ -770,26 +780,56 @@ mod tests {
         repo.write("reindent.ts", b"if (a) {\n    foo(a, b);\n    bar();\n}\n");
         repo.write("mixed.ts", b"  one();\ntwo();\nthree();\nfour();\nfive();\nsix(changed);\n");
 
-        let plain = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, false)).await;
+        let plain = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, Unspecified)).await;
         assert!(plain.ok);
-        assert!(!plain.ignore_whitespace);
+        assert_eq!(plain.whitespace, Unspecified as i32);
         assert_eq!(hunk_count(&plain.patch), 1);
 
-        let ignored = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, true)).await;
+        let ignored = read_change_file(repo.root(), file_request(&base, "reindent.ts", None, IgnoreAll)).await;
         assert!(ignored.ok);
-        assert!(ignored.ignore_whitespace);
+        assert_eq!(ignored.whitespace, IgnoreAll as i32);
         assert_eq!(hunk_count(&ignored.patch), 0, "a pure re-indent has no hunk under -w: {:?}", ignored.patch);
         assert_ne!(ignored.old_content, ignored.new_content, "the sides are returned whole either way");
 
-        let plain = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, false)).await;
+        let plain = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, Unspecified)).await;
         assert_eq!(hunk_count(&plain.patch), 2);
-        let ignored = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, true)).await;
+        let ignored = read_change_file(repo.root(), file_request(&base, "mixed.ts", None, IgnoreAll)).await;
         assert_eq!(hunk_count(&ignored.patch), 1, "only the real edit is left: {:?}", ignored.patch);
         assert!(ignored.patch.contains("@@ -6 +6 @@"), "{:?}", ignored.patch);
     }
 
     #[tokio::test]
-    async fn ignore_whitespace_is_echoed_on_every_file_response() {
+    async fn each_whitespace_level_ignores_exactly_its_own_changes() {
+        use wire::ChangesWhitespace::{IgnoreAll, IgnoreAtEol, IgnoreChange, Unspecified};
+        let repo = Repo::new();
+        repo.write("eol.ts", b"foo();\n");
+        repo.write("amount.ts", b"  foo();\n");
+        repo.write("inserted.ts", b"foo(a,b);\n");
+        repo.commit_all("base");
+        let base = repo.head();
+        repo.write("eol.ts", b"foo();   \n");
+        repo.write("amount.ts", b"\tfoo();\n");
+        repo.write("inserted.ts", b"foo(a, b);\n");
+
+        // (file, the levels that hide it)
+        let cases: [(&str, &[wire::ChangesWhitespace]); 3] = [
+            ("eol.ts", &[IgnoreAtEol, IgnoreChange, IgnoreAll]),
+            ("amount.ts", &[IgnoreChange, IgnoreAll]),
+            ("inserted.ts", &[IgnoreAll]),
+        ];
+        for (path, hidden_by) in cases {
+            for level in [Unspecified, IgnoreAtEol, IgnoreChange, IgnoreAll] {
+                let response = read_change_file(repo.root(), file_request(&base, path, None, level)).await;
+                assert!(response.ok, "{path} {level:?}");
+                let expected = if hidden_by.contains(&level) { 0 } else { 1 };
+                assert_eq!(hunk_count(&response.patch), expected, "{path} under {level:?}: {:?}", response.patch);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn whitespace_is_echoed_on_every_file_response() {
+        use wire::ChangesWhitespace::{IgnoreAll, IgnoreChange, Unspecified};
         let repo = Repo::new();
         repo.write("deleted.txt", b"gone\n");
         repo.write("moved-from.txt", b"same\n");
@@ -802,26 +842,31 @@ mod tests {
         repo.write("binary.bin", b"a\0b");
 
         let cases: Vec<(&str, wire::DeviceChangesFileRequest)> = vec![
-            ("added", file_request(&base, "added.txt", None, true)),
-            ("deleted", file_request(&base, "deleted.txt", None, true)),
-            ("binary", file_request(&base, "binary.bin", None, true)),
-            ("rename-only", file_request(&base, "moved-to.txt", Some("moved-from.txt"), true)),
-            ("equal sides", file_request(&base, "equal.txt", None, true)),
-            ("invalid path", file_request(&base, "../outside", None, true)),
-            ("invalid base", file_request("HEAD", "added.txt", None, true)),
+            ("added", file_request(&base, "added.txt", None, IgnoreChange)),
+            ("deleted", file_request(&base, "deleted.txt", None, IgnoreChange)),
+            ("binary", file_request(&base, "binary.bin", None, IgnoreChange)),
+            ("rename-only", file_request(&base, "moved-to.txt", Some("moved-from.txt"), IgnoreChange)),
+            ("equal sides", file_request(&base, "equal.txt", None, IgnoreChange)),
+            ("invalid path", file_request(&base, "../outside", None, IgnoreChange)),
+            ("invalid base", file_request("HEAD", "added.txt", None, IgnoreChange)),
         ];
         for (name, request) in cases {
             let response = read_change_file(repo.root(), request).await;
-            assert!(response.ignore_whitespace, "{name}: the echo must be set");
+            assert_eq!(response.whitespace, IgnoreChange as i32, "{name}: the echo must be set");
         }
 
-        let error = read_change_file(repo.root(), file_request(&base, "../outside", None, true)).await;
+        let error = read_change_file(repo.root(), file_request(&base, "../outside", None, IgnoreAll)).await;
         assert!(!error.ok);
-        let added = read_change_file(repo.root(), file_request(&base, "added.txt", None, true)).await;
+        let added = read_change_file(repo.root(), file_request(&base, "added.txt", None, IgnoreAll)).await;
         assert!(added.ok && !added.old_exists && added.new_exists && added.patch.is_empty());
-        let binary = read_change_file(repo.root(), file_request(&base, "binary.bin", None, true)).await;
+        let binary = read_change_file(repo.root(), file_request(&base, "binary.bin", None, IgnoreAll)).await;
         assert!(binary.ok && binary.binary);
-        let not_asked = read_change_file(repo.root(), file_request(&base, "added.txt", None, false)).await;
-        assert!(!not_asked.ignore_whitespace, "the echo mirrors the request, it is not a capability flag");
+        let not_asked = read_change_file(repo.root(), file_request(&base, "added.txt", None, Unspecified)).await;
+        assert_eq!(not_asked.whitespace, Unspecified as i32, "the echo mirrors the request, it is not a capability flag");
+
+        let mut unknown = file_request(&base, "added.txt", None, Unspecified);
+        unknown.whitespace = 99;
+        let unknown = read_change_file(repo.root(), unknown).await;
+        assert_eq!(unknown.whitespace, Unspecified as i32, "an unknown level is applied and echoed as unspecified");
     }
 }

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { create, DeviceChangesFileSchema, DeviceChangesListSchema, DeviceChangeStatus } from "@coflux/protocol";
+import { ChangesWhitespace, create, DeviceChangesFileSchema, DeviceChangesListSchema, DeviceChangeStatus } from "@coflux/protocol";
 
 import { toChangeFileResult, toChangesListResult } from "./changes";
 
@@ -20,7 +20,7 @@ const listed = (fields: { ok?: boolean; error?: string; uncommitted?: boolean })
     uncommitted: fields.uncommitted ?? false,
   });
 
-const file = (fields: { ok?: boolean; error?: string; ignoreWhitespace?: boolean }) =>
+const file = (fields: { ok?: boolean; error?: string; whitespace?: ChangesWhitespace }) =>
   create(DeviceChangesFileSchema, {
     requestId: "r",
     ok: fields.ok ?? true,
@@ -30,7 +30,7 @@ const file = (fields: { ok?: boolean; error?: string; ignoreWhitespace?: boolean
     oldContent: "a\n",
     newContent: "  a\n",
     patch: "",
-    ignoreWhitespace: fields.ignoreWhitespace ?? false,
+    whitespace: fields.whitespace ?? ChangesWhitespace.UNSPECIFIED,
   });
 
 test("the branch scope never needs an echo, so old and new workers both answer it", () => {
@@ -60,25 +60,29 @@ test("a failed list reports its own error before the echo is considered", () => 
   assert.equal(result.outdatedOption, undefined);
 });
 
-test("ignoring whitespace without an echo is an outdated daemon; with it the content is used", () => {
-  const stale = toChangeFileResult(file({ ignoreWhitespace: false }), true);
+test("a whitespace mode the echo does not match is an outdated daemon; a matching echo is used", () => {
+  const stale = toChangeFileResult(file({}), "ignoreAll");
   assert.equal(stale.ok, false);
   if (!stale.ok) {
     assert.equal(stale.daemonOutdated, true);
-    assert.equal(stale.outdatedOption, "ignoreWhitespace");
+    assert.equal(stale.outdatedOption, "whitespace");
   }
 
+  // A worker that knows the field but not this level applies and echoes it as unspecified.
+  const unknownLevel = toChangeFileResult(file({ whitespace: ChangesWhitespace.UNSPECIFIED }), "ignoreAtEol");
+  assert.equal(unknownLevel.ok, false);
+
   // An added, deleted or binary file never runs git on the worker, yet a current worker still echoes.
-  const current = toChangeFileResult(file({ ignoreWhitespace: true }), true);
+  const current = toChangeFileResult(file({ whitespace: ChangesWhitespace.IGNORE_CHANGE }), "ignoreChange");
   assert.ok(current.ok);
   assert.equal(current.patch, "");
 
-  const plain = toChangeFileResult(file({}), false);
-  assert.ok(plain.ok, "not asking needs no echo");
+  const plain = toChangeFileResult(file({}), "show");
+  assert.ok(plain.ok, "showing every change needs no echo");
 });
 
 test("a failed file read keeps its error even when the echo is missing", () => {
-  const result = toChangeFileResult(file({ ok: false, error: "路径无效" }), true);
+  const result = toChangeFileResult(file({ ok: false, error: "路径无效" }), "ignoreAll");
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.error, "路径无效");

@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Plus, Rows2, Space, UnfoldVertical } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ChevronUp, Columns2, Ellipsis, FileDiff, LoaderCircle, Plus, Rows2, Space, UnfoldVertical } from "lucide-react";
 
 import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import type { ChangedFile } from "@coflux/client";
+import type { ChangedFile, WhitespaceMode } from "@coflux/client";
 import type { Annotation } from "@coflux/protocol";
 import type { AgentTerminal } from "@/components/workbench/browser-annotations";
 import { anchorSide, buildExcerpt, commentLocation, locateAnchor, type CommentSide, type LineRange } from "@/components/workbench/changes-comments";
@@ -51,8 +51,8 @@ export type DiffPaneState =
   | { kind: "loading" }
   /** `outdated`: the daemon is too old for what was asked (shown as a hint, not a failure). */
   | { kind: "error"; message: string; outdated: boolean }
-  /** `ignoreWhitespace`: the patch was produced with git's `-w`. */
-  | { kind: "ready"; data: ChangeFileData; ignoreWhitespace: boolean };
+  /** `whitespace`: the mode the patch was produced with. */
+  | { kind: "ready"; data: ChangeFileData; whitespace: WhitespaceMode };
 
 /** The change F7 / ⇧F7 last moved to; `seq` changes on every move so the same index re-scrolls. */
 export type CurrentChange = { index: number; seq: number };
@@ -62,8 +62,8 @@ type DiffPaneProps = {
   state: DiffPaneState;
   mode: DiffMode;
   onModeChange: (mode: DiffMode) => void;
-  ignoreWhitespace: boolean;
-  onIgnoreWhitespaceChange: (ignore: boolean) => void;
+  whitespace: WhitespaceMode;
+  onWhitespaceChange: (whitespace: WhitespaceMode) => void;
   onRetry: () => void;
   onForceLoad: () => void;
   /** Previous / next change, across files (the same as ⇧F7 / F7). */
@@ -90,7 +90,7 @@ const ROW_BLOCK = 120;
 const ROW_HEIGHT_PX = 20;
 
 export function ChangesDiffPane(props: DiffPaneProps) {
-  const { file, state, mode, onModeChange, ignoreWhitespace, onIgnoreWhitespaceChange, onStep } = props;
+  const { file, state, mode, onModeChange, whitespace, onWhitespaceChange, onStep } = props;
   const slash = file.path.lastIndexOf("/");
   const name = slash >= 0 ? file.path.slice(slash + 1) : file.path;
   const directory = slash >= 0 ? file.path.slice(0, slash) : "";
@@ -123,13 +123,7 @@ export function ChangesDiffPane(props: DiffPaneProps) {
           >
             {mode === "split" ? <Columns2 className="size-3.5" /> : <Rows2 className="size-3.5" />}
           </HeaderButton>
-          <HeaderButton
-            label={ignoreWhitespace ? "忽略空白：开" : "忽略空白：关"}
-            pressed={ignoreWhitespace}
-            onClick={() => onIgnoreWhitespaceChange(!ignoreWhitespace)}
-          >
-            <Space className="size-3.5" />
-          </HeaderButton>
+          <WhitespaceMenu whitespace={whitespace} onChange={onWhitespaceChange} />
           <FileMoreMenu items={props.menuItems} />
         </div>
       </div>
@@ -173,6 +167,59 @@ export function HeaderButton({
         {children}
       </button>
     </Tooltip>
+  );
+}
+
+const WHITESPACE_OPTIONS: readonly { value: WhitespaceMode; label: string; description: string }[] = [
+  { value: "show", label: "显示全部空白变化", description: "不忽略任何空白" },
+  { value: "ignoreAtEol", label: "忽略行尾空白", description: "行尾多出或删掉的空格、制表符" },
+  { value: "ignoreChange", label: "忽略空白数量", description: "缩进宽度、空格换制表符，以及行尾空白" },
+  { value: "ignoreAll", label: "忽略全部空白", description: "也包括原本没有空白处新加的空格" },
+];
+
+/** The whitespace mode: a DropdownMenu trigger, so its tooltip is a sibling (docs/design-guidelines.md).
+ * The trigger reads as pressed while any whitespace is being ignored. */
+function WhitespaceMenu({ whitespace, onChange }: { whitespace: WhitespaceMode; onChange: (whitespace: WhitespaceMode) => void }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  const current = WHITESPACE_OPTIONS.find((option) => option.value === whitespace) ?? WHITESPACE_OPTIONS[0]!;
+  const ignoring = whitespace !== "show";
+  return (
+    <>
+      <DropdownMenu
+        isMenuOpen={open}
+        onOpenChange={setOpen}
+        hasChevron={false}
+        placement="below"
+        alignment="end"
+        menuWidth={260}
+        items={WHITESPACE_OPTIONS.map(
+          (option): DropdownMenuOption => ({
+            label: option.label,
+            description: option.description,
+            icon: option.value === whitespace ? <Check className="size-3.5" /> : <span className="size-3.5" />,
+            onClick: () => onChange(option.value),
+          }),
+        )}
+        button={{
+          ref: anchorRef,
+          label: `空白：${current.label}`,
+          icon: <Space className="size-3.5" />,
+          isIconOnly: true,
+          variant: "ghost",
+          size: "sm",
+          style: {
+            color: ignoring ? "var(--foreground)" : "var(--muted-foreground)",
+            backgroundColor: ignoring ? "var(--accent)" : undefined,
+            height: 24,
+            width: 24,
+            minWidth: 24,
+            paddingInline: 0,
+          },
+        }}
+      />
+      <Tooltip anchorRef={anchorRef} isOpen={open ? false : undefined} content={`空白：${current.label}`} />
+    </>
   );
 }
 
@@ -264,7 +311,7 @@ function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onCh
           key={file.path}
           file={file}
           data={state.data}
-          ignoreWhitespace={state.ignoreWhitespace}
+          whitespace={state.whitespace}
           mode={mode}
           currentChange={currentChange}
           onChangeCount={onChangeCount}
@@ -319,12 +366,12 @@ function Note({ children }: { children: ReactNode }) {
   );
 }
 
-/** `whitespaceOnly`: with whitespace ignored, the sides differ but git found no hunk. */
+/** `whitespaceOnly`: with some whitespace ignored, the sides differ but git found no hunk. */
 type Sides = { oldLines: string[]; newLines: string[]; segments: DiffSegment[]; whitespaceOnly: boolean };
 
 /** Both sides as line arrays and the segments between them. The list's status wins over existence
  * flags: an added or untracked file has no old side, a deleted one no new side. */
-function buildSides(file: ChangedFile, data: ChangeFileData, ignoreWhitespace: boolean): Sides {
+function buildSides(file: ChangedFile, data: ChangeFileData, whitespace: WhitespaceMode): Sides {
   const hasOld = data.oldExists && file.status !== "added" && file.status !== "untracked";
   const hasNew = data.newExists && file.status !== "deleted";
   const oldLines = hasOld ? splitLines(data.oldContent) : [];
@@ -334,8 +381,9 @@ function buildSides(file: ChangedFile, data: ChangeFileData, ignoreWhitespace: b
   }
   const hunks = parseHunkRanges(data.patch);
   if (hunks.length === 0 && data.oldContent !== data.newContent) {
-    if (ignoreWhitespace) {
-      // `-w` emptied the patch: every difference is whitespace. Not a race, so no fallback.
+    if (whitespace !== "show") {
+      // The whitespace flag emptied the patch: every difference is whitespace it ignores. Not a
+      // race, so no fallback.
       return { oldLines, newLines, segments: buildSegments(oldLines.length, newLines.length, []), whitespaceOnly: true };
     }
     // The two sides differ but git reported no hunk (a race with the working tree): show a full
@@ -352,7 +400,7 @@ function buildSides(file: ChangedFile, data: ChangeFileData, ignoreWhitespace: b
 
 /** Word ranges per line of each side, for the line pairs of every change segment (the n-th old
  * line with the n-th new line), which is what both the split cells and inline mode pair up. */
-function buildEmphasis(sides: Sides, ignoreWhitespace: boolean): { old: Map<number, WordRange[]>; new: Map<number, WordRange[]> } {
+function buildEmphasis(sides: Sides, whitespace: WhitespaceMode): { old: Map<number, WordRange[]>; new: Map<number, WordRange[]> } {
   const result = { old: new Map<number, WordRange[]>(), new: new Map<number, WordRange[]>() };
   let pairs = 0;
   for (const segment of sides.segments) {
@@ -365,7 +413,7 @@ function buildEmphasis(sides: Sides, ignoreWhitespace: boolean): { old: Map<numb
     for (let offset = 0; offset < count; offset += 1) {
       const oldLine = segment.oldStart + offset;
       const newLine = segment.newStart + offset;
-      const emphasis = wordEmphasis(sides.oldLines[oldLine] ?? "", sides.newLines[newLine] ?? "", ignoreWhitespace);
+      const emphasis = wordEmphasis(sides.oldLines[oldLine] ?? "", sides.newLines[newLine] ?? "", whitespace);
       if (!emphasis) continue;
       if (emphasis.old.length > 0) result.old.set(oldLine, emphasis.old);
       if (emphasis.new.length > 0) result.new.set(newLine, emphasis.new);
@@ -393,7 +441,7 @@ type GutterTarget = { side: CommentSide; line: number } | null;
 function DiffBody({
   file,
   data,
-  ignoreWhitespace,
+  whitespace,
   mode,
   currentChange,
   onChangeCount,
@@ -401,14 +449,14 @@ function DiffBody({
 }: {
   file: ChangedFile;
   data: ChangeFileData;
-  ignoreWhitespace: boolean;
+  whitespace: WhitespaceMode;
   mode: DiffMode;
   currentChange: CurrentChange | null;
   onChangeCount: (count: number) => void;
   comments: CodeCommentsController;
 }) {
-  const sides = useMemo(() => buildSides(file, data, ignoreWhitespace), [file, data, ignoreWhitespace]);
-  const emphasis = useMemo(() => buildEmphasis(sides, ignoreWhitespace), [sides, ignoreWhitespace]);
+  const sides = useMemo(() => buildSides(file, data, whitespace), [file, data, whitespace]);
+  const emphasis = useMemo(() => buildEmphasis(sides, whitespace), [sides, whitespace]);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [tokens, setTokens] = useState<{ source: Sides; old: HighlightToken[][] | null; new: HighlightToken[][] | null } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);

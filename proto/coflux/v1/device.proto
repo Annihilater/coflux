@@ -1027,13 +1027,28 @@ message DeviceChangesFileRequest {
   string path = 4;
   // The base-side path of a rename.
   optional string old_path = 5;
-  // Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
-  bool ignore_whitespace = 6;
+  reserved 6;
+  reserved "ignore_whitespace";
+  // Which whitespace changes `patch` leaves out; sides are unaffected.
+  ChangesWhitespace whitespace = 7;
+}
+
+// How a changed file's `patch` treats whitespace, one git flag per level.
+enum ChangesWhitespace {
+  // Every whitespace change is a hunk (no flag).
+  CHANGES_WHITESPACE_UNSPECIFIED = 0;
+  // `--ignore-space-at-eol`: whitespace at the end of a line.
+  CHANGES_WHITESPACE_IGNORE_AT_EOL = 1;
+  // `-b`: the amount of whitespace, and whitespace at the end of a line.
+  CHANGES_WHITESPACE_IGNORE_CHANGE = 2;
+  // `-w`: all whitespace, including whitespace added where there was none.
+  CHANGES_WHITESPACE_IGNORE_ALL = 3;
 }
 
 // worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
-// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
+// `patch` is `git diff -U0` of the pair (with the requested whitespace flag) and is empty when a side
+// is missing or both are equal. With a whitespace flag it is also empty when the sides differ only
+// in whitespace that flag ignores.
 message DeviceChangesFile {
   string request_id = 1;
   bool ok = 2;
@@ -1045,9 +1060,11 @@ message DeviceChangesFile {
   string patch = 8;
   // Either side contains NUL; contents are then left empty.
   bool binary = 9;
-  // Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
-  // (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
-  bool ignore_whitespace = 10;
+  reserved 10;
+  reserved "ignore_whitespace";
+  // Echo of the request's `whitespace`, set on every response whether or not a diff ran (added,
+  // deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+  ChangesWhitespace whitespace = 11;
 }
 
 // ===== Browser annotations (plan 20260929-browser-annotations) =====

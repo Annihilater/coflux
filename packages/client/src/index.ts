@@ -20,6 +20,7 @@ export {
   type ChangesListResult,
   type ChangeFileResult,
   type ChangesOption,
+  type WhitespaceMode,
   type DeviceAuthorizeResult,
   type DeviceJoinKeyResult,
   type TaskReadResult,

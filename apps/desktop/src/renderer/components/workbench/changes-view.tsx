@@ -6,7 +6,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { DropdownMenu, type DropdownMenuOption } from "@astryxdesign/core/DropdownMenu";
 import { useToast } from "@astryxdesign/core/Toast";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient } from "@coflux/client";
+import type { AnnotationFailure, ChangedFile, ChangesOption, CofluxClient, WhitespaceMode } from "@coflux/client";
 import { AnnotationPutSchema, create, type Annotation, type AnnotationCodeSide } from "@coflux/protocol";
 import { desktop } from "@/config";
 import { cn } from "@/lib/utils";
@@ -47,7 +47,7 @@ type ChangesViewProps = {
  * device RPC; only the selected file's content is fetched, against the base the list returned.
  *
  * Plan 20261001-changes-review-polish adds the comparison scope (「分支全部改动」 / 「未提交」),
- * 忽略空白, F7 / ⇧F7 stepping across files, word emphasis (in the diff pane) and a file menu. What
+ * the whitespace mode, F7 / ⇧F7 stepping across files, word emphasis (in the diff pane) and a file menu. What
  * the view newly needs — the workspace's device and path, this machine's own daemon — it reads
  * itself, so its contract with the workbench is unchanged. */
 
@@ -74,7 +74,7 @@ type ListError = { message: string; daemonOutdated: boolean; outdatedOption?: Ch
 type ContentState =
   | { key: string; status: "loading" }
   | { key: string; status: "error"; message: string; outdated: boolean }
-  | { key: string; status: "ready"; data: ChangeFileData; ignoreWhitespace: boolean };
+  | { key: string; status: "ready"; data: ChangeFileData; whitespace: WhitespaceMode };
 /** F7 / ⇧F7 position: the current change of `path`, or a landing still waiting for its content. */
 type Cursor = { path: string; index: number | null; pending: "first" | "last" | null; seq: number };
 
@@ -93,8 +93,8 @@ function wantsContent(file: ChangedFile, forced: ReadonlySet<string>): boolean {
 }
 
 /** The whitespace flag is part of the key: toggling it must not keep showing cached content. */
-function contentKey(base: string, file: ChangedFile, ignoreWhitespace: boolean): string {
-  return `${base}\0${file.oldPath ?? ""}\0${file.path}\0${ignoreWhitespace ? "w" : ""}`;
+function contentKey(base: string, file: ChangedFile, whitespace: WhitespaceMode): string {
+  return `${base}\0${file.oldPath ?? ""}\0${file.path}\0${whitespace}`;
 }
 
 function daemonOutdatedMessage(): string {
@@ -127,7 +127,7 @@ function commentFailureText(result: AnnotationFailure, action: string): string {
 }
 
 export function ChangesView({ workspaceId, active, client, defaultBranch, additions, deletions }: ChangesViewProps) {
-  const { mode, scope, ignoreWhitespace } = useChangesPreferences();
+  const { mode, scope, whitespace } = useChangesPreferences();
   const uncommitted = scope === "uncommitted";
   const [list, setList] = useState<ListState | null>(null);
   const [listError, setListError] = useState<ListError | null>(null);
@@ -248,7 +248,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }, [active, workspaceId, defaultBranch, additions, deletions, manualRevision, uncommitted]);
 
   const wantedKey =
-    active && shownList && selectedFile && wantsContent(selectedFile, forced) ? contentKey(shownList.base, selectedFile, ignoreWhitespace) : null;
+    active && shownList && selectedFile && wantsContent(selectedFile, forced) ? contentKey(shownList.base, selectedFile, whitespace) : null;
 
   // Only the selected file is fetched, and only while the view is active: a background workspace
   // never fetches. A refresh of the same file keeps its current content on screen until the new
@@ -257,15 +257,14 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     if (!wantedKey || !shownList || !selectedFile || listInFlightRef.current) return;
     let cancelled = false;
     const key = wantedKey;
-    const whitespace = ignoreWhitespace;
     setContent((current) => (current?.key === key && current.status === "ready" ? current : { key, status: "loading" }));
     void client
-      .readWorkspaceChangeFile(workspaceId, shownList.base, selectedFile.path, selectedFile.oldPath, { ignoreWhitespace: whitespace })
+      .readWorkspaceChangeFile(workspaceId, shownList.base, selectedFile.path, selectedFile.oldPath, { whitespace })
       .then((result) => {
         if (cancelled) return;
         if (result.ok) {
           const { ok: _ok, ...data } = result;
-          setContent({ key, status: "ready", data, ignoreWhitespace: whitespace });
+          setContent({ key, status: "ready", data, whitespace });
         } else {
           const outdatedOption = Boolean(result.outdatedOption);
           setContent({
@@ -301,9 +300,9 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
     if (isRenameOnly(file)) return { kind: "rename-only", from: file.oldPath ?? "" };
     if (file.size > MAX_FILE_BYTES) return { kind: "large", canLoad: false };
     if (isLarge(file) && !forced.has(file.path)) return { kind: "large", canLoad: true };
-    const key = shownList ? contentKey(shownList.base, file, ignoreWhitespace) : null;
+    const key = shownList ? contentKey(shownList.base, file, whitespace) : null;
     if (!content || content.key !== key) return { kind: "loading" };
-    if (content.status === "ready") return { kind: "ready", data: content.data, ignoreWhitespace: content.ignoreWhitespace };
+    if (content.status === "ready") return { kind: "ready", data: content.data, whitespace: content.whitespace };
     if (content.status === "error") return { kind: "error", message: content.message, outdated: content.outdated };
     return { kind: "loading" };
   }
@@ -563,8 +562,8 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
             state={selectedState}
             mode={mode}
             onModeChange={(next) => setChangesPreference("mode", next)}
-            ignoreWhitespace={ignoreWhitespace}
-            onIgnoreWhitespaceChange={(next) => setChangesPreference("ignoreWhitespace", next)}
+            whitespace={whitespace}
+            onWhitespaceChange={(next) => setChangesPreference("whitespace", next)}
             onRetry={() => setContentRevision((revision) => revision + 1)}
             onForceLoad={() => setForced((current) => new Set(current).add(selectedFile.path))}
             onStep={step}

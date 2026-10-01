@@ -1647,13 +1647,14 @@ pub struct DeviceChangesFileRequest {
     /// The base-side path of a rename.
     #[prost(string, optional, tag="5")]
     pub old_path: ::core::option::Option<::prost::alloc::string::String>,
-    /// Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
-    #[prost(bool, tag="6")]
-    pub ignore_whitespace: bool,
+    /// Which whitespace changes `patch` leaves out; sides are unaffected.
+    #[prost(enumeration="ChangesWhitespace", tag="7")]
+    pub whitespace: i32,
 }
 /// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-/// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
-/// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
+/// `patch` is `git diff -U0` of the pair (with the requested whitespace flag) and is empty when a side
+/// is missing or both are equal. With a whitespace flag it is also empty when the sides differ only
+/// in whitespace that flag ignores.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeviceChangesFile {
     #[prost(string, tag="1")]
@@ -1675,10 +1676,10 @@ pub struct DeviceChangesFile {
     /// Either side contains NUL; contents are then left empty.
     #[prost(bool, tag="9")]
     pub binary: bool,
-    /// Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
-    /// (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
-    #[prost(bool, tag="10")]
-    pub ignore_whitespace: bool,
+    /// Echo of the request's `whitespace`, set on every response whether or not a diff ran (added,
+    /// deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+    #[prost(enumeration="ChangesWhitespace", tag="11")]
+    pub whitespace: i32,
 }
 /// Enough about the annotated element to find it again on the page and in the code. Every field is
 /// best effort; the desktop fills what it could read.
@@ -3108,6 +3109,43 @@ impl DeviceChangeStatus {
             "DEVICE_CHANGE_STATUS_DELETED" => Some(Self::Deleted),
             "DEVICE_CHANGE_STATUS_RENAMED" => Some(Self::Renamed),
             "DEVICE_CHANGE_STATUS_UNTRACKED" => Some(Self::Untracked),
+            _ => None,
+        }
+    }
+}
+/// How a changed file's `patch` treats whitespace, one git flag per level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ChangesWhitespace {
+    /// Every whitespace change is a hunk (no flag).
+    Unspecified = 0,
+    /// `--ignore-space-at-eol`: whitespace at the end of a line.
+    IgnoreAtEol = 1,
+    /// `-b`: the amount of whitespace, and whitespace at the end of a line.
+    IgnoreChange = 2,
+    /// `-w`: all whitespace, including whitespace added where there was none.
+    IgnoreAll = 3,
+}
+impl ChangesWhitespace {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CHANGES_WHITESPACE_UNSPECIFIED",
+            Self::IgnoreAtEol => "CHANGES_WHITESPACE_IGNORE_AT_EOL",
+            Self::IgnoreChange => "CHANGES_WHITESPACE_IGNORE_CHANGE",
+            Self::IgnoreAll => "CHANGES_WHITESPACE_IGNORE_ALL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CHANGES_WHITESPACE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CHANGES_WHITESPACE_IGNORE_AT_EOL" => Some(Self::IgnoreAtEol),
+            "CHANGES_WHITESPACE_IGNORE_CHANGE" => Some(Self::IgnoreChange),
+            "CHANGES_WHITESPACE_IGNORE_ALL" => Some(Self::IgnoreAll),
             _ => None,
         }
     }

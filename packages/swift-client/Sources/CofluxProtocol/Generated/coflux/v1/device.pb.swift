@@ -521,6 +521,57 @@ public enum Coflux_V1_DeviceChangeStatus: SwiftProtobuf.Enum, Swift.CaseIterable
 
 }
 
+/// How a changed file's `patch` treats whitespace, one git flag per level.
+public enum Coflux_V1_ChangesWhitespace: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+
+  /// Every whitespace change is a hunk (no flag).
+  case unspecified // = 0
+
+  /// `--ignore-space-at-eol`: whitespace at the end of a line.
+  case ignoreAtEol // = 1
+
+  /// `-b`: the amount of whitespace, and whitespace at the end of a line.
+  case ignoreChange // = 2
+
+  /// `-w`: all whitespace, including whitespace added where there was none.
+  case ignoreAll // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .ignoreAtEol
+    case 2: self = .ignoreChange
+    case 3: self = .ignoreAll
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .ignoreAtEol: return 1
+    case .ignoreChange: return 2
+    case .ignoreAll: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_ChangesWhitespace] = [
+    .unspecified,
+    .ignoreAtEol,
+    .ignoreChange,
+    .ignoreAll,
+  ]
+
+}
+
 public enum Coflux_V1_AnnotationStatus: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -3090,8 +3141,8 @@ public struct Coflux_V1_DeviceChangesFileRequest: Sendable {
   /// Clears the value of `oldPath`. Subsequent reads from it will return its default value.
   public mutating func clearOldPath() {self._oldPath = nil}
 
-  /// Produce `patch` with git's `-w`, so whitespace-only changes are not hunks. Sides are unaffected.
-  public var ignoreWhitespace: Bool = false
+  /// Which whitespace changes `patch` leaves out; sides are unaffected.
+  public var whitespace: Coflux_V1_ChangesWhitespace = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3101,8 +3152,9 @@ public struct Coflux_V1_DeviceChangesFileRequest: Sendable {
 }
 
 /// worker→client (RPC). Each side is the whole file so the client can highlight it as a unit;
-/// `patch` is `git diff -U0` of the pair (with `-w` when asked) and is empty when a side is missing
-/// or both are equal. With `-w` it is also empty when the sides differ only in whitespace.
+/// `patch` is `git diff -U0` of the pair (with the requested whitespace flag) and is empty when a side
+/// is missing or both are equal. With a whitespace flag it is also empty when the sides differ only
+/// in whitespace that flag ignores.
 public struct Coflux_V1_DeviceChangesFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3134,9 +3186,9 @@ public struct Coflux_V1_DeviceChangesFile: Sendable {
   /// Either side contains NUL; contents are then left empty.
   public var binary: Bool = false
 
-  /// Echo of the request's `ignore_whitespace`, set on every response whether or not a diff ran
-  /// (added, deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
-  public var ignoreWhitespace: Bool = false
+  /// Echo of the request's `whitespace`, set on every response whether or not a diff ran (added,
+  /// deleted, binary, equal sides, `ok: false`): it means "this worker decoded the field".
+  public var whitespace: Coflux_V1_ChangesWhitespace = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -5473,6 +5525,10 @@ extension Coflux_V1_SecretAnswerStatus: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_DeviceChangeStatus: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0DEVICE_CHANGE_STATUS_UNSPECIFIED\0\u{1}DEVICE_CHANGE_STATUS_ADDED\0\u{1}DEVICE_CHANGE_STATUS_MODIFIED\0\u{1}DEVICE_CHANGE_STATUS_DELETED\0\u{1}DEVICE_CHANGE_STATUS_RENAMED\0\u{1}DEVICE_CHANGE_STATUS_UNTRACKED\0")
+}
+
+extension Coflux_V1_ChangesWhitespace: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CHANGES_WHITESPACE_UNSPECIFIED\0\u{1}CHANGES_WHITESPACE_IGNORE_AT_EOL\0\u{1}CHANGES_WHITESPACE_IGNORE_CHANGE\0\u{1}CHANGES_WHITESPACE_IGNORE_ALL\0")
 }
 
 extension Coflux_V1_AnnotationStatus: SwiftProtobuf._ProtoNameProviding {
@@ -9767,7 +9823,7 @@ extension Coflux_V1_DeviceChangesList: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFileRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}base\0\u{1}path\0\u{3}old_path\0\u{3}ignore_whitespace\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}base\0\u{1}path\0\u{3}old_path\0\u{2}\u{2}whitespace\0\u{b}ignore_whitespace\0\u{c}\u{6}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9780,7 +9836,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
       case 3: try { try decoder.decodeSingularStringField(value: &self.base) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.path) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self._oldPath) }()
-      case 6: try { try decoder.decodeSingularBoolField(value: &self.ignoreWhitespace) }()
+      case 7: try { try decoder.decodeSingularEnumField(value: &self.whitespace) }()
       default: break
       }
     }
@@ -9806,8 +9862,8 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
     try { if let v = self._oldPath {
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
     } }()
-    if self.ignoreWhitespace != false {
-      try visitor.visitSingularBoolField(value: self.ignoreWhitespace, fieldNumber: 6)
+    if self.whitespace != .unspecified {
+      try visitor.visitSingularEnumField(value: self.whitespace, fieldNumber: 7)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -9818,7 +9874,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
     if lhs.base != rhs.base {return false}
     if lhs.path != rhs.path {return false}
     if lhs._oldPath != rhs._oldPath {return false}
-    if lhs.ignoreWhitespace != rhs.ignoreWhitespace {return false}
+    if lhs.whitespace != rhs.whitespace {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9826,7 +9882,7 @@ extension Coflux_V1_DeviceChangesFileRequest: SwiftProtobuf.Message, SwiftProtob
 
 extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceChangesFile"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}old_exists\0\u{3}new_exists\0\u{3}old_content\0\u{3}new_content\0\u{1}patch\0\u{1}binary\0\u{3}ignore_whitespace\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{3}old_exists\0\u{3}new_exists\0\u{3}old_content\0\u{3}new_content\0\u{1}patch\0\u{1}binary\0\u{2}\u{2}whitespace\0\u{b}ignore_whitespace\0\u{c}\u{a}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9843,7 +9899,7 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 7: try { try decoder.decodeSingularStringField(value: &self.newContent) }()
       case 8: try { try decoder.decodeSingularStringField(value: &self.patch) }()
       case 9: try { try decoder.decodeSingularBoolField(value: &self.binary) }()
-      case 10: try { try decoder.decodeSingularBoolField(value: &self.ignoreWhitespace) }()
+      case 11: try { try decoder.decodeSingularEnumField(value: &self.whitespace) }()
       default: break
       }
     }
@@ -9881,8 +9937,8 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.binary != false {
       try visitor.visitSingularBoolField(value: self.binary, fieldNumber: 9)
     }
-    if self.ignoreWhitespace != false {
-      try visitor.visitSingularBoolField(value: self.ignoreWhitespace, fieldNumber: 10)
+    if self.whitespace != .unspecified {
+      try visitor.visitSingularEnumField(value: self.whitespace, fieldNumber: 11)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -9897,7 +9953,7 @@ extension Coflux_V1_DeviceChangesFile: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.newContent != rhs.newContent {return false}
     if lhs.patch != rhs.patch {return false}
     if lhs.binary != rhs.binary {return false}
-    if lhs.ignoreWhitespace != rhs.ignoreWhitespace {return false}
+    if lhs.whitespace != rhs.whitespace {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
