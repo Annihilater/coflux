@@ -5,7 +5,7 @@
  * 「默认分区一定存在」「未知 id 退回默认」这类约束由 node --test 守住，不散在 JSX 里。
  */
 
-export type SettingsSectionId = "general" | "machine" | "executor";
+export type SettingsSectionId = "general" | "agents" | "machine" | "executor";
 
 export type SettingsSection = {
   id: SettingsSectionId;
@@ -17,7 +17,10 @@ export type SettingsSection = {
   group: number;
 };
 
-/** 顺序即左栏的显示顺序：先账号所在的「通用」，再本机与 executor 这两项运行时设置。 */
+/**
+ * 顺序即左栏的显示顺序：先账号所在的「通用」，再自成一组的「Agents」（plan 20261001-desktop-agents），
+ * 最后本机与 executor 这两项运行时设置。
+ */
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "general",
@@ -26,16 +29,22 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: 0,
   },
   {
+    id: "agents",
+    label: "Agents",
+    description: "在新建标签页菜单里直接启动的编码 agent，以及各自的启动命令。只保存在这台 Mac 上。",
+    group: 1,
+  },
+  {
     id: "machine",
     label: "这台 Mac",
     description: "本机运行组件的状态：终端在这台机器上由它拉起并保持在线。",
-    group: 1,
+    group: 2,
   },
   {
     id: "executor",
     label: "Executor",
     description: "agent 甩给 coflux 执行的任务用哪个模型，以及对应的凭据。",
-    group: 1,
+    group: 2,
   },
 ];
 

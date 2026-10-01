@@ -3,9 +3,10 @@ import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent, LayoutPanel, VStack } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { ArrowLeft, Bot, Monitor, Settings2, type LucideIcon } from "lucide-react";
+import { ArrowLeft, Bot, Monitor, Settings2, Sparkles, type LucideIcon } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
+import { AgentsSection } from "@/components/settings/agents-section";
 import { ExecutorSection } from "@/components/settings/executor-section";
 import { GeneralSection } from "@/components/settings/general-section";
 import { MachineSection } from "@/components/settings/machine-section";
@@ -34,6 +35,7 @@ const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
 /** 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。 */
 const SECTION_ICONS: Record<SettingsSectionId, LucideIcon> = {
   general: Settings2,
+  agents: Sparkles,
   machine: Monitor,
   executor: Bot,
 };
@@ -162,6 +164,7 @@ export function SettingsPage(props: SettingsPageProps) {
               </VStack>
 
               {section.id === "general" ? <GeneralSection client={props.client} /> : null}
+              {section.id === "agents" ? <AgentsSection /> : null}
               {section.id === "machine" ? (
                 props.daemonState ? (
                   <MachineSection
