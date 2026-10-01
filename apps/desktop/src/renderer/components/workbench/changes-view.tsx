@@ -24,11 +24,11 @@ import {
 } from "@/components/workbench/changes-comments";
 import { OtherCommentsSection, type CodeCommentsController } from "@/components/workbench/changes-comments-ui";
 import { ChangesDiffPane, HeaderButton, type ChangeFileData, type CurrentChange, type DiffPaneState } from "@/components/workbench/changes-diff-pane";
-import { ChangesFileTree, isVisibleTypingTarget } from "@/components/workbench/changes-file-tree";
+import { ChangesFileTree, ChangesFilterInput, isVisibleTypingTarget, type ChangesTreeHandle } from "@/components/workbench/changes-file-tree";
 import { stepChange, type ChangeNavKind } from "@/components/workbench/changes-navigation";
 import { setChangesPreference, useChangesPreferences, type ChangesScope } from "@/components/workbench/changes-preferences";
 import { shouldRefreshChanges, type ChangesRefreshObservation } from "@/components/workbench/changes-refresh";
-import { ancestorKeys, buildChangesTree, pickSelection, treeFileOrder } from "@/components/workbench/changes-tree";
+import { ancestorKeys, buildChangesTree, filterTerms, matchesFilter, pickSelection, treeFileOrder } from "@/components/workbench/changes-tree";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon";
 import { usePaneWidth } from "@/components/workbench/use-pane-width";
@@ -65,6 +65,7 @@ const SCOPE_LABEL: Record<ChangesScope, string> = {
   uncommitted: "未提交",
 };
 
+const NO_FOLDERS: ReadonlySet<string> = new Set();
 const F7_SKIP_FOCUS = '[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], dialog';
 
 /** `uncommitted`: which scope this list answers, so a list of the other scope is never shown. */
@@ -137,6 +138,12 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   // folded folders and the forced large files survive closing and reopening the overlay.
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const [filter, setFilter] = useState("");
+  /** Folders folded while filtering, for the terms in `key` only: new terms start fully expanded,
+   * and clearing the filter brings back `collapsed` untouched. */
+  const [filterFolded, setFilterFolded] = useState<{ key: string; folded: ReadonlySet<string> }>(() => ({ key: "", folded: new Set() }));
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const treeHandleRef = useRef<ChangesTreeHandle | null>(null);
   const [forced, setForced] = useState<ReadonlySet<string>>(() => new Set());
   const [content, setContent] = useState<ContentState | null>(null);
   /** Bumped after every list load and on retry: the current file is refetched even if unchanged. */
@@ -185,18 +192,32 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   const shownList = list && list.uncommitted === uncommitted ? list : null;
   const tree = useMemo(() => buildChangesTree(shownList?.files ?? []), [shownList]);
   const fileByPath = useMemo(() => new Map((shownList?.files ?? []).map((file) => [file.path, file])), [shownList]);
+
+  /* ----- Filter ----- */
+  const terms = useMemo(() => filterTerms(filter), [filter]);
+  const termsKey = terms.join(" ");
+  const filtering = terms.length > 0;
+  const filteredFiles = useMemo(
+    () => (filtering ? (shownList?.files ?? []).filter((file) => matchesFilter(file, terms)) : (shownList?.files ?? [])),
+    [filtering, shownList, terms],
+  );
+  const filteredTree = useMemo(() => (filtering ? buildChangesTree(filteredFiles) : tree), [filtering, filteredFiles, tree]);
+  /** The files F7 walks: the filtered ones while filtering. */
+  const navOrder = useMemo(() => (filtering ? treeFileOrder(filteredTree) : (shownList?.order ?? [])), [filtering, filteredTree, shownList]);
+  const filterCollapsed = filterFolded.key === termsKey ? filterFolded.folded : NO_FOLDERS;
+
   const selectedFile = selectedPath ? (fileByPath.get(selectedPath) ?? null) : null;
   const groupedComments = useMemo(() => groupCommentsByFile(codeComments, shownList?.files ?? []), [codeComments, shownList]);
   const commentCounts = useMemo(() => pendingCommentCounts(groupedComments.byPath), [groupedComments]);
   const totals = useMemo(() => {
     let added = 0;
     let deleted = 0;
-    for (const file of shownList?.files ?? []) {
+    for (const file of filteredFiles) {
       added += file.additions;
       deleted += file.deletions;
     }
     return { added, deleted };
-  }, [shownList]);
+  }, [filteredFiles]);
 
   /** `opening`: the overlay was just opened. A vanished selection then falls back to the first file;
    * during a refresh while open it moves to its neighbour in tree order instead. */
@@ -286,6 +307,13 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   }
 
   function setExpanded(key: string, expanded: boolean) {
+    if (filtering) {
+      const folded = new Set(filterCollapsed);
+      if (expanded) folded.delete(key);
+      else folded.add(key);
+      setFilterFolded({ key: termsKey, folded });
+      return;
+    }
     setCollapsed((current) => {
       if (expanded === !current.has(key)) return current;
       const next = new Set(current);
@@ -325,7 +353,7 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
   function step(delta: 1 | -1) {
     if (!shownList) return;
     const index = cursorHere && cursorHere.pending === null ? cursorHere.index : null;
-    const result = stepChange(shownList.order, selectedFile?.path ?? null, index, selectedCount, delta, navKind);
+    const result = stepChange(navOrder, selectedFile?.path ?? null, index, selectedCount, delta, navKind);
     if (result.kind === "none") return;
     seqRef.current += 1;
     if (result.kind === "change") {
@@ -333,7 +361,14 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       return;
     }
     setSelectedPath(result.path);
-    revealInTree(tree, result.path);
+    if (filtering) {
+      const ancestors = ancestorKeys(filteredTree, result.path);
+      if (ancestors.some((key) => filterCollapsed.has(key))) {
+        setFilterFolded({ key: termsKey, folded: new Set([...filterCollapsed].filter((key) => !ancestors.includes(key))) });
+      }
+    } else {
+      revealInTree(tree, result.path);
+    }
     setCursor({ path: result.path, index: null, pending: result.land, seq: seqRef.current });
   }
 
@@ -368,6 +403,25 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       event.preventDefault();
       event.stopPropagation();
       stepRef.current(event.shiftKey ? -1 : 1);
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [active]);
+
+  // ⌘F focuses the filter. No terminal holds ⌘F while the overlay is open: the workbench focuses
+  // no terminal pane then.
+  useEffect(() => {
+    if (!active) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.code !== "KeyF" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.defaultPrevented) return;
+      const input = filterInputRef.current;
+      if (!input) return;
+      const focused = document.activeElement;
+      if (focused instanceof Element && focused.closest(F7_SKIP_FOCUS)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      input.focus();
+      input.select();
     }
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
@@ -534,23 +588,32 @@ export function ChangesView({ workspaceId, active, client, defaultBranch, additi
       <div className="relative flex shrink-0 flex-col border-r border-border bg-background" style={{ width: treeWidth.width }}>
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border pl-1.5 pr-1.5 text-sm text-muted-foreground">
           {scopeMenu}
-          <span className="shrink-0 whitespace-nowrap">{shownList.files.length} 个文件</span>
+          <span className="shrink-0 whitespace-nowrap">
+            {filtering ? `${filteredFiles.length} / ${shownList.files.length}` : shownList.files.length} 个文件
+          </span>
           <span className="min-w-0 truncate font-mono tabular-nums">
             <span className="text-success">+{totals.added}</span> <span className="text-destructive">−{totals.deleted}</span>
           </span>
           {refreshButton}
         </div>
+        <ChangesFilterInput value={filter} onChange={setFilter} onEnterTree={() => treeHandleRef.current?.enter()} inputRef={filterInputRef} />
         <div className="min-h-0 flex-1">
-          <ChangesFileTree
-            nodes={tree}
-            collapsed={collapsed}
-            onSetExpanded={setExpanded}
-            selectedPath={selectedPath}
-            onSelect={setSelectedPath}
-            active={active}
-            fileMenuItems={fileMenuItems}
-            commentCounts={commentCounts}
-          />
+          {filtering && filteredFiles.length === 0 ? (
+            <p className="px-3 py-4 text-center text-sm text-muted-foreground">没有匹配的文件</p>
+          ) : (
+            <ChangesFileTree
+              nodes={filteredTree}
+              collapsed={filtering ? filterCollapsed : collapsed}
+              onSetExpanded={setExpanded}
+              selectedPath={selectedPath}
+              onSelect={setSelectedPath}
+              active={active}
+              fileMenuItems={fileMenuItems}
+              commentCounts={commentCounts}
+              terms={terms}
+              handle={treeHandleRef}
+            />
+          )}
         </div>
         {otherComments(groupedComments.others, commentsReadOnly)}
         <SidebarResizeHandle control={treeWidth} />

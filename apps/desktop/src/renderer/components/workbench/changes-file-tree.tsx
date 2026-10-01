@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type Ref } from "react";
+import { ChevronDown, ChevronRight, Search, X } from "lucide-react";
 
 import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextMenu";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { ChangedFile, ChangedFileStatus } from "@coflux/client";
 import { FileTypeIcon, FolderIcon } from "@/components/workbench/changes-file-icon";
-import { flattenTree, stepFile, type TreeNode, type TreeRow } from "@/components/workbench/changes-tree";
+import { filterHighlights, flattenTree, stepFile, type TreeNode, type TreeRow } from "@/components/workbench/changes-tree";
 import { cn } from "@/lib/utils";
 
 type ChangesFileTreeProps = {
@@ -19,6 +20,15 @@ type ChangesFileTreeProps = {
   fileMenuItems: (file: ChangedFile) => ContextMenuOption[];
   /** Pending code comments per file path, shown as a badge (plan 20261001-changes-review-comments). */
   commentCounts?: ReadonlyMap<string, number>;
+  /** The filter's terms, highlighted in row labels. */
+  terms?: readonly string[];
+  /** Lets the filter box hand the keyboard to the tree. */
+  handle?: Ref<ChangesTreeHandle>;
+};
+
+export type ChangesTreeHandle = {
+  /** Focuses the tree on the selected file if it is visible, else selects the first visible file. */
+  enter: () => void;
 };
 
 export const STATUS_LETTER: Record<ChangedFileStatus, string> = {
@@ -52,6 +62,8 @@ export function isVisibleTypingTarget(element: Element | null): boolean {
   return typeof element.checkVisibility === "function" ? element.checkVisibility() : element.offsetParent !== null;
 }
 
+const NO_TERMS: readonly string[] = [];
+
 const INDENT_PX = 12;
 const BASE_PADDING_PX = 8;
 /** Half the chevron's width: indent guides run under the chevron of the folder they belong to. */
@@ -68,7 +80,18 @@ const GUIDE_OFFSET_PX = 7;
  * right-click. One ContextMenu serves every row: a row's own handler records which file was
  * right-clicked before the event reaches the menu; folder rows stop it so no menu opens.
  */
-export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath, onSelect, active, fileMenuItems, commentCounts }: ChangesFileTreeProps) {
+export function ChangesFileTree({
+  nodes,
+  collapsed,
+  onSetExpanded,
+  selectedPath,
+  onSelect,
+  active,
+  fileMenuItems,
+  commentCounts,
+  terms = NO_TERMS,
+  handle,
+}: ChangesFileTreeProps) {
   const rows = useMemo(() => flattenTree(nodes, collapsed), [nodes, collapsed]);
   const [focusedKey, setFocusedKey] = useState<string | null>(selectedPath);
   const [hasFocus, setHasFocus] = useState(false);
@@ -107,6 +130,18 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
       document.activeElement.blur();
     }
   }, [active]);
+
+  useImperativeHandle(handle, () => ({
+    enter() {
+      containerRef.current?.focus({ preventScroll: true });
+      if (selectedPath && rows.some((row) => row.key === selectedPath)) {
+        setFocusedKey(selectedPath);
+        return;
+      }
+      const first = rows.find((row) => row.kind === "file");
+      if (first) focusRow(first);
+    },
+  }));
 
   function focusRow(row: TreeRow) {
     setFocusedKey(row.key);
@@ -221,10 +256,12 @@ export function ChangesFileTree({ nodes, collapsed, onSetExpanded, selectedPath,
                     <ChevronRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <FolderIcon name={row.name} open={row.expanded} />
-                  <span className="min-w-0 flex-1 truncate">{row.name}</span>
+                  <span className="min-w-0 flex-1 truncate">
+                    <Highlighted text={row.name} terms={terms} />
+                  </span>
                 </>
               ) : (
-                <FileRow name={row.name} file={row.file} comments={commentCounts?.get(row.file.path) ?? 0} />
+                <FileRow name={row.name} file={row.file} comments={commentCounts?.get(row.file.path) ?? 0} terms={terms} />
               )}
             </div>
           );
@@ -251,14 +288,14 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
-function FileRow({ name, file, comments }: { name: string; file: ChangedFile; comments: number }) {
+function FileRow({ name, file, comments, terms }: { name: string; file: ChangedFile; comments: number; terms: readonly string[] }) {
   return (
     <>
       {/* Aligns file icons with their folder's icon, past the folder chevron. */}
       <span className="-mr-0.5 size-3.5 shrink-0" />
       <FileTypeIcon path={file.path} />
       <span className={cn("min-w-0 flex-1 truncate", STATUS_TONE[file.status], file.status === "deleted" && "line-through")}>
-        {name}
+        <Highlighted text={name} terms={terms} />
       </span>
       {comments > 0 ? (
         <span
@@ -279,5 +316,84 @@ function FileRow({ name, file, comments }: { name: string; file: ChangedFile; co
         {STATUS_LETTER[file.status]}
       </span>
     </>
+  );
+}
+
+/** A row label with the filter's matches in bold and underlined: legible on any status tone and on
+ * the selected row's background. */
+function Highlighted({ text, terms }: { text: string; terms: readonly string[] }) {
+  const ranges = terms.length > 0 ? filterHighlights(text, terms) : [];
+  if (ranges.length === 0) return <>{text}</>;
+  const pieces = [];
+  let at = 0;
+  for (const range of ranges) {
+    if (range.start > at) pieces.push(text.slice(at, range.start));
+    pieces.push(
+      <span key={range.start} className="font-semibold underline underline-offset-2">
+        {text.slice(range.start, range.end)}
+      </span>,
+    );
+    at = range.end;
+  }
+  if (at < text.length) pieces.push(text.slice(at));
+  return <>{pieces}</>;
+}
+
+/**
+ * The filter box above the tree. ↓ / Enter move into the tree; Esc clears a non-empty filter and
+ * owns the key only then (`data-owns-escape`), so an empty box still lets Esc close the overlay.
+ */
+export function ChangesFilterInput({
+  value,
+  onChange,
+  onEnterTree,
+  inputRef,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onEnterTree: () => void;
+  inputRef: Ref<HTMLInputElement>;
+}) {
+  return (
+    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border pl-2.5 pr-1.5 text-sm">
+      <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        placeholder="筛选文件"
+        aria-label="按文件名筛选"
+        spellCheck={false}
+        autoComplete="off"
+        data-owns-escape={value ? "" : undefined}
+        className="h-full min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) return;
+          if (event.key === "ArrowDown" || event.key === "Enter") {
+            event.preventDefault();
+            onEnterTree();
+          } else if (event.key === "Escape" && value) {
+            event.preventDefault();
+            event.stopPropagation();
+            onChange("");
+          }
+        }}
+      />
+      {value ? (
+        <Tooltip content="清除筛选 Esc" placement="below">
+          <button
+            type="button"
+            aria-label="清除筛选"
+            className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            onClick={() => onChange("")}
+          >
+            <X className="size-3" />
+          </button>
+        </Tooltip>
+      ) : (
+        <kbd className="shrink-0 font-sans text-xs text-muted-foreground">⌘F</kbd>
+      )}
+    </div>
   );
 }
