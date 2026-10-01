@@ -1176,7 +1176,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const pendingId = `pending-ws-${++pendingWorkspaceSeqRef.current}`;
     pendingWorkspaceCreateRef.current = {
       projectId: project.id,
-      knownIds: new Set(client.store.getState().workspaces.map((workspace) => workspace.id)),
+      // Workspaces hidden by a pending removal may come back on rollback: they are not the new one.
+      knownIds: new Set([...client.store.getState().workspaces.map((workspace) => workspace.id), ...client.hiddenWorkspaceIds()]),
       pendingId,
     };
     // name = branch（未起名语义）；乐观条目下一帧即出现在侧栏并被选中，主区显示创建中
@@ -1232,7 +1233,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
       title: `移除项目「${project.name}」？`,
       description: "项目记录和它的子工作区会从 coflux 中移除，主仓库本身不会被改动。此操作无法撤销。",
       confirmLabel: "移除项目",
-      onConfirm: () => client.send({ case: "projectRemove", value: { projectId: project.id } }),
+      // Optimistic (plan 20261002-optimistic-removal): the project and its workspaces vanish now;
+      // the selection falls back through resolveWorkbenchSelection.
+      onConfirm: () => client.removeProject(project.id),
     });
   }
 
@@ -1253,7 +1256,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
       title: `删除工作区「${workspace.branch}」？`,
       description: `对应的 git worktree 目录会被移除，分支「${workspace.branch}」不会被自动删除。`,
       confirmLabel: "删除工作区",
-      onConfirm: () => client.send({ case: "workspaceRemove", value: { workspaceId: workspace.id } }),
+      onConfirm: () => {
+        // Optimistic: the row vanishes now. A shown workspace hands the main area to its own
+        // project's main workspace (same batch); a rollback leaves the selection where it went.
+        if (!client.removeWorkspace(workspace.id)) return;
+        if (selection?.kind !== "workspace" || selection.id !== workspace.id) return;
+        const main = client.store
+          .getState()
+          .workspaces.find((item) => item.isMain && item.id !== workspace.id && !!workspace.projectId && item.projectId === workspace.projectId);
+        if (main) selectWorkspace(main.id);
+      },
     });
   }
 
