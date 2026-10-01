@@ -1394,6 +1394,138 @@ test("fsStat on the same elevated generation fails immediately while the lane st
   await listing;
 });
 
+/* ===== Old worker vs fsIndex (plan 20261002-workspace-files-view) =====
+ * The workers in the field know the changes RPCs and fsStat but not the index. Opening the files
+ * view sends the index together with the change list, often with link stats too; the one id-less
+ * `empty_payload` such a worker sends back must fail the index alone, so the index is attributed
+ * before fsStat and before the changes requests. */
+
+function sentCount(h: ReturnType<typeof harness>, kind: string): number {
+  return h.adapter.opens.reduce((count, call) => count + payloads(call).filter((payload) => payload?.case === kind).length, 0);
+}
+
+test("several in-flight fsIndex requests on an old worker each fail as outdated, quietly, and a later one is never sent", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const release = h.router.retainDevice("daemon-1");
+  await flush();
+  const session = latestOpen(h.adapter, "direct");
+  h.adapter.resolve(session);
+  await flush();
+  const ping = payloads(session).find((payload) => payload?.case === "ping");
+  if (ping?.case !== "ping") throw new Error("the session lane should send a ping once open");
+
+  const outcomes = ["workspace-1", "workspace-2", "workspace-1"].map((workspaceId) =>
+    h.router.fsIndex("daemon-1", workspaceId).then(() => undefined, (error: unknown) => error),
+  );
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  assert.equal(payloads(elevated).filter((payload) => payload?.case === "fsIndex").length, 3, "all three go out on the elevated lane");
+
+  const errorsBefore = h.errors.length;
+  for (let i = 0; i < 3; i += 1) {
+    h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  }
+  await flush();
+  for (const outcome of outcomes) {
+    const error = await outcome;
+    assert.ok(error instanceof Error, "each index request fails without waiting for the timeout");
+    assert.equal((error as Error & { code?: string }).code, "daemon_outdated");
+  }
+  assert.equal(h.errors.length, errorsBefore, "no stray reaches onError");
+
+  // A later index request on the same generation fails at once, without being sent.
+  const opensBefore = h.adapter.opens.length;
+  const sentBefore = sentCount(h, "fsIndex");
+  const later = await h.router.fsIndex("daemon-1", "workspace-1").then(() => undefined, (error: unknown) => error);
+  await flush();
+  assert.equal((later as Error & { code?: string }).code, "daemon_outdated");
+  assert.equal(h.adapter.opens.length, opensBefore, "no lane is opened for it");
+  assert.equal(sentCount(h, "fsIndex"), sentBefore, "it is never sent");
+  assert.equal(h.errors.length, errorsBefore);
+
+  // The heartbeat did not claim any of them: its pong still yields an RTT and pings keep going.
+  h.clock.advance(7);
+  h.adapter.emit(session, { case: "pong", value: { requestId: ping.value.requestId } });
+  await flush();
+  assert.equal(h.states.at(-1)?.rttMs, 7);
+  const pingsBefore = payloads(session).filter((payload) => payload?.case === "ping").length;
+  h.clock.advance(15_000);
+  await flush();
+  assert.equal(payloads(session).filter((payload) => payload?.case === "ping").length, pingsBefore + 1, "heartbeats keep running");
+  release();
+  h.router.destroy();
+});
+
+test("with fsIndex and changesListRequest in flight, one stray error fails only the index and the change list still resolves", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const index = h.router.fsIndex("daemon-1", "workspace-1").then(() => undefined, (error: unknown) => error);
+  const listing = h.router.changesList("daemon-1", "workspace-1");
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  const request = payloads(elevated).find((payload) => payload?.case === "changesListRequest");
+  if (request?.case !== "changesListRequest") throw new Error("missing changesListRequest");
+  assert.ok(payloads(elevated).some((payload) => payload?.case === "fsIndex"));
+
+  const errorsBefore = h.errors.length;
+  h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  assert.equal(((await index) as Error & { code?: string }).code, "daemon_outdated");
+  assert.equal(h.errors.length, errorsBefore);
+
+  h.adapter.emit(elevated, {
+    case: "changesList",
+    value: { requestId: request.value.requestId, ok: true, base: "abc", files: [] },
+  });
+  const result = await listing;
+  assert.equal(result.base, "abc", "the change list is not marked outdated");
+  h.router.destroy();
+});
+
+test("with fsIndex and several fsStat requests in flight on a worker that knows fsStat, fsStat stays supported", async () => {
+  const h = harness();
+  h.router.setControlOnline(true);
+  const index = h.router.fsIndex("daemon-1", "workspace-1").then(() => undefined, (error: unknown) => error);
+  const stats = [["a.ts"], ["b.ts"], ["c.ts"]].map((paths) => h.router.fsStat("daemon-1", "workspace-1", paths));
+  await flush();
+  const elevated = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  h.adapter.resolve(elevated);
+  await flush();
+  const statRequests = payloads(elevated).filter((payload) => payload?.case === "fsStat");
+  assert.equal(statRequests.length, 3);
+
+  const errorsBefore = h.errors.length;
+  h.adapter.emit(elevated, { case: "error", value: { code: "empty_payload", message: "DeviceEnvelope payload 为空" } });
+  await flush();
+  assert.equal(((await index) as Error & { code?: string }).code, "daemon_outdated");
+
+  // Each stat still gets its own answer.
+  for (const stat of statRequests) {
+    if (stat?.case !== "fsStat") continue;
+    h.adapter.emit(elevated, { case: "fsStatResult", value: { requestId: stat.value.requestId, ok: true, entries: [] } });
+  }
+  for (const stat of stats) assert.equal((await stat).ok, true);
+  assert.equal(h.errors.length, errorsBefore);
+
+  // fsStat was not marked unsupported: a later stat is sent, not failed locally.
+  const sentBefore = sentCount(h, "fsStat");
+  const later = h.router.fsStat("daemon-1", "workspace-1", ["d.ts"]).then(() => undefined, (error: unknown) => error);
+  await flush();
+  const laneNow = latestOpen(h.adapter, "direct", DeviceScope.RPC);
+  if (laneNow !== elevated) {
+    h.adapter.resolve(laneNow);
+    await flush();
+  }
+  assert.equal(sentCount(h, "fsStat"), sentBefore + 1, "the later stat goes out");
+  h.router.destroy();
+  await later;
+});
+
 /* ===== Old worker vs executor transcript viewing (plan 20260929-executor-pip) =====
  * A transcript subscription is a long-lived frame outside pendingRequests, so the router keeps its
  * own count of viewer frames an old worker would answer with a request-id-less `empty_payload`.

@@ -25,6 +25,7 @@ import {
   type DeviceExecutorHostRegistered,
   type DeviceExecutorReport,
   type DeviceExecutorTranscript,
+  type DeviceFsIndexResult,
   type DeviceFsStatResult,
   type DevicePortsResult,
   type DeviceSessionCatalog,
@@ -87,6 +88,9 @@ const FILES_DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新
 /** The changes view reads one file at a time; a file near the worker's 6 MB per-side cap on a slow
  * link needs longer than the default RPC timeout. */
 const CHANGES_FILE_TIMEOUT_MS = 45_000;
+const FILE_INDEX_DAEMON_OUTDATED_MESSAGE = "设备上的 daemon 版本过旧，更新后才能浏览全部文件";
+/** A workspace index is up to a few MiB and the worker may spend seconds building it. */
+const FS_INDEX_TIMEOUT_MS = 45_000;
 /** The error code of an annotation request a device's worker does not support (plan
  * 20260929-browser-annotations). Only ever derived from the worker's own request-id-less
  * `empty_payload` reply, never from a timeout: a timeout means unreachable or slow. */
@@ -369,6 +373,12 @@ interface DeviceRoute {
   /** Further `empty_payload` replies still expected on that generation for `fsStat` requests that
    * were already failed together with the first one; swallowed, never shown as a generic error. */
   fsStatStrayErrors?: { generation: bigint; count: number };
+  /** Where the worker answered `fsIndex` with its request-id-less `empty_payload` (plan
+   * 20261002-workspace-files-view); same shape and lifetime as `fsStatUnsupported`. */
+  fsIndexUnsupported?: { elevated: bigint; session?: bigint };
+  /** Further `empty_payload` replies still expected on that generation for `fsIndex` requests that
+   * were already failed together with the first one. */
+  fsIndexStrayErrors?: { generation: bigint; count: number };
   /** Executor transcript subscriptions by run id (plan 20260929-executor-pip). */
   executorSubscriptions: Map<string, ExecutorSubscription>;
   /** Executor viewer frames (subscribe / unsubscribe / stop) sent on a session-lane generation
@@ -1601,7 +1611,13 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // code the view renders as "the daemon needs updating", instead of a 20 s timeout plus a stray
     // global error.
     if (!requestId && code === "empty_payload" && channel.lane === "elevated") {
-      // `fsStat` (plan 20261001-terminal-file-tab) is attributed first, annotations-style: hovering
+      // The newest payload is attributed first. `fsIndex` (plan 20261002-workspace-files-view) is
+      // newer than fsStat and the changes RPCs, so a worker that lacks either also lacks the index,
+      // while the workers in the field know both and lack only the index. Opening the files view
+      // sends the index together with the change list (and often with link stats): claimed later,
+      // its one stray error would mark the change list or every terminal link outdated.
+      if (attributeFsIndexUnsupported(route, channel)) return true;
+      // `fsStat` (plan 20261001-terminal-file-tab) is attributed next, annotations-style: hovering
       // puts several stats in flight and an old worker answers each with its own id-less error, so
       // the ones still expected are counted and swallowed instead of reaching reportDeviceError.
       // A worker that knows the changes RPCs but not fsStat can only mean the stats here.
@@ -1739,7 +1755,33 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
   }
 
   function fsStatUnsupportedNow(route: DeviceRoute): boolean {
-    const verdict = route.fsStatUnsupported;
+    return verdictStillActive(route, route.fsStatUnsupported);
+  }
+
+  /** Whether a request-id-less `empty_payload` on the elevated lane belongs to `fsIndex` requests
+   * in flight on this channel (plan 20261002-workspace-files-view); the fsStat pattern. */
+  function attributeFsIndexUnsupported(route: DeviceRoute, channel: DeviceChannel): boolean {
+    const stray = route.fsIndexStrayErrors;
+    if (stray && stray.generation === channel.generation && stray.count > 0) {
+      stray.count -= 1;
+      return true;
+    }
+    const pending = [...route.pendingRequests.values()].filter((entry) => entry.payload.case === "fsIndex");
+    const sent = pending.filter((entry) => entry.sentGeneration === channel.generation);
+    if (sent.length === 0) return false;
+    route.fsIndexUnsupported = { elevated: channel.generation, session: route.sessionLane.active?.generation };
+    route.fsIndexStrayErrors = { generation: channel.generation, count: sent.length - 1 };
+    for (const entry of pending) finishPendingWithError(route, entry, fsIndexOutdatedError());
+    return true;
+  }
+
+  function fsIndexUnsupportedNow(route: DeviceRoute): boolean {
+    return verdictStillActive(route, route.fsIndexUnsupported);
+  }
+
+  /** An "outdated" verdict holds while the elevated or session channel it was taken on is still
+   * the active one of its lane. */
+  function verdictStillActive(route: DeviceRoute, verdict: { elevated: bigint; session?: bigint } | undefined): boolean {
     if (!verdict) return false;
     if (route.elevatedLane.active?.generation === verdict.elevated) return true;
     return verdict.session !== undefined && route.sessionLane.active?.generation === verdict.session;
@@ -2550,6 +2592,19 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("fsStatResult", response);
   }
 
+  /** The whole-workspace file index (plan 20261002-workspace-files-view). On a channel whose worker
+   * already proved too old for it, fails with DAEMON_OUTDATED_CODE without sending. */
+  async function fsIndex(daemonId: string, workspaceId: string): Promise<DeviceFsIndexResult> {
+    const route = routeFor(daemonId);
+    if (fsIndexUnsupportedNow(route)) throw fsIndexOutdatedError();
+    const response = await request(daemonId, DeviceScope.RPC, {
+      case: "fsIndex",
+      value: { requestId: randomUUID(), workspaceId },
+    }, FS_INDEX_TIMEOUT_MS);
+    if (response.case === "fsIndexResult") return response.value;
+    throw unexpectedResponse("fsIndexResult", response);
+  }
+
   /** `uncommitted` false is the branch scope, byte-identical to what an older client sends. */
   async function changesList(daemonId: string, workspaceId: string, uncommitted = false): Promise<DeviceChangesList> {
     const response = await request(daemonId, DeviceScope.RPC, {
@@ -2983,6 +3038,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     fsList,
     fsRead,
     fsStat,
+    fsIndex,
     fsWrite,
     changesList,
     changesFile,
@@ -3017,6 +3073,7 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "fsList":
     case "fsRead":
     case "fsStat":
+    case "fsIndex":
     case "fsWrite":
     case "portsRequest":
     case "secretAnswer":
@@ -3049,6 +3106,7 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "fsListed":
     case "fsReadResult":
     case "fsStatResult":
+    case "fsIndexResult":
     case "fsWriteResult":
     case "portsResult":
     case "secretAnswerAck":
@@ -3093,6 +3151,11 @@ function isAnnotationPayload(payload: RuntimeDevicePayload): boolean {
 /** The worker predates `fsStat` (plan 20261001-terminal-file-tab). */
 function fsOutdatedError(): Error {
   return new DeviceRouteError(FILES_DAEMON_OUTDATED_MESSAGE, DAEMON_OUTDATED_CODE);
+}
+
+/** The worker predates `fsIndex` (plan 20261002-workspace-files-view). */
+function fsIndexOutdatedError(): Error {
+  return new DeviceRouteError(FILE_INDEX_DAEMON_OUTDATED_MESSAGE, DAEMON_OUTDATED_CODE);
 }
 
 function annotationsUnsupportedError(): Error {

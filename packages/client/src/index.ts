@@ -21,6 +21,8 @@ export {
   type ChangeFileResult,
   type ChangesOption,
   type WhitespaceMode,
+  type FileIndexEntry,
+  type FileIndexResult,
   type FileReadResult,
   type FileStat,
   type FileStatResult,
