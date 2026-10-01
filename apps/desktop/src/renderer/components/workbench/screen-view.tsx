@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
 import { useStore } from "zustand";
 import { Cloud, Expand, LoaderCircle, Lock, Monitor, ShieldAlert, Shrink, Unplug, X, Zap } from "lucide-react";
 
@@ -81,10 +81,14 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
   const daemon = useStore(client.store, (state) => state.daemons.find((item) => item.daemonId === daemonId));
   const transport = useStore(client.store, (state) => state.deviceTransports[daemonId]);
   const deviceOnline = daemon?.online ?? false;
+  // The session asks for these whenever it needs them; mirrored after every commit.
+  const transportMode = transport?.mode ?? "idle";
   const deviceOnlineRef = useRef(deviceOnline);
-  deviceOnlineRef.current = deviceOnline;
-  const transportModeRef = useRef(transport?.mode ?? "idle");
-  transportModeRef.current = transport?.mode ?? "idle";
+  const transportModeRef = useRef(transportMode);
+  useLayoutEffect(() => {
+    deviceOnlineRef.current = deviceOnline;
+    transportModeRef.current = transportMode;
+  });
   const [session, setSession] = useState<ScreenSession | null>(null);
   const state = useSessionState(session);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -113,10 +117,13 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
     session?.setVisible(entry.visible);
   }, [session, entry.visible]);
 
-  // A device that comes back online while the view waits: try again at once.
+  // A device that comes back online while the view waits: try again at once. Only the device coming
+  // online triggers it; the rest is read as it is then.
+  const retryIfWaiting = useEffectEvent(() => {
+    if (session && entry.visible && (state?.phase === "offline" || state?.phase === "connecting")) session.retry();
+  });
   useEffect(() => {
-    if (session && deviceOnline && entry.visible && (state?.phase === "offline" || state?.phase === "connecting")) session.retry();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (deviceOnline) retryIfWaiting();
   }, [deviceOnline]);
 
   // The remote display follows the picture area's size, 1:1 in points.
@@ -151,20 +158,41 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
     window.addEventListener("blur", release);
     return () => window.removeEventListener("blur", release);
   }, [pictureFocused, session]);
-  useEffect(() => () => {
-    if (pictureFocused) {
-      desktop.screenFocus(false);
-      onFocusChange(tabId, false);
+  // Hiding the view while the picture has focus gives the focus up: the state is adjusted during
+  // render when `visible` flips, the rest (blur, releasing held input, telling main and the
+  // workbench — what focusPicture(false) does) runs in an effect.
+  const [syncedVisible, setSyncedVisible] = useState(entry.visible);
+  const [releaseOnHide, setReleaseOnHide] = useState(false);
+  if (entry.visible !== syncedVisible) {
+    setSyncedVisible(entry.visible);
+    if (entry.visible) setReleaseOnHide(false);
+    else if (pictureFocused) {
+      setPictureFocused(false);
+      setReleaseOnHide(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
+  const releaseHiddenFocus = useEffectEvent(() => {
+    pictureRef.current?.blur();
+    session?.releaseAll();
+    desktop.screenFocus(false);
+    onFocusChange(tabId, false);
+  });
   useEffect(() => {
-    if (!entry.visible && pictureFocused) {
-      pictureRef.current?.blur();
-      focusPicture(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry.visible]);
+    if (releaseOnHide) releaseHiddenFocus();
+  }, [releaseOnHide]);
+
+  // The picture area's size, for the drawn remote cursor (measured by an observer, not during render).
+  const [pictureSize, setPictureSize] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    const node = pictureRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(() => {
+      const rect = node.getBoundingClientRect();
+      setPictureSize((current) => (current && current.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height }));
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   function pointAt(event: { clientX: number; clientY: number }): { x: number; y: number } | null {
     const node = pictureRef.current;
@@ -230,7 +258,7 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
   const pictureStyle: CSSProperties = immersive ? { top: 0 } : { top: STATUS_BAR_HEIGHT };
   const cursor = state?.cursor;
   const display = state?.display ?? null;
-  const cursorStyle = pictureCursorStyle(cursor, display, pictureRef.current);
+  const cursorStyle = pictureCursorStyle(cursor, display, pictureSize);
 
   return (
     <div
@@ -321,7 +349,7 @@ function ScreenView({ entry, runtime, client, immersiveTabId, onToggleImmersive,
             alt=""
             aria-hidden
             className="pointer-events-none absolute left-0 top-0"
-            style={remoteCursorStyle(cursor, display, pictureRef.current)}
+            style={remoteCursorStyle(cursor, display, pictureSize)}
           />
         ) : null}
         <StateOverlay phase={phase} state={state} deviceOnline={deviceOnline} deviceName={daemon?.name ?? "设备"} session={session} />
@@ -345,15 +373,14 @@ function drawnRect(areaWidth: number, areaHeight: number, widthPoints: number, h
 }
 
 /** The local cursor is hidden over a live picture; the remote's is drawn instead. */
-function pictureCursorStyle(cursor: ScreenSessionState["cursor"] | undefined, display: { widthPoints: number } | null, node: HTMLDivElement | null): CSSProperties {
-  if (!cursor || !display || !node) return {};
+function pictureCursorStyle(cursor: ScreenSessionState["cursor"] | undefined, display: { widthPoints: number } | null, size: { width: number; height: number } | null): CSSProperties {
+  if (!cursor || !display || !size) return {};
   return cursor.shapeUrl ? { cursor: "none" } : {};
 }
 
-function remoteCursorStyle(cursor: ScreenSessionState["cursor"], display: { widthPoints: number; heightPoints: number }, node: HTMLDivElement | null): CSSProperties {
-  if (!node) return { display: "none" };
-  const rect = node.getBoundingClientRect();
-  const drawn = drawnRect(rect.width, rect.height, display.widthPoints, display.heightPoints);
+function remoteCursorStyle(cursor: ScreenSessionState["cursor"], display: { widthPoints: number; heightPoints: number }, size: { width: number; height: number } | null): CSSProperties {
+  if (!size) return { display: "none" };
+  const drawn = drawnRect(size.width, size.height, display.widthPoints, display.heightPoints);
   const scale = drawn.width / display.widthPoints;
   return {
     transform: `translate(${drawn.left + (cursor.x - cursor.hotspotX) * scale}px, ${drawn.top + (cursor.y - cursor.hotspotY) * scale}px)`,
