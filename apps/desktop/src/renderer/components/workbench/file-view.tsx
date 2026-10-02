@@ -4,9 +4,9 @@ import { Binary, CircleAlert, FileWarning, FileX, LoaderCircle, RefreshCw, Unplu
 import type { CofluxClient, FileReadResult } from "@coflux/client";
 
 import { FileTypeIcon } from "@/components/workbench/changes-file-icon";
-import { HeaderButton } from "@/components/workbench/changes-diff-pane";
+import { HeaderButton, LINE_HIGHLIGHT_BACKGROUND as HIGHLIGHT_ROW_BACKGROUND, LINE_HIGHLIGHT_MARKER as HIGHLIGHT_MARKER } from "@/components/workbench/changes-diff-pane";
 import { highlightLines, resolveLang, type HighlightToken } from "@/components/workbench/diff-highlight";
-import type { FileRuntime, FileViewState } from "@/components/workbench/file-runtime";
+import type { FileRuntime, FileViewSnapshot, FileViewState } from "@/components/workbench/file-runtime";
 import { cn } from "@/lib/utils";
 
 /**
@@ -33,13 +33,6 @@ const ROW_BLOCK = 120;
 const OVERSCAN_ROWS = 40;
 /** git's binary heuristic: a NUL among the first 8000 characters. */
 const BINARY_SNIFF_CHARS = 8000;
-/**
- * The opened line's tint and its gutter marker: the terminal palette's blue (the link colour,
- * `#6b9bd1`), quiet but visibly lighter than the `#0a0a0a` paper. Not the `--accent` token — in this
- * app that is the dark hover surface `#262624`, invisible at any low alpha on the paper.
- */
-const HIGHLIGHT_MARKER = "#6b9bd1";
-const HIGHLIGHT_ROW_BACKGROUND = "rgba(107, 155, 209, 0.16)";
 const OUTDATED_MESSAGE = "这台设备的 daemon 版本过旧，不支持查看文件。更新 daemon 后重试。";
 
 type FileViewProps = {
@@ -48,6 +41,32 @@ type FileViewProps = {
   tabId: string;
   /** Its group's active tab in the selected workspace, changes overlay closed. */
   onScreen: boolean;
+};
+
+/**
+ * The read-only file body, shared by the file tab and the files view (plan
+ * 20261002-workspace-files-view). It is driven by the file itself, never by a tab: the tab passes
+ * its remembered snapshot and focus registration, the files view passes neither and so never
+ * creates, prunes or persists a file-tab record.
+ */
+export type FileBodyProps = {
+  client: CofluxClient;
+  workspaceId: string;
+  path: string;
+  /** The 1-based line to land on and highlight. */
+  line?: number;
+  /** Bumped each time the file is opened again: the body jumps to `line` even when it did not change. */
+  reveal: number;
+  /** On screen: it polls the disk only then. */
+  onScreen: boolean;
+  /** What the body showed when it last unmounted (a file tab's memory). */
+  snapshot?: FileViewSnapshot;
+  /** Called on unmount with what is on screen, to be handed back as `snapshot`. */
+  onUnmount?: (snapshot: FileViewSnapshot) => void;
+  /** Registers keyboard focus into the body; returns the unregister function. */
+  registerFocus?: (handlers: { focus: () => void }) => () => void;
+  /** Controls placed in the header before 刷新. */
+  headerExtra?: ReactNode;
 };
 
 /** Whether the window has focus. Focus moving into a built-in browser's <webview> blurs the page but not the window. */
@@ -104,20 +123,36 @@ function nextState(current: FileViewState, result: FileReadResult): FileViewStat
 export function FileView({ runtime, client, tabId, onScreen }: FileViewProps) {
   const record = useStore(runtime.tabs, (state) => state.tabs[tabId]);
   const reveal = useStore(runtime.tabs, (state) => state.reveals[tabId] ?? 0);
-  const workspaceId = record?.workspaceId ?? "";
-  const path = record?.path ?? "";
+  // A remount (another tab was active, the tab moved group) starts from what was last shown.
+  const [snapshot] = useState(() => runtime.snapshotOf(tabId));
+  const remember = useCallback((next: FileViewSnapshot) => runtime.remember(tabId, next), [runtime, tabId]);
+  const registerFocus = useCallback((handlers: { focus: () => void }) => runtime.register(tabId, handlers), [runtime, tabId]);
+  return (
+    <FileBody
+      client={client}
+      workspaceId={record?.workspaceId ?? ""}
+      path={record?.path ?? ""}
+      line={record?.line}
+      reveal={reveal}
+      onScreen={onScreen}
+      snapshot={snapshot}
+      onUnmount={remember}
+      registerFocus={registerFocus}
+    />
+  );
+}
+
+export function FileBody({ client, workspaceId, path, line, reveal, onScreen, snapshot, onUnmount, registerFocus, headerExtra }: FileBodyProps) {
   const online = useStore(client.store, (state) => {
     const workspace = state.workspaces.find((item) => item.id === workspaceId);
     return workspace ? (state.daemons.find((item) => item.daemonId === workspace.daemonId)?.online ?? false) : false;
   });
   const windowFocused = useWindowFocused();
 
-  // A remount (another tab was active, the tab moved group) starts from what was last shown.
-  const [snapshot] = useState(() => runtime.snapshotOf(tabId));
   const [view, setView] = useState<FileViewState>(() => snapshot?.state ?? { kind: "loading" });
   const viewRef = useRef(view);
   viewRef.current = view;
-  const [highlight, setHighlight] = useState<number | null>(() => (snapshot && (snapshot.reveal === reveal || record?.line === undefined) ? snapshot.highlight : null));
+  const [highlight, setHighlight] = useState<number | null>(() => (snapshot && (snapshot.reveal === reveal || line === undefined) ? snapshot.highlight : null));
   const highlightRef = useRef(highlight);
   highlightRef.current = highlight;
   const [refreshing, setRefreshing] = useState(false);
@@ -126,31 +161,32 @@ export function FileView({ runtime, client, tabId, onScreen }: FileViewProps) {
   const scrollTopRef = useRef(snapshot?.scrollTop ?? 0);
   // Where to put the viewport once text is rendered: a line to centre, or a scroll offset to restore.
   // Opened again while unmounted: a newer reveal with a line jumps; one without keeps the old place.
-  const jumpOnMount = !(snapshot && snapshot.reveal === reveal) && record?.line !== undefined;
-  const pendingJumpRef = useRef<number | null>(jumpOnMount ? (record?.line ?? null) : null);
+  const jumpOnMount = !(snapshot && snapshot.reveal === reveal) && line !== undefined;
+  const pendingJumpRef = useRef<number | null>(jumpOnMount ? (line ?? null) : null);
   const pendingRestoreRef = useRef<number | null>(snapshot && !jumpOnMount ? snapshot.scrollTop : null);
   const handledRevealRef = useRef(reveal);
   // Bumped to place the viewport again (a jump requested while text is already on screen).
   const [viewportVersion, setViewportVersion] = useState(0);
 
+  const onUnmountRef = useRef(onUnmount);
+  onUnmountRef.current = onUnmount;
   useEffect(
-    () => () => runtime.remember(tabId, { state: viewRef.current, scrollTop: scrollTopRef.current, reveal: handledRevealRef.current, highlight: highlightRef.current }),
-    [runtime, tabId],
+    () => () =>
+      onUnmountRef.current?.({ state: viewRef.current, scrollTop: scrollTopRef.current, reveal: handledRevealRef.current, highlight: highlightRef.current }),
+    [],
   );
 
   // Keyboard focus: the code when it is shown, else the view itself (a message state).
   const rootRef = useRef<HTMLDivElement | null>(null);
-  useEffect(
-    () => runtime.register(tabId, { focus: () => (scrollRef.current ?? rootRef.current)?.focus({ preventScroll: true }) }),
-    [runtime, tabId],
-  );
+  useEffect(() => registerFocus?.({ focus: () => (scrollRef.current ?? rootRef.current)?.focus({ preventScroll: true }) }), [registerFocus]);
 
-  // Opened again from a terminal: jump to its line (even when the line did not change).
+  // Opened again (from a terminal, or revealed in the files view): jump to its line (even when the
+  // line did not change).
   useEffect(() => {
     if (reveal === handledRevealRef.current) return;
     handledRevealRef.current = reveal;
-    if (record?.line !== undefined) {
-      pendingJumpRef.current = record.line;
+    if (line !== undefined) {
+      pendingJumpRef.current = line;
       setViewportVersion((version) => version + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -190,7 +226,7 @@ export function FileView({ runtime, client, tabId, onScreen }: FileViewProps) {
 
   // Live follow. An outdated worker would resend the whole file every tick (it ignores the
   // revision), so that state only re-reads on re-activation, focus, reconnect or 刷新.
-  const polling = Boolean(record) && onScreen && windowFocused && online && view.kind !== "outdated";
+  const polling = Boolean(workspaceId && path) && onScreen && windowFocused && online && view.kind !== "outdated";
   useEffect(() => {
     if (!polling) return;
     let cancelled = false;
@@ -377,6 +413,7 @@ export function FileView({ runtime, client, tabId, onScreen }: FileViewProps) {
           <span className="min-w-0 max-w-full shrink-0 truncate">{name}</span>
           {directory ? <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{directory}</span> : null}
         </div>
+        {headerExtra}
         <HeaderButton label="刷新" disabled={refreshing || !online} onClick={() => void refresh()}>
           <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
         </HeaderButton>

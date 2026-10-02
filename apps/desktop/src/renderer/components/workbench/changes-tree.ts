@@ -4,22 +4,68 @@ import type { ChangedFile } from "@coflux/client";
  * The changes view's file tree (plan 20260929-changes-file-tree): folders first, then files, each
  * level sorted by name; a chain of single-child folders collapses into one row
  * (`renderer/components`), the way VS Code's compact folders do.
+ *
+ * The files view (plan 20261002-workspace-files-view) builds the same node shapes for the whole
+ * workspace (files-tree.ts): a file there may be unchanged (`file` unset) or ignored, a folder may
+ * be listed on demand (`lazy`) and carries a dot for the changes inside it, and a note row stands
+ * for a folder's loading state or error.
  */
 
-export type TreeDir = { kind: "dir"; key: string; name: string; children: TreeNode[] };
-export type TreeFile = { kind: "file"; key: string; name: string; file: ChangedFile };
-export type TreeNode = TreeDir | TreeFile;
+export type TreeDir = {
+  kind: "dir";
+  key: string;
+  name: string;
+  children: TreeNode[];
+  /** Its contents are listed on demand (files view). */
+  lazy?: boolean;
+  /** Matched by the ignore rules: shown dimmed (files view). */
+  ignored?: boolean;
+  /** The changes inside it, as one status for the dot's tone (files view). */
+  dot?: ChangedFile["status"] | null;
+};
+export type TreeFile = {
+  kind: "file";
+  key: string;
+  name: string;
+  /** The file's change; unset for an unchanged file of the files view. */
+  file?: ChangedFile;
+  ignored?: boolean;
+};
+/** A placeholder row inside a folder listed on demand: loading, an error, or empty. */
+export type TreeNote = { kind: "note"; key: string; text: string; error?: boolean };
+export type TreeNode = TreeDir | TreeFile | TreeNote;
 
 export type TreeRow =
-  | { kind: "dir"; key: string; name: string; depth: number; expanded: boolean; parentKey: string | null }
-  | { kind: "file"; key: string; name: string; depth: number; file: ChangedFile; parentKey: string | null };
+  | {
+      kind: "dir";
+      key: string;
+      name: string;
+      depth: number;
+      expanded: boolean;
+      parentKey: string | null;
+      lazy?: boolean;
+      ignored?: boolean;
+      dot?: ChangedFile["status"] | null;
+    }
+  | { kind: "file"; key: string; name: string; depth: number; file?: ChangedFile; ignored?: boolean; parentKey: string | null }
+  | { kind: "note"; key: string; text: string; error?: boolean; depth: number; parentKey: string | null };
+
+/**
+ * Which folders are open. A set alone lists the collapsed ones (the changes tree starts fully
+ * expanded); `{ expanded }` lists the open ones (the whole-workspace tree starts folded).
+ */
+export type FolderFold = ReadonlySet<string> | { expanded: ReadonlySet<string> };
 
 type MutableDir = { dirs: Map<string, MutableDir>; files: TreeFile[] };
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-function compareNames(left: string, right: string): number {
+export function compareNames(left: string, right: string): number {
   return collator.compare(left, right) || (left < right ? -1 : left > right ? 1 : 0);
+}
+
+function isExpanded(fold: FolderFold, key: string): boolean {
+  return "expanded" in fold ? fold.expanded.has(key) : !fold.has(key);
 }
 
 export function buildChangesTree(files: readonly ChangedFile[]): TreeNode[] {
@@ -62,16 +108,28 @@ function toNodes(dir: MutableDir, prefix: string): TreeNode[] {
 }
 
 /** Rows currently on screen: children of a collapsed folder are skipped. */
-export function flattenTree(nodes: readonly TreeNode[], collapsed: ReadonlySet<string>): TreeRow[] {
+export function flattenTree(nodes: readonly TreeNode[], fold: FolderFold): TreeRow[] {
   const rows: TreeRow[] = [];
   const walk = (level: readonly TreeNode[], depth: number, parentKey: string | null) => {
     for (const node of level) {
       if (node.kind === "dir") {
-        const expanded = !collapsed.has(node.key);
-        rows.push({ kind: "dir", key: node.key, name: node.name, depth, expanded, parentKey });
+        const expanded = isExpanded(fold, node.key);
+        rows.push({
+          kind: "dir",
+          key: node.key,
+          name: node.name,
+          depth,
+          expanded,
+          parentKey,
+          lazy: node.lazy,
+          ignored: node.ignored,
+          dot: node.dot,
+        });
         if (expanded) walk(node.children, depth + 1, node.key);
+      } else if (node.kind === "note") {
+        rows.push({ kind: "note", key: node.key, text: node.text, error: node.error, depth, parentKey });
       } else {
-        rows.push({ kind: "file", key: node.key, name: node.name, depth, file: node.file, parentKey });
+        rows.push({ kind: "file", key: node.key, name: node.name, depth, file: node.file, ignored: node.ignored, parentKey });
       }
     }
   };
@@ -132,6 +190,7 @@ export function ancestorKeys(nodes: readonly TreeNode[], path: string): string[]
   const keys: string[] = [];
   const walk = (level: readonly TreeNode[]): boolean => {
     for (const node of level) {
+      if (node.kind === "note") continue;
       if (node.kind === "file") {
         if (node.key === path) return true;
       } else if (path.startsWith(`${node.key}/`)) {
@@ -154,7 +213,7 @@ export function filterTerms(query: string): string[] {
 }
 
 /** Every term is in the file's path (or a rename's old path), so `renderer/` narrows to a folder. */
-export function matchesFilter(file: ChangedFile, terms: readonly string[]): boolean {
+export function matchesFilter(file: Pick<ChangedFile, "path" | "oldPath">, terms: readonly string[]): boolean {
   const path = file.path.toLowerCase();
   const oldPath = file.oldPath?.toLowerCase();
   return terms.every((term) => path.includes(term) || Boolean(oldPath?.includes(term)));

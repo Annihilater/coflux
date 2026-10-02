@@ -82,8 +82,10 @@ type TerminalPaneProps = {
   onOpenBrowserTab?: (workspaceId: string, url: string) => void;
   /** Which printed paths are files of the workspace (plan 20261001-terminal-file-tab); absent = no file links. */
   statFiles?: (workspaceId: string, paths: string[]) => Promise<FileStatResult>;
-  /** ⌘+click or 「打开文件」 on a file link: `path` is the canonical workspace-relative path. */
+  /** 「在标签页中打开」 on a file link: its file tab. `path` is the canonical workspace-relative path. */
   onOpenFile?: (workspaceId: string, path: string, line?: number) => void;
+  /** ⌘+click or 「打开文件」 on a file link (plan 20261002-workspace-files-view): reveal it in the 「文件」 overlay. */
+  onRevealFile?: (workspaceId: string, path: string, line?: number) => void;
   /** agent 自己的会话标识，已校验过形状；null = 旧 worker / 还没上报，同样不出按钮。 */
   agentSessionId: string | null;
   /** 直接是 `client.execInWorkspace`：按工作区归属路由，本地远程同一条路，无分支。 */
@@ -256,7 +258,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     sendResize: props.sendResize,
     sendFsWrite: props.sendFsWrite,
     statFiles: props.statFiles,
-    onOpenFile: props.onOpenFile,
+    onRevealFile: props.onRevealFile,
     showToast,
   });
   useEffect(() => {
@@ -270,7 +272,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       sendResize: props.sendResize,
       sendFsWrite: props.sendFsWrite,
       statFiles: props.statFiles,
-      onOpenFile: props.onOpenFile,
+      onRevealFile: props.onRevealFile,
       showToast,
     };
   });
@@ -464,8 +466,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     // File links (plan 20261001-terminal-file-tab; recognition from plan 20260916): a recognised
     // `path[:line[:col]]` is a link only once the device confirms it is a regular file inside the
     // workspace (terminal-file-links.ts). The check runs for the hovered line only, batched into
-    // one fsStat; a cache hit answers synchronously. ⌘+click opens the file in a tab at that line;
-    // a plain click does nothing (it selects text); the right-click menu opens or copies the path.
+    // one fsStat; a cache hit answers synchronously. ⌘+click reveals the file at that line in the
+    // 「文件」 overlay (plan 20261002-workspace-files-view); a plain click does nothing (it selects
+    // text); the right-click menu reveals it, opens it in a tab, or copies the path.
     let latestFileLinkRequest = 0;
     const fileLinksFor = (bufferLineNumber: number, cellOf: number[], references: TerminalFileReference[], workspaceId: string): ILink[] | undefined => {
       const links: ILink[] = [];
@@ -485,7 +488,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           activate: (event) => {
             setLinkHint(null);
             if (!shouldOpenTerminalFileLink(event)) return;
-            liveRef.current.onOpenFile?.(target.workspaceId, target.path, target.line);
+            liveRef.current.onRevealFile?.(target.workspaceId, target.path, target.line);
           },
           hover: (event) => {
             hoveredLinkRef.current = target;
@@ -1062,7 +1065,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [searchOpen]);
 
   // A right click on a web link (plan 20260924-desktop-browser-tab) puts three items for that link
-  // on top of the unchanged menu; on a file link (plan 20261001-terminal-file-tab) two items; a
+  // on top of the unchanged menu; on a file link (plans 20261001-terminal-file-tab, 20261002-workspace-files-view) three items; a
   // right click elsewhere shows the menu as it always was.
   let linkItems: ContextMenuOption[] = [];
   if (menuLink?.kind === "url") {
@@ -1089,6 +1092,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     linkItems = [
       {
         label: "打开文件",
+        isDisabled: !props.onRevealFile,
+        onClick: () => props.onRevealFile?.(file.workspaceId, file.path, file.line),
+      },
+      {
+        label: "在标签页中打开",
         isDisabled: !props.onOpenFile,
         onClick: () => props.onOpenFile?.(file.workspaceId, file.path, file.line),
       },
