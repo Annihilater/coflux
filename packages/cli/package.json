@@ -11,6 +11,7 @@
     "cofluxd.mjs",
     "coflux.mjs",
     "account-client.mjs",
+    "output.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
     "service-unit.mjs",
