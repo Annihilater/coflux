@@ -231,8 +231,18 @@ export type FsWriteResult = { ok: boolean; path?: string; error: string };
  * and the response mapping live in ./changes. */
 import { changesFailure, toChangeFileResult, toChangesListResult, whitespaceWire, type ChangeFileResult, type ChangesListResult, type WhitespaceMode } from "./changes";
 export type { ChangedFile, ChangedFileStatus, ChangesFailure, ChangesListResult, ChangeFileResult, ChangesOption, WhitespaceMode } from "./changes";
-import { fileReadFailure, fileStatFailure, toFileReadResult, toFileStatResult, type FileReadResult, type FileStatResult } from "./files";
-export type { FileReadResult, FileStat, FileStatResult } from "./files";
+import {
+  fileIndexFailure,
+  fileReadFailure,
+  fileStatFailure,
+  toFileIndexResult,
+  toFileReadResult,
+  toFileStatResult,
+  type FileIndexResult,
+  type FileReadResult,
+  type FileStatResult,
+} from "./files";
+export type { FileIndexEntry, FileIndexResult, FileReadResult, FileStat, FileStatResult } from "./files";
 /** 设备授权兑现结果（plan 112；与桌面版 plan 113 的契约）：失败文案来自服务端 `deviceAuthorizeInfo{ ok:false }`
  * 或本地（未登录 / 连接未就绪 / 断连 / 超时）。 */
 export type DeviceAuthorizeResult = { ok: true } | { ok: false; error: string };
@@ -1925,6 +1935,34 @@ export function createCofluxClient(options: CofluxClientOptions) {
   }
 
   /**
+   * Every entry of a workspace in one device round trip (plan 20261002-workspace-files-view): git's
+   * view of a repository top level, a walk otherwise. A workspace too large for one answer is
+   * `truncated`; its folders are then listed one at a time with `listWorkspaceDirectory`.
+   */
+  async function indexWorkspaceFiles(workspaceId: string): Promise<FileIndexResult> {
+    const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return { kind: "failed", error: "工作区不存在" };
+    try {
+      return toFileIndexResult(await deviceRouter.fsIndex(workspace.daemonId, workspaceId));
+    } catch (error) {
+      return fileIndexFailure(error);
+    }
+  }
+
+  /** One folder of a workspace (plan 20261002-workspace-files-view): `path` is workspace-relative
+   * ("" = the root). Entries come directories first, then by name. */
+  async function listWorkspaceDirectory(workspaceId: string, path: string): Promise<FsListResult> {
+    const workspace = store.getState().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return { ok: false, entries: [], error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.fsList(workspace.daemonId, workspaceId, path, false);
+      return { ok: result.ok, entries: result.entries, error: result.error ?? "", path: result.path };
+    } catch (error) {
+      return { ok: false, entries: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
    * One workspace file's content (plan 20261001-terminal-file-tab). With `knownRevision` the read
    * is conditional: an unchanged file answers `notModified` without content.
    */
@@ -2179,6 +2217,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     listWorkspaceChanges,
     readWorkspaceChangeFile,
     statWorkspaceFiles,
+    indexWorkspaceFiles,
+    listWorkspaceDirectory,
     readWorkspaceFile,
     readTask,
     sendFsWrite,

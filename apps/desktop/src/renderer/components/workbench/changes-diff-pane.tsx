@@ -57,6 +57,19 @@ export type DiffPaneState =
 /** The change F7 / ⇧F7 last moved to; `seq` changes on every move so the same index re-scrolls. */
 export type CurrentChange = { index: number; seq: number };
 
+/** A line of the new side to land on (1-based), revealed from a terminal (plan
+ * 20261002-workspace-files-view); `seq` is new for every reveal. */
+export type RevealLine = { line: number; seq: number };
+
+/**
+ * The landed-on line's tint and its gutter marker, shared with the file body: the terminal palette's
+ * blue (the link colour, `#6b9bd1`), quiet but visibly lighter than the `#0a0a0a` paper. Not the
+ * `--accent` token — in this app that is the dark hover surface `#262624`, invisible at any low
+ * alpha on the paper.
+ */
+export const LINE_HIGHLIGHT_MARKER = "#6b9bd1";
+export const LINE_HIGHLIGHT_BACKGROUND = "rgba(107, 155, 209, 0.16)";
+
 type DiffPaneProps = {
   file: ChangedFile;
   state: DiffPaneState;
@@ -77,6 +90,11 @@ type DiffPaneProps = {
   comments: CodeCommentsController;
   /** The header's 「交给 agent ▾」; null when the device's coflux has no code comments. */
   handOff: { agents: readonly AgentTerminal[]; disabled: boolean; onHandOff: (taskId: string) => void } | null;
+  /** Controls placed first in the header's button group (the files view's 「差异 / 文件」). */
+  headerExtra?: ReactNode;
+  /** A new-side line to land on once the content is on screen; reported back through `onRevealed`. */
+  revealLine?: RevealLine | null;
+  onRevealed?: (seq: number) => void;
 };
 
 /** Beyond this, a side is shown as plain text: tokenising it on the renderer thread would stall. */
@@ -119,7 +137,8 @@ export function ChangesDiffPane(props: DiffPaneProps) {
           </span>
         ) : null}
         <div className="flex shrink-0 items-center gap-0.5">
-          {props.handOff ? <CommentsHandOffMenu agents={props.handOff.agents} disabled={props.handOff.disabled} onHandOff={props.handOff.onHandOff} /> : null}
+          {props.headerExtra}
+          {props.handOff ?<CommentsHandOffMenu agents={props.handOff.agents} disabled={props.handOff.disabled} onHandOff={props.handOff.onHandOff} /> : null}
           <HeaderButton label="上一个变更 ⇧F7" onClick={() => onStep(-1)}>
             <ChevronUp className="size-3.5" />
           </HeaderButton>
@@ -246,7 +265,7 @@ function WhitespaceMenu({ whitespace, onChange }: { whitespace: WhitespaceMode; 
 }
 
 /** 「⋯」: a DropdownMenu trigger, so its tooltip is a sibling (docs/design-guidelines.md). */
-function FileMoreMenu({ items }: { items: DropdownMenuOption[] }) {
+export function FileMoreMenu({ items }: { items: DropdownMenuOption[] }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLButtonElement | null>(null);
   return (
@@ -274,7 +293,7 @@ function FileMoreMenu({ items }: { items: DropdownMenuOption[] }) {
   );
 }
 
-function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onChangeCount, comments }: DiffPaneProps) {
+function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onChangeCount, comments, revealLine, onRevealed }: DiffPaneProps) {
   switch (state.kind) {
     case "loading":
       return (
@@ -338,6 +357,8 @@ function PaneBody({ file, state, mode, onRetry, onForceLoad, currentChange, onCh
           currentChange={currentChange}
           onChangeCount={onChangeCount}
           comments={comments}
+          revealLine={revealLine ?? null}
+          onRevealed={onRevealed}
         />
       );
   }
@@ -460,6 +481,20 @@ type Gutter = {
 /** The line a row's gutter comments on: a deletion's base line, else the working-tree line. */
 type GutterTarget = { side: CommentSide; line: number } | null;
 
+/** The folded stretch that hides `line` of `side` (0-based), if any: an equal segment minus its
+ * context lines next to changes, which is what buildDiffRows folds. */
+function gapHolding(segments: readonly DiffSegment[], side: CommentSide, line: number): string | null {
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (segment.kind !== "equal") continue;
+    const head = index === 0 ? 0 : CONTEXT_LINES;
+    const tail = index === segments.length - 1 ? 0 : CONTEXT_LINES;
+    const start = side === "old" ? segment.oldStart : segment.newStart;
+    if (line >= start + head && line < start + segment.length - tail) return gapId(segment);
+  }
+  return null;
+}
+
 function DiffBody({
   file,
   data,
@@ -468,6 +503,8 @@ function DiffBody({
   currentChange,
   onChangeCount,
   comments,
+  revealLine,
+  onRevealed,
 }: {
   file: ChangedFile;
   data: ChangeFileData;
@@ -476,6 +513,8 @@ function DiffBody({
   currentChange: CurrentChange | null;
   onChangeCount: (count: number) => void;
   comments: CodeCommentsController;
+  revealLine: RevealLine | null;
+  onRevealed?: (seq: number) => void;
 }) {
   const sides = useMemo(() => buildSides(file, data, whitespace), [file, data, whitespace]);
   const emphasis = useMemo(() => buildEmphasis(sides, whitespace), [sides, whitespace]);
@@ -538,17 +577,30 @@ function DiffBody({
     const wanted = draft ? [...placed.ends, { side: draft.side, line: draft.range.end }] : placed.ends;
     if (wanted.length === 0) return expanded;
     const next = new Set(expanded);
-    sides.segments.forEach((segment, index) => {
-      if (segment.kind !== "equal") return;
-      const head = index === 0 ? 0 : CONTEXT_LINES;
-      const tail = index === sides.segments.length - 1 ? 0 : CONTEXT_LINES;
-      for (const { side, line } of wanted) {
-        const start = side === "old" ? segment.oldStart : segment.newStart;
-        if (line >= start + head && line < start + segment.length - tail) next.add(gapId(segment));
-      }
-    });
+    for (const { side, line } of wanted) {
+      const id = gapHolding(sides.segments, side, line);
+      if (id) next.add(id);
+    }
     return next;
   }, [expanded, placed, draft, sides]);
+
+  // A line revealed from a terminal (plan 20261002-workspace-files-view): unfold the stretch that
+  // holds it (for good, like a clicked 「展开」), then scroll to its row and tint it.
+  const [landed, setLanded] = useState<{ line: number; seq: number } | null>(null);
+  const [handledReveal, setHandledReveal] = useState<number | null>(null);
+  if (revealLine && revealLine.seq !== handledReveal && sides.newLines.length > 0) {
+    setHandledReveal(revealLine.seq);
+    const line = Math.min(Math.max(revealLine.line, 1), sides.newLines.length) - 1;
+    const id = gapHolding(sides.segments, "new", line);
+    if (id && !expanded.has(id)) setExpanded(new Set(expanded).add(id));
+    setLanded({ line, seq: revealLine.seq });
+  }
+  const onRevealedRef = useRef(onRevealed);
+  useEffect(() => {
+    onRevealedRef.current = onRevealed;
+  });
+  const landedSeq = landed?.seq ?? null;
+  const landedLine = landed?.line ?? null;
 
   const rows = useMemo(() => buildDiffRows(sides.segments, mode, shownExpanded), [sides, mode, shownExpanded]);
   const blocks = useMemo(() => {
@@ -577,6 +629,17 @@ function DiffBody({
     const target = container?.querySelector<HTMLElement>(`[data-change-start="${currentIndex}"]`);
     target?.scrollIntoView({ block: "center" });
   }, [currentIndex, currentSeq, rows]);
+
+  // Bring a revealed line into view once its row exists (its stretch is unfolded by then).
+  const scrolledRevealRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (landedSeq === null || landedLine === null || scrolledRevealRef.current === landedSeq) return;
+    const target = scrollRef.current?.querySelector<HTMLElement>(`[data-new-line="${landedLine}"]`);
+    if (!target) return;
+    scrolledRevealRef.current = landedSeq;
+    target.scrollIntoView({ block: "center" });
+    onRevealedRef.current?.(landedSeq);
+  }, [landedSeq, landedLine, rows]);
 
   // Releasing anywhere ends a gutter selection and opens the composer for it.
   const dragging = drag !== null;
@@ -735,8 +798,9 @@ function DiffBody({
               const rightItems = itemsFor("new", row.right?.line);
               return (
                 <Fragment key={key}>
-                  <div className="relative flex" data-change-start={changeStart}>
+                  <div className="relative flex" data-change-start={changeStart} data-new-line={row.right?.line}>
                     {isCurrent ? <CurrentMarker /> : null}
+                    {row.right && row.right.line === landedLine ? <LandedLine /> : null}
                     <SplitHalf side="old" cell={row.left} renderCode={renderCode} gutter={gutter} target={leftTarget} selected={isSelected(leftTarget)} />
                     <SplitHalf side="new" cell={row.right} renderCode={renderCode} gutter={gutter} target={rightTarget} selected={isSelected(rightTarget)} />
                   </div>
@@ -762,8 +826,10 @@ function DiffBody({
                 <div
                   className={cn("group/line relative flex", row.type === "del" && "bg-destructive/10", row.type === "add" && "bg-success/10")}
                   data-change-start={changeStart}
+                  data-new-line={row.type !== "del" && row.newLine !== null ? row.newLine : undefined}
                 >
                   {isCurrent ? <CurrentMarker /> : null}
+                  {row.type !== "del" && row.newLine !== null && row.newLine === landedLine ? <LandedLine /> : null}
                   {isSelected(target) ? <SelectedLine /> : null}
                   <LineNumber value={row.oldLine} tone={row.type === "del" ? "del" : null} gutter={gutter} target={target} plus />
                   <LineNumber value={row.newLine} tone={row.type === "add" ? "add" : null} gutter={gutter} target={target} />
@@ -793,6 +859,15 @@ function DiffBody({
 /** The left-edge bar on the rows of the change F7 / ⇧F7 last moved to. */
 function CurrentMarker() {
   return <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-foreground/60" />;
+}
+
+/** The tint and left marker on the line a terminal reveal landed on (plan 20261002-workspace-files-view). */
+function LandedLine() {
+  return (
+    <span aria-hidden className="pointer-events-none absolute inset-0" style={{ backgroundColor: LINE_HIGHLIGHT_BACKGROUND }}>
+      <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: LINE_HIGHLIGHT_MARKER }} />
+    </span>
+  );
 }
 
 /** The tint on lines selected for a new comment. */

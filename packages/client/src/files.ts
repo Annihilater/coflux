@@ -1,4 +1,4 @@
-import { FsReadStatus, type DeviceFsStatResult, type FsReadResult } from "@coflux/protocol";
+import { FsIndexEntryKind, FsReadStatus, type DeviceFsIndexResult, type DeviceFsStatResult, type FsReadResult } from "@coflux/protocol";
 
 import { DAEMON_OUTDATED_CODE } from "./device-router";
 
@@ -61,6 +61,45 @@ export function toFileStatResult(result: DeviceFsStatResult): FileStatResult {
 
 /** A thrown router error; `daemon_outdated` is the worker predating `fsStat`. */
 export function fileStatFailure(error: unknown): FileStatResult {
+  return errorCode(error) === DAEMON_OUTDATED_CODE
+    ? { kind: "daemonOutdated", error: errorText(error) }
+    : { kind: "failed", error: errorText(error) };
+}
+
+/* ===== Workspace file index (plan 20261002-workspace-files-view) ===== */
+
+export type FileIndexEntry = {
+  /** Workspace-relative, "/"-separated, no trailing slash. */
+  path: string;
+  /** `directory` is a folder the index does not descend into; its contents are listed on demand. */
+  kind: "file" | "directory";
+  /** Matched by the ignore rules (git workspaces only). */
+  ignored: boolean;
+};
+
+export type FileIndexResult =
+  | { kind: "ok"; entries: FileIndexEntry[] }
+  /** The workspace is too large for one index; folders are listed one at a time instead. */
+  | { kind: "truncated" }
+  /** The device's worker predates the index. */
+  | { kind: "daemonOutdated"; error: string }
+  | { kind: "failed"; error: string };
+
+export function toFileIndexResult(result: DeviceFsIndexResult): FileIndexResult {
+  if (!result.ok) return { kind: "failed", error: result.error || "读取文件列表失败" };
+  if (result.truncated) return { kind: "truncated" };
+  return {
+    kind: "ok",
+    entries: result.entries.map((entry) => ({
+      path: entry.path,
+      kind: entry.kind === FsIndexEntryKind.DIRECTORY ? "directory" : "file",
+      ignored: entry.ignored,
+    })),
+  };
+}
+
+/** A thrown router error; `daemon_outdated` is the worker predating the index. */
+export function fileIndexFailure(error: unknown): FileIndexResult {
   return errorCode(error) === DAEMON_OUTDATED_CODE
     ? { kind: "daemonOutdated", error: errorText(error) }
     : { kind: "failed", error: errorText(error) };

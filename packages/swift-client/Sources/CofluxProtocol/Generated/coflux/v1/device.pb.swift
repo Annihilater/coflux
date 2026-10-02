@@ -188,6 +188,50 @@ public enum Coflux_V1_LocalAuthErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable
 
 }
 
+public enum Coflux_V1_FsIndexEntryKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+
+  /// A leaf: a regular file, a symlink (never followed) or anything else that is not a directory.
+  case file // = 1
+
+  /// A directory the index does not descend into: an ignored directory, an untracked nested
+  /// repository, a submodule gitlink, a walk's `.git` or empty directory. Its contents are listed
+  /// on demand with DeviceFsList.
+  case directory // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .file
+    case 2: self = .directory
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .file: return 1
+    case .directory: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Coflux_V1_FsIndexEntryKind] = [
+    .unspecified,
+    .file,
+    .directory,
+  ]
+
+}
+
 public enum Coflux_V1_ExecutorRunState: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -2394,6 +2438,79 @@ public struct Coflux_V1_DeviceFsStatResult: Sendable {
   public init() {}
 
   fileprivate var _error: String? = nil
+}
+
+/// Whole-workspace file index (plan 20261002-workspace-files-view), anchored and scoped like
+/// DeviceFsRead (DEVICE_SCOPE_RPC). When the workspace root is the top level of a git worktree the
+/// index is git's view: every tracked file plus every untracked file that is not ignored
+/// (`git ls-files --cached --others --exclude-standard`), and every ignored entry at its top-most
+/// ignored level (`git ls-files --others --ignored --exclude-standard --directory`). Otherwise it is
+/// a walk of the root with no ignored entries. A worker that predates this payload decodes it as an
+/// empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients attribute
+/// that, arriving on the RPC lane, to their in-flight index requests (daemon outdated).
+public struct Coflux_V1_DeviceFsIndex: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public struct Coflux_V1_DeviceFsIndexResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String {
+    get {_error ?? String()}
+    set {_error = newValue}
+  }
+  /// Returns true if `error` has been explicitly set.
+  public var hasError: Bool {self._error != nil}
+  /// Clears the value of `error`. Subsequent reads from it will return its default value.
+  public mutating func clearError() {self._error = nil}
+
+  /// Sorted by path. Empty when `truncated`: a partial index would make folders look complete.
+  public var entries: [Coflux_V1_FsIndexEntry] = []
+
+  /// The worker stopped at its entry cap, response-size budget or time budget. The client then
+  /// lists folders one at a time with DeviceFsList instead.
+  public var truncated: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _error: String? = nil
+}
+
+public struct Coflux_V1_FsIndexEntry: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Relative to the workspace root, "/"-separated, never with a trailing slash.
+  public var path: String = String()
+
+  public var kind: Coflux_V1_FsIndexEntryKind = .unspecified
+
+  /// Matched by the ignore rules (git mode only). Everything under an ignored directory is ignored
+  /// too; a tracked file matched by .gitignore is not ignored.
+  public var ignored: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
@@ -5469,6 +5586,22 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .fsStatResult(newValue)}
   }
 
+  public var fsIndex: Coflux_V1_DeviceFsIndex {
+    get {
+      if case .fsIndex(let v)? = payload {return v}
+      return Coflux_V1_DeviceFsIndex()
+    }
+    set {payload = .fsIndex(newValue)}
+  }
+
+  public var fsIndexResult: Coflux_V1_DeviceFsIndexResult {
+    get {
+      if case .fsIndexResult(let v)? = payload {return v}
+      return Coflux_V1_DeviceFsIndexResult()
+    }
+    set {payload = .fsIndexResult(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -5562,6 +5695,8 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case screenClipboardChanged(Coflux_V1_ScreenClipboardChanged)
     case fsStat(Coflux_V1_DeviceFsStat)
     case fsStatResult(Coflux_V1_DeviceFsStatResult)
+    case fsIndex(Coflux_V1_DeviceFsIndex)
+    case fsIndexResult(Coflux_V1_DeviceFsIndexResult)
 
   }
 
@@ -5582,6 +5717,10 @@ extension Coflux_V1_DeviceTransportKind: SwiftProtobuf._ProtoNameProviding {
 
 extension Coflux_V1_LocalAuthErrorCode: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0LOCAL_AUTH_ERROR_CODE_UNSPECIFIED\0\u{1}LOCAL_AUTH_ERROR_CODE_VERSION_MISMATCH\0\u{1}LOCAL_AUTH_ERROR_CODE_ORIGIN_DENIED\0\u{1}LOCAL_AUTH_ERROR_CODE_GRANT_UNKNOWN\0\u{1}LOCAL_AUTH_ERROR_CODE_KEY_MISMATCH\0\u{1}LOCAL_AUTH_ERROR_CODE_SIGNATURE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_NONCE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_LEASE_INVALID\0\u{1}LOCAL_AUTH_ERROR_CODE_RATE_LIMITED\0")
+}
+
+extension Coflux_V1_FsIndexEntryKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0FS_INDEX_ENTRY_KIND_UNSPECIFIED\0\u{1}FS_INDEX_ENTRY_KIND_FILE\0\u{1}FS_INDEX_ENTRY_KIND_DIRECTORY\0")
 }
 
 extension Coflux_V1_ExecutorRunState: SwiftProtobuf._ProtoNameProviding {
@@ -8549,6 +8688,135 @@ extension Coflux_V1_DeviceFsStatResult: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.ok != rhs.ok {return false}
     if lhs._error != rhs._error {return false}
     if lhs.entries != rhs.entries {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceFsIndex: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceFsIndex"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceFsIndex, rhs: Coflux_V1_DeviceFsIndex) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceFsIndexResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceFsIndexResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}entries\0\u{1}truncated\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._error) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.entries) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.truncated) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    try { if let v = self._error {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    if !self.entries.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entries, fieldNumber: 4)
+    }
+    if self.truncated != false {
+      try visitor.visitSingularBoolField(value: self.truncated, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceFsIndexResult, rhs: Coflux_V1_DeviceFsIndexResult) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs._error != rhs._error {return false}
+    if lhs.entries != rhs.entries {return false}
+    if lhs.truncated != rhs.truncated {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_FsIndexEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FsIndexEntry"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}path\0\u{1}kind\0\u{1}ignored\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.ignored) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if self.ignored != false {
+      try visitor.visitSingularBoolField(value: self.ignored, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_FsIndexEntry, rhs: Coflux_V1_FsIndexEntry) -> Bool {
+    if lhs.path != rhs.path {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.ignored != rhs.ignored {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -12976,7 +13244,7 @@ extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0\u{3}screen_session_open\0\u{3}screen_session_opened\0\u{3}screen_session_state\0\u{3}screen_session_close\0\u{3}screen_session_closed\0\u{3}screen_session_resize\0\u{3}screen_session_pause\0\u{3}screen_session_resume\0\u{3}screen_session_detached\0\u{3}screen_session_ended\0\u{3}screen_video_attach\0\u{3}screen_video_attached\0\u{3}screen_video_credit\0\u{3}screen_keyframe_request\0\u{3}screen_video_frame\0\u{3}screen_input\0\u{3}screen_cursor\0\u{3}screen_clipboard_set\0\u{3}screen_clipboard_changed\0\u{3}fs_stat\0\u{3}fs_stat_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0\u{3}screen_session_open\0\u{3}screen_session_opened\0\u{3}screen_session_state\0\u{3}screen_session_close\0\u{3}screen_session_closed\0\u{3}screen_session_resize\0\u{3}screen_session_pause\0\u{3}screen_session_resume\0\u{3}screen_session_detached\0\u{3}screen_session_ended\0\u{3}screen_video_attach\0\u{3}screen_video_attached\0\u{3}screen_video_credit\0\u{3}screen_keyframe_request\0\u{3}screen_video_frame\0\u{3}screen_input\0\u{3}screen_cursor\0\u{3}screen_clipboard_set\0\u{3}screen_clipboard_changed\0\u{3}fs_stat\0\u{3}fs_stat_result\0\u{3}fs_index\0\u{3}fs_index_result\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -14156,6 +14424,32 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .fsStatResult(v)
         }
       }()
+      case 146: try {
+        var v: Coflux_V1_DeviceFsIndex?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .fsIndex(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .fsIndex(v)
+        }
+      }()
+      case 147: try {
+        var v: Coflux_V1_DeviceFsIndexResult?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .fsIndexResult(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .fsIndexResult(v)
+        }
+      }()
       default: break
       }
     }
@@ -14532,6 +14826,14 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .fsStatResult?: try {
       guard case .fsStatResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 145)
+    }()
+    case .fsIndex?: try {
+      guard case .fsIndex(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 146)
+    }()
+    case .fsIndexResult?: try {
+      guard case .fsIndexResult(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 147)
     }()
     case nil: break
     }

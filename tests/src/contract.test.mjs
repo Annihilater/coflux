@@ -4,7 +4,7 @@ import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { FsEntryKind, FsReadStatus } from "@coflux/protocol";
+import { FsEntryKind, FsIndexEntryKind, FsReadStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 import { openNativeDevice } from "./device-harness.mjs";
 
@@ -277,6 +277,31 @@ test("fsStat: one entry per path, in order — file, missing, directory, escape,
   // The stat revision is the read revision.
   const read = await device.request("fsRead", "fsReadResult", { workspaceId: ws.id, path: file.relativePath });
   assert.equal(read.revision, file.revision);
+  device.close();
+});
+
+// ===== fsIndex (plan 20261002-workspace-files-view) =====
+
+test("fsIndex: git's view of the workspace — untracked files listed, an ignored directory collapsed to one entry, sorted", async () => {
+  const device = await openNativeDevice(stack);
+  const ws = await importWorkspace(device);
+  writeFileSync(join(ws.path, ".gitignore"), "build/\n");
+  mkdirSync(join(ws.path, "build", "out"), { recursive: true });
+  writeFileSync(join(ws.path, "build", "out", "x.js"), "x");
+  const index = await device.request("fsIndex", "fsIndexResult", { workspaceId: ws.id });
+  assert.equal(index.ok, true);
+  assert.equal(index.truncated, false);
+  assert.deepEqual(
+    index.entries.map((entry) => entry.path),
+    [".gitignore", "README.md", "build", "src/a.txt"],
+    "sorted, relative, no trailing slash, nothing under the ignored directory",
+  );
+  const byPath = new Map(index.entries.map((entry) => [entry.path, entry]));
+  assert.equal(byPath.get("README.md").kind, FsIndexEntryKind.FILE);
+  assert.equal(byPath.get("README.md").ignored, false);
+  assert.equal(byPath.get("src/a.txt").kind, FsIndexEntryKind.FILE);
+  assert.equal(byPath.get("build").kind, FsIndexEntryKind.DIRECTORY);
+  assert.equal(byPath.get("build").ignored, true);
   device.close();
 });
 

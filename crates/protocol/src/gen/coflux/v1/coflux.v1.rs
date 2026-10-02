@@ -1319,6 +1319,49 @@ pub struct DeviceFsStatResult {
     #[prost(message, repeated, tag="4")]
     pub entries: ::prost::alloc::vec::Vec<FsStatEntry>,
 }
+/// Whole-workspace file index (plan 20261002-workspace-files-view), anchored and scoped like
+/// DeviceFsRead (DEVICE_SCOPE_RPC). When the workspace root is the top level of a git worktree the
+/// index is git's view: every tracked file plus every untracked file that is not ignored
+/// (`git ls-files --cached --others --exclude-standard`), and every ignored entry at its top-most
+/// ignored level (`git ls-files --others --ignored --exclude-standard --directory`). Otherwise it is
+/// a walk of the root with no ignored entries. A worker that predates this payload decodes it as an
+/// empty oneof and answers DeviceError{code:"empty_payload", request_id: unset}; clients attribute
+/// that, arriving on the RPC lane, to their in-flight index requests (daemon outdated).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceFsIndex {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceFsIndexResult {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, optional, tag="3")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    /// Sorted by path. Empty when `truncated`: a partial index would make folders look complete.
+    #[prost(message, repeated, tag="4")]
+    pub entries: ::prost::alloc::vec::Vec<FsIndexEntry>,
+    /// The worker stopped at its entry cap, response-size budget or time budget. The client then
+    /// lists folders one at a time with DeviceFsList instead.
+    #[prost(bool, tag="5")]
+    pub truncated: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsIndexEntry {
+    /// Relative to the workspace root, "/"-separated, never with a trailing slash.
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(enumeration="FsIndexEntryKind", tag="2")]
+    pub kind: i32,
+    /// Matched by the ignore rules (git mode only). Everything under an ignored directory is ignored
+    /// too; a tracked file matched by .gitignore is not ignored.
+    #[prost(bool, tag="3")]
+    pub ignored: bool,
+}
 /// fs.write 的 operation_id ledger 只覆盖当前 worker runtime。对可稳定重建的目标 path，以相同
 /// path/data 做全量覆盖写可在状态未知时重试并收敛到同一内容；这是结果收敛式幂等，不是严格一次。
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2582,7 +2625,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -2769,6 +2812,10 @@ pub mod device_envelope {
         FsStat(super::DeviceFsStat),
         #[prost(message, tag="145")]
         FsStatResult(super::DeviceFsStatResult),
+        #[prost(message, tag="146")]
+        FsIndex(super::DeviceFsIndex),
+        #[prost(message, tag="147")]
+        FsIndexResult(super::DeviceFsIndexResult),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -2893,6 +2940,39 @@ impl LocalAuthErrorCode {
             "LOCAL_AUTH_ERROR_CODE_NONCE_INVALID" => Some(Self::NonceInvalid),
             "LOCAL_AUTH_ERROR_CODE_LEASE_INVALID" => Some(Self::LeaseInvalid),
             "LOCAL_AUTH_ERROR_CODE_RATE_LIMITED" => Some(Self::RateLimited),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FsIndexEntryKind {
+    Unspecified = 0,
+    /// A leaf: a regular file, a symlink (never followed) or anything else that is not a directory.
+    File = 1,
+    /// A directory the index does not descend into: an ignored directory, an untracked nested
+    /// repository, a submodule gitlink, a walk's `.git` or empty directory. Its contents are listed
+    /// on demand with DeviceFsList.
+    Directory = 2,
+}
+impl FsIndexEntryKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FS_INDEX_ENTRY_KIND_UNSPECIFIED",
+            Self::File => "FS_INDEX_ENTRY_KIND_FILE",
+            Self::Directory => "FS_INDEX_ENTRY_KIND_DIRECTORY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FS_INDEX_ENTRY_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "FS_INDEX_ENTRY_KIND_FILE" => Some(Self::File),
+            "FS_INDEX_ENTRY_KIND_DIRECTORY" => Some(Self::Directory),
             _ => None,
         }
     }

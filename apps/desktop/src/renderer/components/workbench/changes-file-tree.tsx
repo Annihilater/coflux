@@ -5,19 +5,23 @@ import { ContextMenu, type ContextMenuOption } from "@astryxdesign/core/ContextM
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import type { ChangedFile, ChangedFileStatus } from "@coflux/client";
 import { FileTypeIcon, FolderIcon } from "@/components/workbench/changes-file-icon";
-import { filterHighlights, flattenTree, stepFile, type TreeNode, type TreeRow } from "@/components/workbench/changes-tree";
+import { filterHighlights, flattenTree, stepFile, type FolderFold, type TreeNode, type TreeRow } from "@/components/workbench/changes-tree";
 import { cn } from "@/lib/utils";
 
 type ChangesFileTreeProps = {
   nodes: TreeNode[];
-  collapsed: ReadonlySet<string>;
+  /** Which folders are open (see FolderFold). */
+  collapsed: FolderFold;
   onSetExpanded: (key: string, expanded: boolean) => void;
   selectedPath: string | null;
   onSelect: (path: string) => void;
   /** Takes the keyboard when the view opens, if nothing else holds it. */
   active: boolean;
-  /** The right-click menu of a file row (plan 20261001-changes-review-polish). */
-  fileMenuItems: (file: ChangedFile) => ContextMenuOption[];
+  /** The right-click menu of a file row (plan 20261001-changes-review-polish); `change` is unset
+   * for an unchanged file of the whole-workspace tree. */
+  fileMenuItems: (path: string, change: ChangedFile | undefined) => ContextMenuOption[];
+  /** The tree's accessible name. */
+  label?: string;
   /** Pending code comments per file path, shown as a badge (plan 20261001-changes-review-comments). */
   commentCounts?: ReadonlyMap<string, number>;
   /** The filter's terms, highlighted in row labels. */
@@ -79,6 +83,10 @@ const GUIDE_OFFSET_PX = 7;
  * icons from the vendored Catppuccin set, a thin indent guide per level, and a file menu on
  * right-click. One ContextMenu serves every row: a row's own handler records which file was
  * right-clicked before the event reaches the menu; folder rows stop it so no menu opens.
+ *
+ * The files view (plan 20261002-workspace-files-view) renders the whole workspace with it: unchanged
+ * files are plain rows, ignored entries are dimmed, a folder with changes inside carries a dot, and a
+ * folder listed on demand shows a note row while it loads or when it failed.
  */
 export function ChangesFileTree({
   nodes,
@@ -88,6 +96,7 @@ export function ChangesFileTree({
   onSelect,
   active,
   fileMenuItems,
+  label = "变更文件",
   commentCounts,
   terms = NO_TERMS,
   handle,
@@ -95,7 +104,7 @@ export function ChangesFileTree({
   const rows = useMemo(() => flattenTree(nodes, collapsed), [nodes, collapsed]);
   const [focusedKey, setFocusedKey] = useState<string | null>(selectedPath);
   const [hasFocus, setHasFocus] = useState(false);
-  const [menuFile, setMenuFile] = useState<ChangedFile | null>(null);
+  const [menuFile, setMenuFile] = useState<{ path: string; change: ChangedFile | undefined } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // The focus cursor follows a selection made elsewhere (restore on open, neighbour after refresh, F7).
@@ -114,7 +123,7 @@ export function ChangesFileTree({
   }, [focusedKey, rows]);
 
   // Opening the overlay hands the keyboard to the tree — including when it was opened from the
-  // dock's 「变更」 button, which holds focus at that moment — unless the user is typing into
+  // dock's 「文件」 button, which holds focus at that moment — unless the user is typing into
   // something still on screen.
   useEffect(() => {
     if (!active) return;
@@ -185,7 +194,7 @@ export function ChangesFileTree({
           return;
         }
         const child = rows[index + 1];
-        if (child && child.parentKey === row.key) focusRow(child);
+        if (child && child.parentKey === row.key && child.kind !== "note") focusRow(child);
         return;
       }
       case "Enter":
@@ -204,15 +213,34 @@ export function ChangesFileTree({
     <div
       ref={containerRef}
       role="tree"
-      aria-label="变更文件"
+      aria-label={label}
       tabIndex={0}
       className="h-full overflow-y-auto py-1 text-base outline-none"
       onKeyDown={onKeyDown}
       onFocus={() => setHasFocus(true)}
       onBlur={() => setHasFocus(false)}
     >
-      <ContextMenu label="文件操作" size="sm" items={menuFile ? fileMenuItems(menuFile) : []}>
+      <ContextMenu label="文件操作" size="sm" items={menuFile ? fileMenuItems(menuFile.path, menuFile.change) : []}>
         {rows.map((row) => {
+          if (row.kind === "note") {
+            return (
+              <div
+                key={`note:${row.key}`}
+                role="treeitem"
+                aria-level={row.depth + 1}
+                className="relative flex h-6 cursor-default select-none items-center gap-1.5 pr-2"
+                style={{ paddingLeft: BASE_PADDING_PX + row.depth * INDENT_PX }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+              >
+                <IndentGuides depth={row.depth} />
+                <span className="-mr-0.5 size-3.5 shrink-0" />
+                <span className={cn("min-w-0 flex-1 truncate text-sm", row.error ? "text-destructive" : "text-muted-foreground")}>{row.text}</span>
+              </div>
+            );
+          }
           const selected = row.kind === "file" && row.key === selectedPath;
           const focused = hasFocus && row.key === focusedKey;
           return (
@@ -247,7 +275,7 @@ export function ChangesFileTree({
                 }
                 containerRef.current?.focus({ preventScroll: true });
                 setFocusedKey(row.key);
-                setMenuFile(row.file);
+                setMenuFile({ path: row.key, change: row.file });
               }}
             >
               <IndentGuides depth={row.depth} />
@@ -258,13 +286,20 @@ export function ChangesFileTree({
                   ) : (
                     <ChevronRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground" />
                   )}
-                  <FolderIcon name={row.name} open={row.expanded} />
-                  <span className="min-w-0 flex-1 truncate">
+                  <FolderIcon name={row.name} open={row.expanded} className={row.ignored ? "opacity-50" : undefined} />
+                  <span className={cn("min-w-0 flex-1 truncate", row.ignored && "text-muted-foreground opacity-70")}>
                     <Highlighted text={row.name} terms={terms} />
                   </span>
+                  {row.dot ? (
+                    <span aria-label="包含变更" className={cn("flex size-3 shrink-0 items-center justify-center", STATUS_TONE[row.dot])}>
+                      <span className="size-1.5 rounded-full bg-current" />
+                    </span>
+                  ) : null}
                 </>
-              ) : (
+              ) : row.file ? (
                 <FileRow name={row.name} file={row.file} comments={commentCounts?.get(row.file.path) ?? 0} terms={terms} />
+              ) : (
+                <PlainFileRow name={row.name} path={row.key} ignored={Boolean(row.ignored)} terms={terms} />
               )}
             </div>
           );
@@ -317,6 +352,19 @@ function FileRow({ name, file, comments, terms }: { name: string; file: ChangedF
       ) : null}
       <span className={cn("w-3 shrink-0 text-center font-mono text-xs", STATUS_TONE[file.status])}>
         {STATUS_LETTER[file.status]}
+      </span>
+    </>
+  );
+}
+
+/** An unchanged file of the whole-workspace tree; an ignored one is dimmed. */
+function PlainFileRow({ name, path, ignored, terms }: { name: string; path: string; ignored: boolean; terms: readonly string[] }) {
+  return (
+    <>
+      <span className="-mr-0.5 size-3.5 shrink-0" />
+      <FileTypeIcon path={path} className={ignored ? "opacity-50" : undefined} />
+      <span className={cn("min-w-0 flex-1 truncate", ignored && "text-muted-foreground opacity-70")}>
+        <Highlighted text={name} terms={terms} />
       </span>
     </>
   );

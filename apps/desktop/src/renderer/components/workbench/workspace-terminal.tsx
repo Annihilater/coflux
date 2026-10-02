@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FileDiff, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -9,7 +9,7 @@ import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu } from "@astryxdesign/core/DropdownMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
-import { ChangesView } from "@/components/workbench/changes-view";
+import { ChangesView, type FileReveal } from "@/components/workbench/changes-view";
 import { DRAG_REGION_STYLE, NO_DRAG_REGION_STYLE } from "@/components/workbench/drag-region";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
@@ -176,6 +176,8 @@ export type WorkspaceLayoutActions = {
   closeScreenTab: (workspaceId: string, tabId: string) => void;
   /** A file tab's close button / context menu (plan 20261001-terminal-file-tab): removes the tab, no confirmation. */
   closeFileTab: (workspaceId: string, tabId: string) => void;
+  /** 「在标签页中打开」 in the files overlay (plan 20261002-workspace-files-view): opens or focuses the file's tab. */
+  openFileTab: (workspaceId: string, path: string, line?: number) => void;
 };
 
 type WorkspaceTerminalProps = {
@@ -210,6 +212,8 @@ type WorkspaceTerminalProps = {
   newTabMenuGroupId: string | null;
   /** Terminal tabs opened as an agent (task id → agent id): their brand logo when no agent is detected. */
   agentTabs: Readonly<Record<string, AgentId>>;
+  /** The latest file the workbench asked the files overlay to reveal in this workspace (plan 20261002-workspace-files-view). */
+  fileReveal: FileReveal | null;
 };
 
 /**
@@ -540,6 +544,7 @@ export function WorkspaceTerminal({
   canOpenScreen,
   newTabMenuGroupId,
   agentTabs,
+  fileReveal,
 }: WorkspaceTerminalProps) {
   const workspace = useStore(client.store, (state) => state.workspaces.find((item) => item.id === workspaceId));
   const projectWorkspaces = useStore(
@@ -585,7 +590,8 @@ export function WorkspaceTerminal({
   );
 
   // Directory workspace (no repo, plan 045/048): the carrier of a device detail view. It keeps terminal
-  // tabs and ＋, but nothing with git semantics (branch button, changes overlay, diff) is rendered.
+  // tabs and ＋, but nothing with git semantics (branch button, diff) is rendered; the files overlay
+  // shows its tree without the git parts (plan 20261002-workspace-files-view).
   const isDirWorkspace = Boolean(workspace && isDirWorkspaceOf(workspace));
 
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
@@ -1404,36 +1410,37 @@ export function WorkspaceTerminal({
         </div>
       ) : null}
 
-      {/* The changes overlay: opened from the action dock, it covers the whole main area (every group stays
-          as it is underneath, agents keep running); pressing again or Esc returns to the groups. Kept alive
-          like the panes (hidden, not unmounted), so its collapsed state and fetched data survive. Its top
-          band is a window drag region as tall as a strip, so the window stays draggable while it is open; it
-          reserves both docks' space, the left one only while the sidebar is collapsed.
-          Directory workspaces have no git semantics and do not render it. */}
-      {isDirWorkspace ? null : (
-        <div className={cn("absolute inset-0 z-20 flex flex-col bg-terminal", changesOpen ? "" : "hidden")}>
-          <header
-            className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background pl-3 text-sm"
-            style={{ ...DRAG_REGION_STYLE, paddingRight: dockWidth, ...(leftDockReserve > 0 ? { paddingLeft: leftDockReserve } : null) }}
-          >
-            <FileDiff className="size-3 shrink-0 opacity-90" />
-            <span>变更</span>
-            <span className="text-sm text-muted-foreground">Esc 返回终端</span>
-          </header>
-          <div className="relative min-h-0 flex-1">
-            <div className="absolute inset-0">
-              <ChangesView
-                workspaceId={workspaceId}
-                active={shouldActivateChangesView(active, changesOpen)}
-                client={client}
-                defaultBranch={defaultBranch}
-                additions={workspace?.additions ?? 0}
-                deletions={workspace?.deletions ?? 0}
-              />
-            </div>
+      {/* The files overlay (「文件」, plan 20261002-workspace-files-view): opened from the action dock, it
+          covers the whole main area (every group stays as it is underneath, agents keep running); pressing
+          again or Esc returns to the groups. Kept alive like the panes (hidden, not unmounted), so its folded
+          state and fetched data survive. Its top band is a window drag region as tall as a strip, so the
+          window stays draggable while it is open; it reserves both docks' space, the left one only while the
+          sidebar is collapsed. Directory workspaces render it too, without its git parts. */}
+      <div className={cn("absolute inset-0 z-20 flex flex-col bg-terminal", changesOpen ? "" : "hidden")}>
+        <header
+          className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-background pl-3 text-sm"
+          style={{ ...DRAG_REGION_STYLE, paddingRight: dockWidth, ...(leftDockReserve > 0 ? { paddingLeft: leftDockReserve } : null) }}
+        >
+          <FolderTree className="size-3 shrink-0 opacity-90" />
+          <span>文件</span>
+          <span className="text-sm text-muted-foreground">Esc 返回终端</span>
+        </header>
+        <div className="relative min-h-0 flex-1">
+          <div className="absolute inset-0">
+            <ChangesView
+              workspaceId={workspaceId}
+              active={shouldActivateChangesView(active, changesOpen)}
+              client={client}
+              defaultBranch={defaultBranch}
+              additions={workspace?.additions ?? 0}
+              deletions={workspace?.deletions ?? 0}
+              isDirWorkspace={isDirWorkspace}
+              reveal={fileReveal}
+              onOpenFileTab={(path, line) => actions.openFileTab(workspaceId, path, line)}
+            />
           </div>
         </div>
-      )}
+      </div>
     </>
   );
 }

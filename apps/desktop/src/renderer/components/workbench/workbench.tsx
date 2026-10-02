@@ -2,7 +2,7 @@ import { PortMenu } from "./port-menu";
 import { NotificationInbox } from "./notification-inbox";
 import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
-import { AlertCircle, FileDiff, FolderGit2, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
+import { AlertCircle, FolderGit2, FolderTree, LoaderCircle, Monitor, Plus, RefreshCw, SquareTerminal, X } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Task, type Workspace } from "@coflux/protocol";
 
 import { AuthMessage, AuthShell, LoginScreen, authFooterText } from "@/components/auth/auth-shell";
@@ -60,6 +60,7 @@ import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
 import type { WorkspaceLayoutActions, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
+import type { FileReveal } from "@/components/workbench/changes-view";
 import {
   EMPTY_LAYOUT,
   PENDING_TAB_PREFIX,
@@ -460,6 +461,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // per-container view did. Ref mirror for the same synchronous-read reason.
   const [changesOpen, setChangesOpenState] = useState<Record<string, boolean>>({});
   const changesOpenRef = useRef(changesOpen);
+  // The last file each workspace's files overlay was asked to reveal (plan
+  // 20261002-workspace-files-view); `seq` is new for every request, so a repeat jumps again.
+  const [fileReveals, setFileReveals] = useState<Record<string, FileReveal>>({});
+  const fileRevealSeqRef = useRef(0);
   // Optimistic terminal creates (plan 078) are layout entries now: this holds each workspace's
   // fallback timer, and `settledCreatesRef` the creates the store subscription answered, which an
   // effect then starts.
@@ -790,6 +795,20 @@ export function Workbench({ client }: { client: CofluxClient }) {
     files.createTab(tabId, line === undefined ? { workspaceId, path } : { workspaceId, path, line });
     commitLayout(workspaceId, revealTab(layoutOf(workspaceId), tabId));
     if (workspaceId === activeWorkspaceIdRef.current) files.focus(tabId);
+  }
+
+  /**
+   * A terminal file link's ⌘+click or 打开文件 (plan 20261002-workspace-files-view): opens the 「文件」
+   * overlay of that workspace and asks its view to reveal the file — the view decides how (leave
+   * 「仅变更」, clear a hiding filter, open and list folders, select, land on the line). `path` is the
+   * canonical workspace-relative path the device reported. The file tab stays the secondary route
+   * (openFileTab, 「在标签页中打开」).
+   */
+  function revealFile(workspaceId: string, path: string, line?: number) {
+    fileRevealSeqRef.current += 1;
+    const seq = fileRevealSeqRef.current;
+    setFileReveals((current) => ({ ...current, [workspaceId]: line === undefined ? { path, seq } : { path, line, seq } }));
+    setWorkspaceChangesOpen(workspaceId, true);
   }
 
   /** Closing a file tab just removes it — no confirmation. The caret goes to the tab that takes its place. */
@@ -1628,6 +1647,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     },
     closeScreenTab,
     closeFileTab,
+    openFileTab,
     setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId } : null),
     focusActiveTab: (workspaceId) => {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
@@ -1792,6 +1812,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     canOpenScreen={canOpenScreenOn(workspace.daemonId)}
                     newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
                     agentTabs={agentLaunches.records}
+                    fileReveal={fileReveals[workspace.id] ?? null}
                   />
                 </div>
               );
@@ -1807,6 +1828,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
                 if (target) openBrowserTab(workspaceId, target);
               }}
               onOpenFile={openFileTab}
+              onRevealFile={revealFile}
               onPromptStart={agentLaunches.handlePromptStart}
               client={client}
               attach={attach}
@@ -2055,9 +2077,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
           is filled back in by the strip's later `drag`, and the dock's buttons get no click or mouseenter
           (dead buttons, no tooltips; see drag-region.ts). It is absolutely positioned, so being last only
           changes composition and paint order, not layout.
-          「变更」 (plan 20260923-terminal-split-groups) lives here instead of a resident tab: pressing it
-          covers the whole main area with the changes view, pressing again or Esc returns to the groups.
-          Directory workspaces have no git semantics and get no such button. */}
+          「文件」 (plan 20260923-terminal-split-groups, renamed from 「变更」 by plan 20261002-workspace-files-view)
+          lives here instead of a resident tab: pressing it covers the whole main area with the files view,
+          pressing again or Esc returns to the groups. Directory workspaces get it too; their tree has no git parts. */}
       <div
         ref={attachDock}
         role="group"
@@ -2066,11 +2088,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
         style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
       >
         <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
-        {activeWorkspace && !isDirWorkspace(activeWorkspace) ? (
-          <Tooltip content={selectedChangesOpen ? "返回终端 Esc" : "变更"} placement="below">
+        {activeWorkspace ? (
+          <Tooltip content={selectedChangesOpen ? "返回终端 Esc" : "文件"} placement="below">
             <button
               type="button"
-              aria-label="变更"
+              aria-label="文件"
               aria-pressed={selectedChangesOpen}
               className={cn(
                 "flex h-6 min-w-6 shrink-0 items-center justify-center gap-1.5 rounded-md px-1.5 transition-colors",
@@ -2078,7 +2100,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
               )}
               onClick={() => setWorkspaceChangesOpen(activeWorkspace.id, !selectedChangesOpen)}
             >
-              <FileDiff className="size-3.5" />
+              <FolderTree className="size-3.5" />
               {activeWorkspace.additions > 0 || activeWorkspace.deletions > 0 ? (
                 <span className="whitespace-nowrap font-mono text-xs tabular-nums">
                   <span className="text-success">+{activeWorkspace.additions}</span>{" "}

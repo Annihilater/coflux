@@ -20,7 +20,7 @@ const files = [
 test("single-child folder chains compact into one row, folders before files", () => {
   const rows = flattenTree(buildChangesTree(files), new Set());
   assert.deepEqual(
-    rows.map((row) => `${"  ".repeat(row.depth)}${row.kind === "dir" ? `${row.name}/` : row.name}`),
+    rows.map((row) => `${"  ".repeat(row.depth)}${row.kind === "dir" ? `${row.name}/` : row.kind === "file" ? row.name : `(${row.text})`}`),
     [
       "apps/desktop/src/",
       "  renderer/components/",
@@ -32,7 +32,7 @@ test("single-child folder chains compact into one row, folders before files", ()
       "README.md",
     ],
   );
-  const renderer = rows.find((row) => row.name === "renderer/components");
+  const renderer = rows.find((row) => row.kind === "dir" && row.name === "renderer/components");
   assert.equal(renderer?.key, "apps/desktop/src/renderer/components");
 });
 
