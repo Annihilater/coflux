@@ -60,4 +60,3 @@ pub fn fail(what: &str, next: &str, code: i32) -> ! {
     error(what, next);
     std::process::exit(code)
 }
-
