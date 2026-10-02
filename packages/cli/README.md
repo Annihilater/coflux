@@ -50,6 +50,31 @@ cofluxd up --key <join key>
 
 Get the command, join key included, from **Add device → Headless** in the Coflux desktop app. The key is single use and valid for one hour; the host joins your account as soon as the command runs. Without `--key`, `cofluxd up` prints an authorization link instead: open it in a browser signed in to your account. Use `cofluxd status`, `cofluxd doctor`, or `cofluxd logs -f` to inspect it.
 
+`cofluxd up` picks how the service runs:
+
+- **macOS**: a launchd agent.
+- **Linux with systemd**: systemd user units. If `systemctl --user` does not work in your session, `up` stops with an error instead of reporting success.
+- **Linux without systemd** (a container, WSL without systemd, Alpine/OpenRC): cofluxd runs the service itself. `cofluxd status` shows it as `running (self-managed, no autostart)`. If the service process crashes it is restarted with terminals kept. `status`, `logs`, `restart`, `down` and `uninstall` all work, but nothing starts it again after a reboot: run `cofluxd up` again, or use `cofluxd run` under your own supervisor.
+
+## Containers and other supervisors: `cofluxd run`
+
+`cofluxd run` takes the same flags as `up`, downloads the binaries if needed, and runs the service in the foreground with its log on stdout and stderr. An unregistered device prints its authorization link in that output. `run` exits non-zero when its terminals' host stops, so the outer supervisor (a Docker restart policy, s6, supervisord, tmux) can start it again; SIGTERM or Ctrl-C stops everything and exits 0. A rejected join key is reported and `run` keeps running, so a restart policy never loops on a spent key. `run` refuses to start while another Coflux service runs for the same `~/.coflux`; stop that one with `cofluxd down` first.
+
+```dockerfile
+FROM node:22
+RUN npm install -g cofluxd
+VOLUME /root/.coflux
+ENTRYPOINT ["cofluxd", "run"]
+```
+
+```sh
+docker build -t coflux-device .
+docker run -d --init --restart unless-stopped --name coflux-device \
+  -v coflux-home:/root/.coflux coflux-device --key <join key>
+```
+
+Use `--init` (or `init: true` in Compose): Node does not reap orphaned processes when it is PID 1. Keep `~/.coflux` on a volume so the device keeps its identity and binaries across restarts; once the device has joined, the key is ignored. `docker stop` ends the terminals and exits cleanly.
+
 ## Operate your workspaces
 
 ```sh
@@ -82,9 +107,9 @@ The CLI bundled with the desktop app can reuse the app's login through a local c
 
 ## Upgrades and terminal lifetime
 
-Updating this npm package does not end running terminals. `cofluxd update` downloads runtime artifacts without restarting the Supervisor that owns the PTYs. Apply that update with `cofluxd restart` after your tasks finish.
+Updating this npm package does not end running terminals. `cofluxd update` downloads the new version without restarting anything; it tells you when `cofluxd restart` is needed to apply it.
 
-`cofluxd restart` and `cofluxd down` end local terminal processes. The desktop app stays online in the background; fully quitting or signing out ends its local terminals after confirmation.
+`cofluxd restart` keeps terminals open. `cofluxd restart --ptyd` and `cofluxd down` end local terminal processes. The desktop app stays online in the background; fully quitting or signing out ends its local terminals after confirmation.
 
 Starting with 1.0, operation commands such as `cofluxd terminal` and `cofluxd login` have been removed. Use `coflux terminal` and `coflux login`. The MCP interface has also been removed in favor of the CLI.
 
