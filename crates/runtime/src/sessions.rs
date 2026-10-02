@@ -10,8 +10,6 @@
 //! resize 日志，然后才起 worker。
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, Weak};
@@ -28,14 +26,15 @@ use coflux_protocol::wire::{
     DeviceSessionSnapshotRequest, DeviceSessionStop, TerminalCommandState,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
-    DataFrame, SessionInfo, SupervisorToWorker, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
-    MAX_FRAME_ID_BYTES, MAX_TERMINAL_DIMENSION, MIN_TERMINAL_DIMENSION,
+    decode_device_envelope, encode_device_envelope, write_record, CommandStateInfo,
+    DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES, MAX_TERMINAL_DIMENSION,
+    MIN_TERMINAL_DIMENSION,
 };
 use coflux_ptyd::{InputChannel, PtydClient, PtydError, SubscriptionEvent};
 use rand_core::{OsRng, RngCore};
 
 use crate::sessiond::{Checkpoint, ControlError, InputAdmission, SequencedDecision, SessionState, TerminalState};
+use crate::sessiond_ipc::{encode_frame, DataFrame, SessionInfo, SessiondEvent};
 use crate::shell_integration;
 
 /// 把 `segment` 放到 PATH 首段（plan 112）：原 PATH 为空/缺失时就只有这一段；其余段顺序不变；
@@ -103,7 +102,7 @@ fn spawn_subscription_forwarder(
                 SubscriptionEvent::Output { from_offset, data } => {
                     if from_offset != next {
                         logln!(
-                            "[supervisor] ptyd 输出偏移不连续 session={session_id} expected={next} got={from_offset}"
+                            "[sessiond] ptyd 输出偏移不连续 session={session_id} expected={next} got={from_offset}"
                         );
                     }
                     next = from_offset.saturating_add(data.len() as u64);
@@ -298,10 +297,11 @@ struct ConnectionSink {
     generation: u64,
     sender: SyncSender<Vec<u8>>,
     pending_bytes: Arc<AtomicUsize>,
-    shutdown: Option<UnixStream>,
 }
 
-/// 每次 worker 连接拥有独立有界队列/写线程；旧写端即使永久阻塞，也不能卡住新 worker 或 PTY。
+/// Every attachment of the runtime core owns its own bounded queue and forwarding thread; a
+/// stalled old consumer can never hold up the new one or the PTYs. The records cross into the
+/// tokio side over an in-process channel (plan 20261002-runtime-launcher-merge), no UDS.
 pub struct Outbound {
     current: Mutex<Option<ConnectionSink>>,
     record_limit: usize,
@@ -321,46 +321,38 @@ impl Outbound {
         })
     }
 
-    pub fn connect(self: &Arc<Self>, generation: u64, mut stream: UnixStream) {
+    pub fn connect(self: &Arc<Self>, generation: u64, sink: tokio::sync::mpsc::Sender<Vec<u8>>) {
         let (sender, receiver) = sync_channel(self.record_limit);
         let pending_bytes = Arc::new(AtomicUsize::new(0));
-        let shutdown = stream.try_clone().ok();
         self.replace(Some(ConnectionSink {
             generation,
             sender,
             pending_bytes: pending_bytes.clone(),
-            shutdown,
         }));
         let this = Arc::clone(self);
         thread::spawn(move || {
-            use std::io::Write;
             for record in receiver {
                 let length = record.len();
-                if !this.is_current(generation) || stream.write_all(&record).is_err() {
+                if !this.is_current(generation) || sink.blocking_send(record).is_err() {
                     pending_bytes.fetch_sub(length, Ordering::AcqRel);
                     break;
                 }
                 pending_bytes.fetch_sub(length, Ordering::AcqRel);
             }
             this.disconnect(generation);
-            // 同一 socket 的 read clone 可能仍阻塞；shutdown 使旧 handler 及时退出，不能继续变更 authority。
-            let _ = stream.shutdown(Shutdown::Both);
+            // Dropping `sink` ends the consumer's receive loop, which re-attaches with a new
+            // generation and resyncs; the old attachment can never change authority again.
         });
     }
 
     pub fn disconnect(&self, generation: u64) {
-        let removed = {
-            let mut current = self.current.lock().unwrap();
-            if current
-                .as_ref()
-                .is_some_and(|sink| sink.generation == generation)
-            {
-                current.take()
-            } else {
-                None
-            }
-        };
-        Self::shutdown(removed);
+        let mut current = self.current.lock().unwrap();
+        if current
+            .as_ref()
+            .is_some_and(|sink| sink.generation == generation)
+        {
+            current.take();
+        }
     }
 
     fn clear(&self) {
@@ -368,14 +360,8 @@ impl Outbound {
     }
 
     fn replace(&self, replacement: Option<ConnectionSink>) {
-        let previous = std::mem::replace(&mut *self.current.lock().unwrap(), replacement);
-        Self::shutdown(previous);
-    }
-
-    fn shutdown(sink: Option<ConnectionSink>) {
-        if let Some(stream) = sink.and_then(|sink| sink.shutdown) {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
+        // Dropping the previous sender ends its forwarding thread once it drains.
+        drop(std::mem::replace(&mut *self.current.lock().unwrap(), replacement));
     }
 
     fn is_current(&self, generation: u64) -> bool {
@@ -403,9 +389,7 @@ impl Outbound {
             }
             Err(TrySendError::Disconnected(_)) => {
                 sink.pending_bytes.fetch_sub(length, Ordering::AcqRel);
-                let removed = current.take();
-                drop(current);
-                Self::shutdown(removed);
+                current.take();
                 false
             }
         }
@@ -417,7 +401,6 @@ impl Outbound {
             generation,
             sender,
             pending_bytes: Arc::new(AtomicUsize::new(0)),
-            shutdown: None,
         }));
     }
 }
@@ -466,21 +449,21 @@ fn legacy_create_response(
     task_id: &str,
     existing: Option<(String, i32)>,
     error: &str,
-) -> SupervisorToWorker {
+) -> SessiondEvent {
     match existing {
         Some((existing_task_id, pid)) if existing_task_id == task_id => {
-            SupervisorToWorker::SessionStarted {
+            SessiondEvent::SessionStarted {
                 session_id: session_id.to_string(),
                 task_id: existing_task_id,
                 pid,
             }
         }
-        Some((existing_task_id, _)) => SupervisorToWorker::SessionCreateFailed {
+        Some((existing_task_id, _)) => SessiondEvent::SessionCreateFailed {
             session_id: session_id.to_string(),
             task_id: task_id.to_string(),
             error: format!("{error}；session id 当前属于 task {existing_task_id}"),
         },
-        None => SupervisorToWorker::SessionExit {
+        None => SessiondEvent::SessionExit {
             session_id: session_id.to_string(),
             exit_code: -1,
             task_id: Some(task_id.to_string()),
@@ -723,7 +706,7 @@ impl InputSink for PtydInputSink {
             // slave 端已经没了：与过去 master 上的 EIO 同义，是收尾窗口不是故障。errno 必须保留
             // （`is_teardown_write_failure` 靠它），ptyd 的说明文字进日志。
             Err(PtydError::Remote { code, message }) if code == "pty_closed" => {
-                logln!("[supervisor] ptyd 报告 PTY 已关闭 session={session_id} seq={input_seq}: {message}");
+                logln!("[sessiond] ptyd 报告 PTY 已关闭 session={session_id} seq={input_seq}: {message}");
                 Err(PtyWriteFailure {
                     written: 0,
                     error: std::io::Error::from_raw_os_error(libc::EIO),
@@ -843,7 +826,7 @@ impl Sessions {
         self.outbound.try_send(record)
     }
 
-    fn send_ctrl(&self, message: &SupervisorToWorker) -> bool {
+    fn send_ctrl(&self, message: &SessiondEvent) -> bool {
         serde_json::to_vec(message)
             .ok()
             .and_then(|bytes| write_record(&bytes).ok())
@@ -852,11 +835,11 @@ impl Sessions {
 
     /// 生命周期 control 一旦因有界队列满而未入队，主动切断当前 UDS，迫使 worker
     /// 重连并通过 resync.list / session catalog 从 supervisor 权威状态收敛。
-    fn send_ctrl_or_disconnect(&self, message: &SupervisorToWorker, context: &str) -> bool {
+    fn send_ctrl_or_disconnect(&self, message: &SessiondEvent, context: &str) -> bool {
         if self.send_ctrl(message) {
             return true;
         }
-        logln!("[supervisor] control 未入队，断开 worker 触发 resync: {context}");
+        logln!("[sessiond] control 未入队，断开 worker 触发 resync: {context}");
         self.outbound.clear();
         false
     }
@@ -991,14 +974,14 @@ impl Sessions {
     ) {
         let message = legacy_create_response(session_id, task_id, existing, error);
         match &message {
-            SupervisorToWorker::SessionStarted { pid, .. } => {
-                logln!("[supervisor] duplicate session create 幂等重放 {session_id} pid={pid}");
+            SessiondEvent::SessionStarted { pid, .. } => {
+                logln!("[sessiond] duplicate session create 幂等重放 {session_id} pid={pid}");
             }
-            SupervisorToWorker::SessionCreateFailed { error, .. } => {
-                logln!("[supervisor] session create identity 冲突 {session_id}: {error}");
+            SessiondEvent::SessionCreateFailed { error, .. } => {
+                logln!("[sessiond] session create identity 冲突 {session_id}: {error}");
             }
-            SupervisorToWorker::SessionExit { .. } => {
-                logln!("[supervisor] session create failed {session_id}: {error}");
+            SessiondEvent::SessionExit { .. } => {
+                logln!("[sessiond] session create failed {session_id}: {error}");
             }
             _ => unreachable!("legacy create 只生成 session 生命周期回执"),
         }
@@ -1122,7 +1105,7 @@ impl Sessions {
         // 剪贴板走本机 pbcopy 还是 OSC 52。只注入 SSH_TTY 一个：它的值是本 session 真实存在的设备路径
         // （程序可能去 stat/open），取不到就不注入——宁可少一个变量，也不能给出一条 stat 不到的路径。
         if tty.is_empty() {
-            logln!("[supervisor] 取不到 PTY 设备路径，{session_id} 不注入 SSH_TTY");
+            logln!("[sessiond] 取不到 PTY 设备路径，{session_id} 不注入 SSH_TTY");
         } else {
             env.insert("SSH_TTY".into(), tty);
         }
@@ -1171,9 +1154,9 @@ impl Sessions {
             self.bump_snapshot_epoch();
             session
         };
-        logln!("[supervisor] session started {session_id} pid={pid}");
+        logln!("[sessiond] session started {session_id} pid={pid}");
         self.send_ctrl_or_disconnect(
-            &SupervisorToWorker::SessionStarted {
+            &SessiondEvent::SessionStarted {
                 session_id: session_id.clone(),
                 task_id,
                 pid,
@@ -1243,7 +1226,7 @@ impl Sessions {
                             }
                             Err(error) => {
                                 logln!(
-                                    "[supervisor] PTY input commit 失败 session={session_id} seq={}: {}",
+                                    "[sessiond] PTY input commit 失败 session={session_id} seq={}: {}",
                                     input.input_seq, error.message
                                 );
                                 let mut locked = session.lock().unwrap();
@@ -1267,7 +1250,7 @@ impl Sessions {
                     Err(failure) if failure.rejected.is_some() => {
                         let code = failure.rejected.clone().unwrap_or_default();
                         logln!(
-                            "[supervisor] ptyd 拒绝 input（{code}）session={session_id} seq={}: {}",
+                            "[sessiond] ptyd 拒绝 input（{code}）session={session_id} seq={}: {}",
                             input.input_seq,
                             failure.error
                         );
@@ -1290,7 +1273,7 @@ impl Sessions {
                     // 必然拿到 EIO。只写一行日志，不向 client 发 device error。
                     Err(failure) if is_teardown_write_failure(&failure) => {
                         logln!(
-                            "[supervisor] PTY input 落在 session 收尾窗口（slave 端已关闭）session={session_id} seq={} bytes={length}: {}",
+                            "[sessiond] PTY input 落在 session 收尾窗口（slave 端已关闭）session={session_id} seq={} bytes={length}: {}",
                             input.input_seq,
                             failure.error
                         );
@@ -1319,7 +1302,7 @@ impl Sessions {
                             )
                         };
                         logln!(
-                            "[supervisor] {code} session={session_id} seq={} written={}/{}: {}",
+                            "[sessiond] {code} session={session_id} seq={} written={}/{}: {}",
                             input.input_seq,
                             failure.written,
                             length,
@@ -1425,7 +1408,7 @@ impl Sessions {
             let (chunks, exit) = match this.ptyd.subscribe(&session_id, from_offset) {
                 Ok(events) => spawn_subscription_forwarder(session_id.clone(), events, from_offset),
                 Err(error) => {
-                    logln!("[supervisor] ptyd 订阅失败 session={session_id}: {error}");
+                    logln!("[sessiond] ptyd 订阅失败 session={session_id}: {error}");
                     // 订阅不上就没法当这个 session 的 authority：收掉它，走统一的退出路径。
                     this.discard_ptyd_session(session_id.clone());
                     let (_, receiver) = sync_channel::<Vec<u8>>(1);
@@ -1442,7 +1425,7 @@ impl Sessions {
                 // and do-script wake immediately (snapshots carry the same state as a
                 // fallback). Best effort — a dropped push is repaired by the next snapshot.
                 if let Some(state) = locked.state.take_command_change() {
-                    let _ = this.send_ctrl(&SupervisorToWorker::SessionCommand {
+                    let _ = this.send_ctrl(&SessiondEvent::SessionCommand {
                         session_id: session_id.clone(),
                         state,
                     });
@@ -1457,7 +1440,7 @@ impl Sessions {
                     Ok(frame) => frame,
                     Err(error) => {
                         logln!(
-                            "[supervisor] session dirty frame 编码失败 session={session_id}: {error}"
+                            "[sessiond] session dirty frame 编码失败 session={session_id}: {error}"
                         );
                         return;
                     }
@@ -1486,7 +1469,7 @@ impl Sessions {
                 drop(locked);
                 if let Some(checkpoint) = checkpoint {
                     if let Err(error) = this.ptyd.checkpoint(&session_id, checkpoint.output_seq, &checkpoint.encode()) {
-                        logln!("[supervisor] checkpoint 写入 ptyd 失败 session={session_id}: {error}");
+                        logln!("[sessiond] checkpoint 写入 ptyd 失败 session={session_id}: {error}");
                     }
                 }
             }
@@ -1527,7 +1510,7 @@ impl Sessions {
             drop(locked);
 
             if transitioned {
-                logln!("[supervisor] session exited {session_id} code={code}");
+                logln!("[sessiond] session exited {session_id} code={code}");
                 for channel_id in channels {
                     this.send_device(
                         &channel_id,
@@ -1539,7 +1522,7 @@ impl Sessions {
                     );
                 }
                 this.send_ctrl_or_disconnect(
-                    &SupervisorToWorker::SessionExit {
+                    &SessiondEvent::SessionExit {
                         session_id: session_id.clone(),
                         exit_code: code,
                         task_id: Some(task_id),
@@ -1550,7 +1533,7 @@ impl Sessions {
             }
             // 退出事实已进 tombstone：让 ptyd 释放 ring 文件。失败只记日志（ptyd 可能已经不在）。
             if let Err(error) = this.ptyd.remove(&session_id) {
-                logln!("[supervisor] ptyd remove 失败 session={session_id}: {error}");
+                logln!("[sessiond] ptyd remove 失败 session={session_id}: {error}");
             }
         });
     }
@@ -1579,26 +1562,26 @@ impl Sessions {
         let infos = match self.ptyd.list() {
             Ok(infos) => infos,
             Err(error) => {
-                logln!("[supervisor] 无法从 ptyd 枚举 session：{error}");
+                logln!("[sessiond] 无法从 ptyd 枚举 session：{error}");
                 return;
             }
         };
         let live = infos.iter().filter(|info| info.exit_code.is_none() && info.pid > 0).count();
-        logln!("[supervisor] ptyd 上有 {} 个 session（{live} 个仍在运行），开始恢复", infos.len());
+        logln!("[sessiond] ptyd 上有 {} 个 session（{live} 个仍在运行），开始恢复", infos.len());
         for info in infos {
             let session_id = info.session_id.clone();
             match self.recover_one(info) {
                 Ok(RecoveredSession::Live { degraded }) => {
                     logln!(
-                        "[supervisor] session 已恢复 {session_id}{}",
+                        "[sessiond] session 已恢复 {session_id}{}",
                         if degraded { "（退化：无可用 checkpoint）" } else { "" }
                     );
                 }
                 Ok(RecoveredSession::Exited(code)) => {
-                    logln!("[supervisor] session 在 supervisor 缺席期间已退出 {session_id} code={code}");
+                    logln!("[sessiond] session 在 supervisor 缺席期间已退出 {session_id} code={code}");
                 }
                 Err(error) => {
-                    logln!("[supervisor] session 恢复失败 {session_id}：{error}");
+                    logln!("[sessiond] session 恢复失败 {session_id}：{error}");
                 }
             }
         }
@@ -1608,7 +1591,7 @@ impl Sessions {
         let session_id = info.session_id.clone();
         let label: SessionLabel = serde_json::from_str(&info.label).unwrap_or_default();
         if label.v != SESSION_LABEL_VERSION && !info.label.is_empty() {
-            logln!("[supervisor] session 标签版本不认识 {session_id} v={}，按空元数据恢复", label.v);
+            logln!("[sessiond] session 标签版本不认识 {session_id} v={}，按空元数据恢复", label.v);
         }
         let task_id = label.task_id;
         let cwd = if label.cwd.is_empty() { self.home.clone() } else { label.cwd };
@@ -1642,17 +1625,17 @@ impl Sessions {
                 Ok(Some((offset, blob))) => match Checkpoint::decode(&blob) {
                     Some(checkpoint) if checkpoint.output_seq == offset && offset <= info.output_offset => Some(checkpoint),
                     Some(_) => {
-                        logln!("[supervisor] checkpoint 偏移与 ptyd 不一致 {session_id}，只回放 ring");
+                        logln!("[sessiond] checkpoint 偏移与 ptyd 不一致 {session_id}，只回放 ring");
                         None
                     }
                     None => {
-                        logln!("[supervisor] checkpoint blob 无法解析 {session_id}，只回放 ring");
+                        logln!("[sessiond] checkpoint blob 无法解析 {session_id}，只回放 ring");
                         None
                     }
                 },
                 Ok(None) => None,
                 Err(error) => {
-                    logln!("[supervisor] 读 checkpoint blob 失败 {session_id}：{error}，只回放 ring");
+                    logln!("[sessiond] 读 checkpoint blob 失败 {session_id}：{error}，只回放 ring");
                     None
                 }
             }
@@ -1681,7 +1664,7 @@ impl Sessions {
             match self.ptyd.resizes(&session_id) {
                 Ok(entries) => entries.into_iter().filter(|entry| entry.offset >= cursor).collect(),
                 Err(error) => {
-                    logln!("[supervisor] 读 resize 日志失败 {session_id}：{error}");
+                    logln!("[sessiond] 读 resize 日志失败 {session_id}：{error}");
                     VecDeque::new()
                 }
             }
@@ -1692,12 +1675,32 @@ impl Sessions {
         // 3) 回放 ring 到 list 时的末尾；之后的字节由订阅接上。
         let target = info.output_offset;
         let mut replay_ok = true;
+        // Pipelined reads on a dedicated connection (plan 20261002-runtime-launcher-merge): the
+        // degraded path replays up to a whole ring, and one round trip per chunk dominated it.
+        // Any failure falls back to the sequential read below for the rest of the segment.
+        let mut pipelined = crate::ptyd_reader::PipelinedReader::open(self.ptyd.socket_path());
         while cursor < target {
             while resizes.front().is_some_and(|entry| entry.offset <= cursor) {
                 let entry = resizes.pop_front().unwrap();
                 state.resize(entry.rows, entry.cols);
             }
             let stop = resizes.front().map_or(target, |entry| entry.offset.min(target));
+            if let Some(reader) = pipelined.as_mut() {
+                let mut advanced = 0u64;
+                let outcome = reader.read_range(&session_id, cursor, stop, |chunk| {
+                    state.feed(chunk);
+                    advanced += chunk.len() as u64;
+                });
+                cursor += advanced;
+                match outcome {
+                    Ok(()) => continue,
+                    Err(error) => {
+                        logln!("[sessiond] pipelined ring replay fell back to sequential reads {session_id} offset={cursor}: {error}");
+                        pipelined = None;
+                        continue;
+                    }
+                }
+            }
             let want = (stop - cursor).min(u64::from(PTYD_MAX_READ_BYTES)) as u32;
             match self.ptyd.read(&session_id, cursor, want) {
                 Ok((at, data)) if at == cursor && !data.is_empty() => {
@@ -1709,7 +1712,7 @@ impl Sessions {
                     break;
                 }
                 Err(error) => {
-                    logln!("[supervisor] 回放 ring 失败 {session_id} offset={cursor}：{error}");
+                    logln!("[sessiond] 回放 ring 失败 {session_id} offset={cursor}：{error}");
                     replay_ok = false;
                     break;
                 }
@@ -1742,7 +1745,7 @@ impl Sessions {
                     }
                     cursors_restored = true;
                 }
-                Err(error) => logln!("[supervisor] 读输入游标失败 {session_id}：{error}"),
+                Err(error) => logln!("[sessiond] 读输入游标失败 {session_id}：{error}"),
             }
         }
         if !cursors_restored {
@@ -1826,7 +1829,7 @@ impl Sessions {
                 }
             })
             .collect();
-        self.send_ctrl(&SupervisorToWorker::ResyncList {
+        self.send_ctrl(&SessiondEvent::ResyncList {
             nonce,
             snapshot_owner_id: self.snapshot_owner_id.clone(),
             snapshot_epoch: self.snapshot_epoch.load(Ordering::Acquire),
@@ -2235,7 +2238,7 @@ impl Sessions {
             // 应答，retained input 由 sessionExited 释放。只有 device_input 这一处静默，
             // attach/stop/snapshot/resize 的 session_not_found 仍回答调用方的真实提问。
             logln!(
-                "[supervisor] PTY input 落在 session 收尾窗口（session 已退出）session={} seq={} bytes={}",
+                "[sessiond] PTY input 落在 session 收尾窗口（session 已退出）session={} seq={} bytes={}",
                 request.session_id,
                 request.input_seq,
                 request.data.len()
@@ -2284,7 +2287,7 @@ impl Sessions {
                     // 同 seq 重投走 Pending，整个 SessionState 随 session 一起析构。
                     Err(InputQueueError::Disconnected) => {
                         logln!(
-                            "[supervisor] PTY input 落在 session 收尾窗口（writer 已停止）session={session_id} seq={} bytes={input_bytes}",
+                            "[sessiond] PTY input 落在 session 收尾窗口（writer 已停止）session={session_id} seq={} bytes={input_bytes}",
                             request.input_seq
                         );
                         Ok(None)
@@ -2295,7 +2298,7 @@ impl Sessions {
                             .cancel_input_reservation(&client_instance_id, request.input_seq)
                         {
                             logln!(
-                                "[supervisor] input reservation 回滚失败 session={session_id} seq={}",
+                                "[sessiond] input reservation 回滚失败 session={session_id} seq={}",
                                 request.input_seq
                             );
                         }
@@ -2502,44 +2505,30 @@ impl Sessions {
         self.send_device(channel_id, device_envelope::Payload::OperationAck(ack));
     }
 
-    pub fn worker_connected(self: &Arc<Self>, generation: u64, stream: UnixStream) {
+    pub fn worker_connected(self: &Arc<Self>, generation: u64, sink: tokio::sync::mpsc::Sender<Vec<u8>>) {
         self.outbound.clear();
         let sessions: Vec<SessionHandle> = self.map.lock().unwrap().values().cloned().collect();
         for session in sessions {
             session.lock().unwrap().state.clear_subscribers();
         }
-        self.outbound.connect(generation, stream);
+        self.outbound.connect(generation, sink);
+    }
+
+    /// Live session ids sessiond currently serves (the set reported to the launcher).
+    pub fn live_session_ids(&self) -> Vec<String> {
+        self.map.lock().unwrap().keys().cloned().collect()
     }
 
     pub fn worker_disconnected(&self, generation: u64) {
         self.outbound.disconnect(generation);
     }
 
-    /// 桌面退出确认直接读取本机事实，不依赖网络中的任务快照。
-    pub fn desktop_sessions(&self) -> Vec<serde_json::Value> {
-        let handles: Vec<_> = self
-            .map
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, session)| (id.clone(), session.clone()))
-            .collect();
-        handles
-            .into_iter()
-            .map(|(id, session)| {
-                let session = session.lock().unwrap();
-                serde_json::json!({"id":id,"taskId":session.task_id,"pid":session.pid})
-            })
-            .collect()
+    /// Cut whatever attachment is current (a resync that could not be queued): the bridge then
+    /// re-attaches with a fresh generation and asks again.
+    pub fn worker_disconnected_current(&self) {
+        self.outbound.clear();
     }
 
-    /// 结束本机全部终端（"停止"，不是"替换 supervisor"）：让 ptyd 杀掉每个 shell。
-    pub fn shutdown(&self) {
-        let ids: Vec<String> = self.map.lock().unwrap().keys().cloned().collect();
-        for session_id in ids {
-            let _ = self.ptyd.kill(&session_id);
-        }
-    }
 }
 
 enum RecoveredSession {
@@ -2897,7 +2886,7 @@ mod tests {
         let declared = u32::from_be_bytes(record[..4].try_into().unwrap()) as usize;
         assert_eq!(declared, record.len() - 4);
         let DataFrame::Device { channel_id, data } =
-            coflux_protocol::decode_frame(&record[4..]).expect("catalog 应使用 Device frame")
+            crate::sessiond_ipc::decode_frame(&record[4..]).expect("catalog 应使用 Device frame")
         else {
             panic!("catalog 应使用 Device frame");
         };
@@ -2910,7 +2899,7 @@ mod tests {
         (encoded_bytes, catalog)
     }
 
-    fn receive_control(receiver: &Receiver<Vec<u8>>) -> SupervisorToWorker {
+    fn receive_control(receiver: &Receiver<Vec<u8>>) -> SessiondEvent {
         let record = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("supervisor 应发送 lifecycle control");
@@ -2936,7 +2925,7 @@ mod tests {
 
     fn device_payload_of(record: &[u8]) -> Option<device_envelope::Payload> {
         let body = record.get(4..)?;
-        let DataFrame::Device { data, .. } = coflux_protocol::decode_frame(body)? else {
+        let DataFrame::Device { data, .. } = crate::sessiond_ipc::decode_frame(body)? else {
             return None;
         };
         decode_device_envelope(&data)?.payload
@@ -3004,9 +2993,9 @@ mod tests {
                 payloads.push(payload);
                 continue;
             }
-            if let Ok(SupervisorToWorker::SessionExit {
+            if let Ok(SessiondEvent::SessionExit {
                 session_id: exited, ..
-            }) = serde_json::from_slice::<SupervisorToWorker>(&record[4..])
+            }) = serde_json::from_slice::<SessiondEvent>(&record[4..])
             {
                 if exited == session_id {
                     break;
@@ -3490,7 +3479,7 @@ mod tests {
             Some(("task-1".into(), 42)),
             "duplicate session id",
         ) {
-            SupervisorToWorker::SessionStarted {
+            SessiondEvent::SessionStarted {
                 session_id,
                 task_id,
                 pid,
@@ -3508,7 +3497,7 @@ mod tests {
             Some(("task-live".into(), 42)),
             "duplicate session id",
         ) {
-            SupervisorToWorker::SessionCreateFailed {
+            SessiondEvent::SessionCreateFailed {
                 session_id,
                 task_id,
                 error,
@@ -3521,7 +3510,7 @@ mod tests {
         }
 
         match legacy_create_response("session-2", "task-2", None, "spawn failed") {
-            SupervisorToWorker::SessionExit {
+            SessiondEvent::SessionExit {
                 session_id,
                 exit_code,
                 task_id,
@@ -3557,7 +3546,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             receive_control(&receiver),
-            SupervisorToWorker::SessionStarted { ref session_id, pid, .. }
+            SessiondEvent::SessionStarted { ref session_id, pid, .. }
                 if session_id == "duplicate-first" && pid == first_pid
         ));
         let first = sessions.get("duplicate-first").unwrap();
@@ -3569,7 +3558,7 @@ mod tests {
         ));
         assert!(matches!(
             receive_control(&receiver),
-            SupervisorToWorker::SessionStarted { ref session_id, pid, .. }
+            SessiondEvent::SessionStarted { ref session_id, pid, .. }
                 if session_id == "duplicate-first" && pid == first_pid
         ));
         let (first_task, first_pid) = {
@@ -3582,7 +3571,7 @@ mod tests {
             identity
         };
         assert!(sessions.send_ctrl_or_disconnect(
-            &SupervisorToWorker::SessionExit {
+            &SessiondEvent::SessionExit {
                 session_id: "duplicate-first".into(),
                 exit_code: 0,
                 task_id: Some(first_task),
@@ -3592,7 +3581,7 @@ mod tests {
         ));
         assert!(matches!(
             receive_control(&receiver),
-            SupervisorToWorker::SessionExit { ref session_id, pid: Some(pid), .. }
+            SessiondEvent::SessionExit { ref session_id, pid: Some(pid), .. }
                 if session_id == "duplicate-first" && pid == first_pid
         ));
 
@@ -3611,7 +3600,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             receive_control(&receiver),
-            SupervisorToWorker::SessionStarted { ref session_id, pid, .. }
+            SessiondEvent::SessionStarted { ref session_id, pid, .. }
                 if session_id == "exit-first" && pid == second_pid
         ));
         let second = sessions.get("exit-first").unwrap();
@@ -3634,7 +3623,7 @@ mod tests {
         let second_task = locked.task_id.clone();
         let _ = sessions.ptyd.kill("exit-first");
         assert!(sessions.send_ctrl_or_disconnect(
-            &SupervisorToWorker::SessionExit {
+            &SessiondEvent::SessionExit {
                 session_id: "exit-first".into(),
                 exit_code: 0,
                 task_id: Some(second_task),
@@ -3646,7 +3635,7 @@ mod tests {
         assert!(!responder.join().unwrap());
         assert!(matches!(
             receive_control(&receiver),
-            SupervisorToWorker::SessionExit { ref session_id, pid: Some(pid), .. }
+            SessiondEvent::SessionExit { ref session_id, pid: Some(pid), .. }
                 if session_id == "exit-first" && pid == second_pid
         ));
         assert_eq!(
@@ -3665,7 +3654,7 @@ mod tests {
         let (sessions, _ptyd) = test_sessions(Arc::clone(&outbound), "/bin/sh");
 
         assert!(!sessions.send_ctrl_or_disconnect(
-            &SupervisorToWorker::SessionExit {
+            &SessiondEvent::SessionExit {
                 session_id: "session-1".into(),
                 exit_code: 0,
                 task_id: Some("task-1".into()),

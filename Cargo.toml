@@ -1,9 +1,10 @@
-# Rust workspace —— daemon 全 Rust 化（热升级 #2 的打包基础：无 node 运行时依赖）。
-# 渐进式：UDS/WS 都是语言中立线协议，故可一次 Rust 化一个进程，另一个保持 TS，
-# 现有黑盒测试照样端到端验证。先 protocol crate，再 supervisor，再 worker。
+# Rust workspace: the daemon is pure Rust, no node runtime.
+# Device process set (plan 20261002-runtime-launcher-merge): coflux-ptyd (owns every PTY, near-zero
+# change rate), coflux-launcher (version pointer, probation, rollback; rarely changes) and
+# coflux-runtime (sessiond + centre connection + git/exec/fs + local gateway; the unit that updates).
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/ptyd", "crates/supervisor", "crates/worker", "crates/cli"]
+members = ["crates/protocol", "crates/ptyd", "crates/launcher", "crates/runtime", "crates/cli"]
 
 [workspace.package]
 edition = "2021"

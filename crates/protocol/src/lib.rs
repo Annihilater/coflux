@@ -1,15 +1,14 @@
 //! coflux 线协议（Rust 侧）。
 //!
 //! 真相源是 `proto/`（Buf 管理，三端 codegen）；本 crate 是 Rust（daemon）侧的消费者：
-//! - [frame]：worker ⟷ supervisor UDS 内部二进制帧（dirty/proxy/device；旧 input/replay
-//!   编号保留但拒绝解码），与
-//!   WS wire 无关，进程内部协议，不随本次 wire 迁移变化。
 //! - [wire]：Daemon ↔ Server WS 线协议（`buf generate` 产出的 prost 类型，见 [gen]）。
 //!   WS 上只有 binary message，每条 = 一个 [wire::DaemonToServer] / [wire::ServerToDaemon]
 //!   编码信封；控制面与数据面（pty/proxy）统一走 oneof payload，不再区分 JSON 文本帧与
 //!   自定义二进制帧。
-//! - [ipc]：worker ↔ supervisor 本地 UDS 消息 + 长度前缀分帧。
-//! - [ptyd]：supervisor ↔ coflux-ptyd（PTY 托管进程）本地协议，能力握手式长期兼容契约。
+//! - [ipc]：本地字节流共用的长度前缀分帧 + shell 命令状态。
+//! - [launcher]：coflux-launcher ↔ coflux-runtime 私有通道（nonce / 会话接管 / 切换请求）。
+//! - [release]：发布版本身份（严格 SemVer、版本即路径、发布 target）。
+//! - [ptyd]：runtime ↔ coflux-ptyd（PTY 托管进程）本地协议，能力握手式长期兼容契约。
 //! - [logline]：daemon 日志行的统一时间戳前缀（[`logln!`]）。
 //!
 //! Client ↔ Server control 协议仍由 TS server/web 持有；端到端 DeviceEnvelope 则由
@@ -25,10 +24,11 @@ mod gen {
     }
 }
 
-pub mod frame;
 pub mod ipc;
+pub mod launcher;
 pub mod logline;
 pub mod ptyd;
+pub mod release;
 pub mod settings;
 
 /// Daemon ↔ Server WS 线协议（prost 生成类型）。真相源：`proto/coflux/v1/{common,daemon}.proto`。
@@ -38,18 +38,17 @@ pub mod wire {
 
 pub use settings::Settings;
 
-pub use frame::{
-    decode_frame, encode_frame, DataFrame, FrameEncodeError, FRAME_DEVICE, FRAME_INPUT,
-    FRAME_OUTPUT, FRAME_PROXY_DATA, FRAME_REPLAY, MAX_FRAME_ID_BYTES,
-};
 pub use ipc::{
-    is_frame, write_record, CommandStateInfo, RecordParseError, RecordParser, RecordWriteError,
-    SessionInfo, SupervisorToWorker, TransportArtifact, WorkerToSupervisor, MAX_IPC_RECORD_BYTES,
-    SUPERVISOR_SOCK_ENV, SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
+    write_record, CommandStateInfo, RecordParseError, RecordParser, RecordWriteError,
+    MAX_IPC_RECORD_BYTES,
 };
 pub use wire::{DaemonToServer, FsEntry, FsEntryKind, ServerToDaemon, SessionPorts, SessionRef};
 
-/// 编码 transport-neutral Device envelope，供不直接依赖 prost 的 supervisor 使用。
+/// Channel / session ids carried in one byte on local frames; every id entering such a field
+/// obeys this bound (the TS `MAX_FRAME_ID_BYTES` is the same value).
+pub const MAX_FRAME_ID_BYTES: usize = u8::MAX as usize;
+
+/// 编码 transport-neutral Device envelope，供不直接依赖 prost 的 sessiond 使用。
 pub fn encode_device_envelope(message: &wire::DeviceEnvelope) -> Vec<u8> {
     prost::Message::encode_to_vec(message)
 }

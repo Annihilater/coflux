@@ -396,7 +396,8 @@ mod tests {
     use coflux_protocol::wire::{
         DeviceScope, DeviceSessionCatalogRequest, LocalBrowserGrant, LocalClientHello,
     };
-    use coflux_protocol::{decode_frame, is_frame, RecordParser};
+    use crate::sessiond_ipc::{decode_frame, is_frame};
+    use coflux_protocol::RecordParser;
     use p256::ecdsa::signature::{Signer, Verifier};
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
     use rand_core::{OsRng, RngCore};
@@ -570,7 +571,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(is_frame(&parsed[0]));
         match decode_frame(&parsed[0]).unwrap() {
-            coflux_protocol::DataFrame::Device {
+            crate::sessiond_ipc::DataFrame::Device {
                 channel_id: actual, ..
             } => assert_eq!(actual, channel_id),
             _ => panic!("expected Device IPC frame"),

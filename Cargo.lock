@@ -144,11 +144,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "coflux-launcher"
+version = "0.0.0"
+dependencies = [
+ "coflux-protocol",
+ "coflux-ptyd",
+ "hex",
+ "libc",
+ "rand_core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+]
+
+[[package]]
 name = "coflux-protocol"
 version = "0.0.0"
 dependencies = [
  "libc",
  "prost",
+ "semver",
  "serde",
  "serde_json",
 ]
@@ -168,30 +184,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "coflux-supervisor"
-version = "0.0.0"
-dependencies = [
- "coflux-protocol",
- "coflux-ptyd",
- "ed25519-dalek",
- "hex",
- "libc",
- "rand_core",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "ureq",
- "vt100",
-]
-
-[[package]]
-name = "coflux-worker"
+name = "coflux-runtime"
 version = "0.0.0"
 dependencies = [
  "base64",
  "coflux-protocol",
+ "coflux-ptyd",
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "hmac",
@@ -201,11 +200,15 @@ dependencies = [
  "prost",
  "rand_core",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tokio",
  "tokio-tungstenite",
+ "ureq",
+ "vt100",
 ]
 
 [[package]]

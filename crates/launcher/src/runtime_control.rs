@@ -1,6 +1,11 @@
-//! 桌面应用的本机生命周期通道。只在应用显式启动时启用，不依赖中心或 worker。
-//! home 的独占锁防止更新接续时启动第二个托管进程；0600 的 UDS 只接受同一系统用户。
-//! op：`status` / `stop`（结束本机全部终端）/ `leave`（替换 supervisor：终端留在 ptyd 里）。
+//! The desktop app's local lifecycle channel (`runtime.sock` / `runtime.lock`), served by the
+//! launcher so neither flips during a runtime swap. Enabled only when the app starts the launcher;
+//! independent of the centre and of the runtime. The exclusive lock on the home prevents a second
+//! managed instance; the 0600 UDS admits only the same OS user.
+//!
+//! Ops: `status` / `stop` (end every local terminal) / `leave` (replace the launcher itself:
+//! terminals stay in ptyd) / `switch` (stage-and-switch to a local runtime: an administrator
+//! action, not bound by the remote release floor).
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -13,9 +18,9 @@ use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{manager::Manager, sessions::Sessions};
+use crate::manager::{ptyd_kill_all, ptyd_live_sessions, Manager, RuntimeSpec};
 
-/// How long a starting supervisor waits for an exiting predecessor to release runtime.lock.
+/// How long a starting launcher waits for an exiting predecessor to release runtime.lock.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Deserialize)]
@@ -24,6 +29,13 @@ struct Request {
     op: String,
     #[serde(default, rename = "instanceId")]
     instance_id: String,
+    /// `switch`: the content-addressed id of the staged runtime, its binary and its version stamp.
+    #[serde(default, rename = "runtimeId")]
+    runtime_id: String,
+    #[serde(default)]
+    cmd: String,
+    #[serde(default)]
+    version: String,
 }
 
 pub struct RuntimeControl {
@@ -31,7 +43,7 @@ pub struct RuntimeControl {
     listener: UnixListener,
     path: String,
     instance_id: String,
-    runtime_id: String,
+    launcher_id: String,
 }
 
 impl RuntimeControl {
@@ -48,18 +60,15 @@ impl RuntimeControl {
             .open(format!("{home}/runtime.lock"))?;
         // A predecessor that just acknowledged `leave` removes runtime.sock before it exits, so the
         // app can launch us while that process still holds the lock. Wait a bounded moment for it to
-        // go; a supervisor that keeps the lock is a live instance and we must not start.
+        // go; a process that keeps the lock is a live instance and we must not start.
         let deadline = std::time::Instant::now() + LOCK_WAIT;
         while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EWOULDBLOCK)
-                || std::time::Instant::now() >= deadline
-            {
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) || std::time::Instant::now() >= deadline {
                 return Err(error);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        // 只有拿到独占锁后才能清理崩溃留下的 socket。
         let path = format!("{home}/runtime.sock");
         match std::fs::remove_file(&path) {
             Ok(()) => (),
@@ -75,35 +84,28 @@ impl RuntimeControl {
             listener,
             path,
             instance_id: hex::encode(nonce),
-            runtime_id: std::env::var("COFLUX_RUNTIME_ID").unwrap_or_default(),
+            launcher_id: std::env::var("COFLUX_LAUNCHER_ID").unwrap_or_default(),
         })
     }
 
-    pub fn serve(self, manager: Arc<Manager>, sessions: Arc<Sessions>, worker_socket: String) {
+    pub fn serve(self, manager: Arc<Manager>, ptyd_sock: String, launcher_sock: String) {
         std::thread::spawn(move || {
-            // Rust 2021 captures fields separately; keep the lock alive for the entire
-            // serving loop instead of dropping it when serve returns.
+            // Keep the lock alive for the whole serving loop.
             let _lock = self._lock;
             for stream in self.listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                let Ok(input) = stream.try_clone() else {
-                    continue;
-                };
+                let Ok(input) = stream.try_clone() else { continue };
                 let mut reader = BufReader::new(input);
                 let mut line = Vec::new();
-                // 请求极小，逐段有界读取，不能因同用户的坏请求无限分配内存。
                 let mut valid = false;
                 while line.len() <= 4096 {
                     let Ok(buf) = reader.fill_buf() else { break };
                     if buf.is_empty() {
                         break;
                     }
-                    let n = buf
-                        .iter()
-                        .position(|b| *b == b'\n')
-                        .map_or(buf.len(), |i| i + 1);
+                    let n = buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1);
                     if line.len() + n > 4096 {
                         break;
                     }
@@ -115,27 +117,44 @@ impl RuntimeControl {
                         break;
                     }
                 }
-                let request = valid
-                    .then(|| serde_json::from_slice::<Request>(&line).ok())
-                    .flatten();
+                let request = valid.then(|| serde_json::from_slice::<Request>(&line).ok()).flatten();
                 let Some(request) = request else {
                     let _ = writeln!(stream, "{{\"ok\":false,\"error\":\"invalid request\"}}");
                     continue;
                 };
-                let stopping = request.op == "stop" && request.instance_id == self.instance_id;
-                // `leave`（plan 20260918-ptyd-terminal-custody）：替换 supervisor 用。杀 worker 后退出，
-                // shell 留在 ptyd 里。与 `stop`（结束本机全部终端）**不共用**代码路径：stop 让 ptyd 杀掉
-                // 每个 shell，leave 一个都不碰。
-                let leaving = request.op == "leave" && request.instance_id == self.instance_id;
+                let current = request.instance_id == self.instance_id;
+                let stopping = request.op == "stop" && current;
+                let leaving = request.op == "leave" && current;
                 let response = if request.op == "status" {
+                    let snapshot = manager.snapshot();
+                    let sessions: Vec<serde_json::Value> = ptyd_live_sessions(&ptyd_sock)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|id| json!({"id": id}))
+                        .collect();
                     json!({"ok":true,"protocol":1,"instanceId":self.instance_id,
-                        "runtimeId":self.runtime_id,"version":crate::SUPERVISOR_VERSION,
-                        // 本 supervisor 的 PTY 在 ptyd 里，因此支持 leave；旧 supervisor 没有这个字段。
-                        "custody":"ptyd",
-                        "sessions":sessions.desktop_sessions()})
+                        "launcher":true,"launcherId":self.launcher_id,"version":crate::LAUNCHER_VERSION,
+                        "runtimeId":snapshot.runtime_id,"runtimeVersion":snapshot.runtime_version,
+                        "pending":snapshot.pending,"healthy":snapshot.healthy,
+                        "custody":"ptyd","sessions":sessions})
+                } else if request.op == "switch" && current {
+                    let spec = RuntimeSpec {
+                        id: request.runtime_id.clone(),
+                        version: if request.version.is_empty() { request.runtime_id.clone() } else { request.version.clone() },
+                        cmd: request.cmd.clone(),
+                        args: vec![],
+                    };
+                    match manager.register(spec).and_then(|()| manager.switch(&request.runtime_id, false)) {
+                        Ok(()) => json!({"ok":true}),
+                        Err(error) => json!({"ok":false,"error":error}),
+                    }
                 } else if stopping {
+                    // End every terminal: ask ptyd to kill each shell, then stop the runtime.
                     manager.shutdown();
-                    sessions.shutdown();
+                    match ptyd_kill_all(&ptyd_sock) {
+                        Ok(killed) => coflux_protocol::logln!("[launcher] stop: ended {killed} terminal(s)"),
+                        Err(error) => coflux_protocol::logln!("[launcher] stop: ptyd unreachable, terminals not ended: {error}"),
+                    }
                     json!({"ok":true})
                 } else if leaving {
                     manager.shutdown();
@@ -146,7 +165,7 @@ impl RuntimeControl {
                 let _ = writeln!(stream, "{response}");
                 if stopping || leaving {
                     let _ = std::fs::remove_file(&self.path);
-                    let _ = std::fs::remove_file(&worker_socket);
+                    let _ = std::fs::remove_file(&launcher_sock);
                     std::process::exit(0);
                 }
             }
