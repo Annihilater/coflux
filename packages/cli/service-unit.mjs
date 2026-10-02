@@ -152,3 +152,42 @@ RestartSec=2
 WantedBy=default.target
 `;
 }
+
+/**
+ * Operator and test overrides the self-managed service keeps from the environment of
+ * `cofluxd up` / `cofluxd run`: the release public key (tests and self-keyed releases), the
+ * runtime's probation window, and its connection timing knobs. Nothing a Coflux terminal sets.
+ */
+export const WATCHER_ENV_ALLOWLIST = [
+  "COFLUX_WORKER_PUBKEY",
+  "COFLUX_RUNTIME_PROBATION_MS",
+  "COFLUX_CONNECT_TIMEOUT_MS",
+  "COFLUX_IDLE_PING_MS",
+  "COFLUX_IDLE_GRACE_MS",
+];
+
+/**
+ * The environment of the self-managed service (`coflux-launcher watch`): the same `COFLUX_*`
+ * variables the launchd / systemd units carry, and only those.
+ *
+ * Not `{ ...process.env, COFLUX_HOME }`: `cofluxd up` is often run from inside a Coflux terminal,
+ * whose environment is a copy of the running service's own — `COFLUX_LAUNCHER_SOCK`,
+ * `COFLUX_LAUNCHER_NONCE`, `COFLUX_TRANSPORT_*`, `COFLUX_LOCAL_GATEWAY_PORT`, `COFLUX_SESSION_ID` and,
+ * under the desktop app, `COFLUX_RUNTIME_CMD`. The launcher and runtime read those and would bind
+ * to another service's sockets. Every other `COFLUX_*` variable is dropped except the allowlist;
+ * everything else (PATH, HOME, locale) passes through.
+ */
+export function watcherEnv(base, { home, executor }) {
+  const env = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (value === undefined) continue;
+    if (key.startsWith("COFLUX_") && !WATCHER_ENV_ALLOWLIST.includes(key)) continue;
+    env[key] = value;
+  }
+  env.COFLUX_HOME = home;
+  if (executor) {
+    env[EXECUTOR_NODE_ENV] = executor.node;
+    env[EXECUTOR_ENTRY_ENV] = executor.entry;
+  }
+  return env;
+}

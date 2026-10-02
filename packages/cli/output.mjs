@@ -39,9 +39,11 @@ export function success(message) {
   process.stdout.write(`${paint(process.stdout, "green", "✓")} ${message}\n`);
 }
 
-/** `! message` on stderr. */
-export function warn(message) {
-  process.stderr.write(`${paint(process.stderr, "yellow", "!")} ${message}\n`);
+/** `! message` on stderr, with an optional indented next step. */
+export function warn(message, next) {
+  let text = `${paint(process.stderr, "yellow", "!")} ${message}\n`;
+  if (next) text += next.split("\n").map((line) => `  ${line}\n`).join("");
+  process.stderr.write(text);
 }
 
 /** `✗ Error: what` plus an indented next step, on stderr. */

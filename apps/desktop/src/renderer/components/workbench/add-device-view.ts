@@ -33,7 +33,7 @@ export function headlessAgentPrompt(daemonUrl: string, joinKey: string): string 
 1. Make sure Node.js 20 or newer is installed (\`node --version\`); if it is missing or older, install it.
 2. Run \`npm i -g cofluxd\`.
 3. Run \`cofluxd up --server ${daemonUrl} --key ${joinKey}\` (it can take up to about two minutes).
-4. Run \`cofluxd status\` and confirm it shows this machine as registered (凭证: 已登记).
+4. Run \`cofluxd status\` and confirm its Connection line says connected.
 If a command fails, stop and tell me its error.`;
 }
 

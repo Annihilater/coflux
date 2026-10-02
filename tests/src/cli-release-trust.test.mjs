@@ -243,7 +243,7 @@ test("cofluxd：latest 指向旧的合法签名 release 时仍受本机双 floor
     writeFileSync(join(home, "runtime.release-floor"), "v9.8.8\n", { mode: 0o600 });
     await assert.rejects(
       runUpdate(home, fixture, endpoint, { latest: true }),
-      /低于本机可信身份|拒绝降级\/重放/,
+      /not newer than the version this device already trusts|refusing a downgrade or replay/,
     );
     assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
     assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
@@ -261,7 +261,7 @@ test("cofluxd：损坏的本机 release floor 不会降级成放行", async () =
   const home = makeInstallHome();
   try {
     writeFileSync(join(home, "cofluxd.release-floor"), "not-semver\n", { mode: 0o600 });
-    await assert.rejects(runUpdate(home, fixture, endpoint), /floor 已损坏/);
+    await assert.rejects(runUpdate(home, fixture, endpoint), /release-floor is corrupted/);
     assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
     assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
   } finally {

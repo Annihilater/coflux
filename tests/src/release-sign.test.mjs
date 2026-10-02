@@ -75,8 +75,8 @@ test("release-sign produces a schema 3 manifest: runtime/launcher domains isolat
       assert.equal(crypto.verify(null, other({ version: manifest.version, target, sha256: runtimeEntry.sha256, size: runtimeEntry.size }), publicKey, runtimeSignature), false);
     }
     // (c) Looking up the worker component in a schema 3 manifest throws.
-    assert.throws(() => parseReleaseManifestEntry(manifest, "worker", manifest.version, target), /未知 release component/);
-    assert.throws(() => parseReleaseManifestEntry(manifest, "supervisor", manifest.version, target), /未知 release component/);
+    assert.throws(() => parseReleaseManifestEntry(manifest, "worker", manifest.version, target), /Unknown release component/);
+    assert.throws(() => parseReleaseManifestEntry(manifest, "supervisor", manifest.version, target), /Unknown release component/);
 
     const launcherEntry = parseReleaseManifestEntry(manifest, "launcher", manifest.version, target);
     verifyReleaseArtifact({ component: "launcher", version: manifest.version, entry: launcherEntry, data: launcherArtifact, publicKey });
@@ -107,7 +107,7 @@ test("release-sign produces a schema 3 manifest: runtime/launcher domains isolat
     }
     assert.throws(
       () => runtimeReleaseStatement({ version: "v2.3.4-01", target, sha256: runtimeEntry.sha256, size: runtimeEntry.size }),
-      /前导 0/,
+      /leading zero/,
       "numeric prerelease identifiers follow Rust strict SemVer",
     );
 
@@ -223,18 +223,18 @@ test("cofluxd verifier rejects bytes/hash/size/version/target/missing fields, cr
 
   const tampered = Buffer.from(data);
   tampered[0] ^= 1;
-  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: parsed, data: tampered, publicKey: verifierKey }), /sha256 不匹配/);
-  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, size: parsed.size + 1 }, data, publicKey: verifierKey }), /大小不匹配/);
-  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, sha256: "00".repeat(32) }, data, publicKey: verifierKey }), /sha256 不匹配/);
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: parsed, data: tampered, publicKey: verifierKey }), /sha256 does not match/);
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, size: parsed.size + 1 }, data, publicKey: verifierKey }), /size does not match/);
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, sha256: "00".repeat(32) }, data, publicKey: verifierKey }), /sha256 does not match/);
   assert.throws(() => parseReleaseManifestEntry({ ...manifest, version: "v3.4.4" }, "runtime", version, target), /schema\/version/);
   assert.throws(() => parseReleaseManifestEntry({ ...manifest, schemaVersion: 2 }, "runtime", version, target), /schema\/version/, "schema 2 is refused by the new cofluxd");
-  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, target: "aarch64-unknown-linux-musl" } } }, "runtime", version, target), /缺少匹配/);
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, target: "aarch64-unknown-linux-musl" } } }, "runtime", version, target), /has no matching/);
   for (const field of ["sha256", "size", "releaseSignature"]) {
     const incomplete = { ...runtimeEntry };
     delete incomplete[field];
-    assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: incomplete } }, "runtime", version, target), /元数据非法/, `missing ${field} must be refused`);
+    assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: incomplete } }, "runtime", version, target), /metadata is invalid/, `missing ${field} must be refused`);
   }
-  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, size: MAX_RELEASE_ARTIFACT_BYTES + 1 } } }, "runtime", version, target), /元数据非法/);
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, size: MAX_RELEASE_ARTIFACT_BYTES + 1 } } }, "runtime", version, target), /metadata is invalid/);
   // A stray raw signature on a runtime entry is ignored, never required and never trusted.
   const withRaw = parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, signature: "00".repeat(64) } } }, "runtime", version, target);
   assert.equal(withRaw.signature, undefined);
@@ -242,9 +242,9 @@ test("cofluxd verifier rejects bytes/hash/size/version/target/missing fields, cr
   // A worker-domain statement over identical metadata is not a runtime release, nor a launcher one.
   const transplanted = { target, sha256, size: data.byteLength, releaseSignature: crypto.sign(null, workerReleaseStatement(metadata), privateKey).toString("hex") };
   for (const component of ["runtime", "launcher"]) {
-    assert.throws(() => verifyReleaseArtifact({ component, version, entry: transplanted, data, publicKey: verifierKey }), /release Ed25519 签名无效/);
+    assert.throws(() => verifyReleaseArtifact({ component, version, entry: transplanted, data, publicKey: verifierKey }), /release Ed25519 signature is invalid/);
   }
-  assert.throws(() => verifyReleaseArtifact({ component: "launcher", version, entry: parsed, data, publicKey: verifierKey }), /release Ed25519 签名无效/);
+  assert.throws(() => verifyReleaseArtifact({ component: "launcher", version, entry: parsed, data, publicKey: verifierKey }), /release Ed25519 signature is invalid/);
 });
 
 test("release SemVer floor comparison rejects downgrades and another build of equal precedence", () => {
