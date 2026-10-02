@@ -968,8 +968,10 @@ mod tests {
         let builtin = RuntimeSpec { id: "v3.0.0".into(), version: "v3.0.0".into(), cmd: "/bin/sh".into(), args: vec![] };
         let manager = manager(&home, builtin, HashMap::new());
         assert!(manager.switch("canary", true).is_err(), "remote switch to an unregistered non-release id");
+        // A regular file of our own: /bin/sh is a symlink on Linux, which register refuses.
+        let cmd = install(&home, "local-canary", 0o755).to_string_lossy().into_owned();
         manager
-            .register(RuntimeSpec { id: "canary".into(), version: "v2.0.0".into(), cmd: "/bin/sh".into(), args: vec![] })
+            .register(RuntimeSpec { id: "canary".into(), version: "v2.0.0".into(), cmd, args: vec![] })
             .unwrap();
         assert!(manager.switch("canary", false).is_ok(), "an administrator may switch to an older version");
         let state = manager.state.lock().unwrap();
