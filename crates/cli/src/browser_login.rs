@@ -28,7 +28,7 @@ fn random_bytes(len: usize) -> Result<Vec<u8>, String> {
     let mut bytes = vec![0u8; len];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|e| format!("无法生成随机数：{e}"))?;
+        .map_err(|e| format!("Cannot generate random bytes: {e}"))?;
     Ok(bytes)
 }
 
@@ -85,16 +85,16 @@ fn open_browser(url: &str) {
 
 fn failure_message(kind: &str) -> &'static str {
     match kind {
-        "not_allowed" => "该邮箱未开通 Coflux",
-        "not_verified" => "该账号的邮箱未经验证，无法登录",
-        "cancelled" => "已取消登录",
-        _ => "登录未完成，请重试",
+        "not_allowed" => "This email address has no Coflux access.",
+        "not_verified" => "This account's email address is not verified.",
+        "cancelled" => "Sign-in was cancelled.",
+        _ => "Sign-in did not complete.",
     }
 }
 
 fn respond(stream: &mut TcpStream, status: &str, title: &str, body: &str) {
     let html = format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{title} · Coflux</title>\
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{title} - Coflux</title>\
          <style>:root{{color-scheme:light dark}}body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
          font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}}main{{text-align:center;padding:24px}}h1{{font-size:18px}}</style></head>\
          <body><main><h1>{title}</h1><p>{body}</p></main></body></html>"
@@ -131,7 +131,7 @@ fn wait_for_callback(listener: &TcpListener, state: &str, deadline: Instant) -> 
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     loop {
         if Instant::now() >= deadline {
-            return Err("登录超时，请重新运行 coflux login".into());
+            return Err("Sign-in timed out.\nRun coflux login again.".into());
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -140,12 +140,12 @@ fn wait_for_callback(listener: &TcpListener, state: &str, deadline: Instant) -> 
                     continue;
                 };
                 let Ok(url) = url::Url::parse(&format!("http://127.0.0.1{target}")) else {
-                    respond(&mut stream, "400 Bad Request", "请求无效", "这个地址只用于 Coflux 登录回调。");
+                    respond(&mut stream, "400 Bad Request", "Bad request", "This address only serves the Coflux sign-in callback.");
                     continue;
                 };
                 let param = |name: &str| url.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned());
                 if url.path() != "/callback" || param("state").as_deref() != Some(state) {
-                    respond(&mut stream, "404 Not Found", "页面不存在", "这个地址只用于 Coflux 登录回调。");
+                    respond(&mut stream, "404 Not Found", "Not found", "This address only serves the Coflux sign-in callback.");
                     continue;
                 }
                 if let Some(error) = param("error") {
@@ -154,7 +154,7 @@ fn wait_for_callback(listener: &TcpListener, state: &str, deadline: Instant) -> 
                 return Ok((Callback::Code(param("code").unwrap_or_default()), stream));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
-            Err(error) => return Err(format!("登录回调监听失败：{error}")),
+            Err(error) => return Err(format!("The sign-in callback failed: {error}\nRun coflux login again.")),
         }
     }
 }
@@ -166,7 +166,10 @@ fn exchange(post: Post, code: &str, verifier: &str) -> Result<Granted, String> {
         "/api/client/login/exchange",
         json!({"protocolVersion": 1, "code": code, "codeVerifier": verifier}),
     )?;
-    let token = value["token"].as_str().filter(|token| !token.is_empty()).ok_or("服务器没有返回会话")?;
+    let token = value["token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or("The server did not return a session.\nRun coflux login again.")?;
     Ok(Granted {
         token: token.to_string(),
         account_id: value["accountId"].clone(),
@@ -198,11 +201,13 @@ pub fn run(server: &str, post: Post) -> Result<Granted, String> {
         body["port"] = json!(port);
     }
     let registered = post("/api/client/login/request", body)?;
-    let page = registered["url"].as_str().ok_or("服务器没有返回登录地址")?;
-    let parsed = url::Url::parse(page).map_err(|_| "服务器返回的登录地址无效")?;
+    let page = registered["url"]
+        .as_str()
+        .ok_or("The server did not return a sign-in page.\nRun coflux login again.")?;
+    let parsed = url::Url::parse(page).map_err(|_| "The server returned an invalid sign-in page.\nRun coflux login again.")?;
     // Only ever open a page on the server we are logging into.
     if parsed.origin().ascii_serialization() != server {
-        return Err("服务器返回的登录地址不在该服务器上".into());
+        return Err("The server returned a sign-in page on another host.\nCheck the --server URL, then run coflux login again.".into());
     }
     let expires_at = registered["expiresAt"].as_f64().unwrap_or(0.0);
     let now_ms = std::time::SystemTime::now()
@@ -211,16 +216,16 @@ pub fn run(server: &str, post: Post) -> Result<Granted, String> {
         .unwrap_or(0.0);
     let wait = if expires_at > now_ms { Duration::from_millis((expires_at - now_ms) as u64) } else { Duration::from_secs(600) };
 
-    eprintln!("在浏览器中打开以下地址完成登录（Ctrl-C 取消）：\n  {page}");
+    eprintln!("To sign in, open this page in your browser:\n\n    {page}\n\nPress Ctrl-C to cancel.");
     let Some(listener) = listener else {
-        eprintln!("登录后页面会显示一次性登录码。");
-        eprint!("粘贴登录码：");
+        eprintln!("After you sign in, the page shows a one-time code.");
+        eprint!("Paste the code: ");
         let _ = io::stderr().flush();
         let mut line = String::new();
         io::stdin().lock().take(256).read_line(&mut line).map_err(|e| e.to_string())?;
         let code = line.trim();
         if code.is_empty() {
-            return Err("没有输入登录码".into());
+            return Err("No code entered.\nRun coflux login again.".into());
         }
         return exchange(post, code, &verifier);
     };
@@ -229,16 +234,16 @@ pub fn run(server: &str, post: Post) -> Result<Granted, String> {
     match callback {
         Callback::Failed(kind) => {
             let message = failure_message(&kind);
-            respond(&mut stream, "200 OK", "登录未完成", &format!("{message}。可以关闭此页面，回到终端。"));
-            Err(message.into())
+            respond(&mut stream, "200 OK", "Sign-in not completed", &format!("{message} You can close this page and return to the terminal."));
+            Err(format!("{message}\nRun coflux login again."))
         }
         Callback::Code(code) => match exchange(post, &code, &verifier) {
             Ok(granted) => {
-                respond(&mut stream, "200 OK", "已登录", "已登录，可以回到终端。");
+                respond(&mut stream, "200 OK", "Signed in", "You are signed in. You can return to the terminal.");
                 Ok(granted)
             }
             Err(error) => {
-                respond(&mut stream, "200 OK", "登录未完成", "登录未完成，请回到终端查看原因。");
+                respond(&mut stream, "200 OK", "Sign-in not completed", "Sign-in did not complete. See the terminal for the reason.");
                 Err(error)
             }
         },

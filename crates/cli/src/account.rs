@@ -9,6 +9,14 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// An error with its next step: `main` shows the first line as the error and the rest under it.
+fn err(what: &str, next: &str) -> String {
+    format!("{what}\n{next}")
+}
+const USAGE_NEXT: &str = "Run coflux --help for usage.";
+const LOGIN_NEXT: &str = "Sign in to the Coflux app, or run coflux login.";
+const QUERY_NEXT: &str = "Check whether it took effect before you try again.";
+
 fn home() -> PathBuf {
     std::env::var_os("COFLUX_HOME")
         .map(PathBuf::from)
@@ -20,13 +28,13 @@ fn origin(raw: &str) -> Result<String, String> {
     let raw = raw
         .replacen("wss://", "https://", 1)
         .replacen("ws://", "http://", 1);
-    let url = url::Url::parse(&raw).map_err(|_| "服务器地址无效")?;
+    let url = url::Url::parse(&raw).map_err(|_| err("The server URL is not valid.", "Pass it as --server https://<host>."))?;
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("服务器地址不能包含凭据".into());
+        return Err(err("The server URL must not contain credentials.", "Pass it as --server https://<host>."));
     }
     let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
     if url.scheme() != "https" && !(url.scheme() == "http" && local) {
-        return Err("服务器必须使用 HTTPS（本机开发可用 HTTP）".into());
+        return Err(err("The server URL must use HTTPS.", "Use https://, or http://localhost for local development."));
     }
     Ok(url.origin().ascii_serialization())
 }
@@ -34,7 +42,7 @@ fn response(value: Value) -> Result<Value, String> {
     if value["ok"] == true {
         Ok(value["value"].clone())
     } else {
-        Err(value["error"].as_str().unwrap_or("请求失败").to_string())
+        Err(value["error"].as_str().unwrap_or("The account request failed.").to_string())
     }
 }
 fn http(
@@ -56,9 +64,10 @@ fn http(
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
         Err(_) => {
-            return Err(
-                "无法连接账号服务器，请检查网络后重试；写操作请先查询结果，勿重复提交".into(),
-            )
+            return Err(err(
+                "Cannot reach the account server.",
+                "Check your network and try again. If you were changing something, check whether it took effect first.",
+            ))
         }
     };
     let mut text = String::new();
@@ -66,11 +75,13 @@ fn http(
         .into_reader()
         .take(8 * 1024 * 1024 + 1)
         .read_to_string(&mut text)
-        .map_err(|_| "服务器响应读取失败")?;
+        .map_err(|_| err("The server's response could not be read.", QUERY_NEXT))?;
     if text.len() > 8 * 1024 * 1024 {
-        return Err("服务器响应过大".into());
+        return Err("The response was too large.".into());
     }
-    response(serde_json::from_str(&text).map_err(|_| "服务器响应无效或不支持账号命令")?)
+    response(serde_json::from_str(&text).map_err(|_| {
+        err("The server's response is not valid.", "Check that --server points at a Coflux server.")
+    })?)
 }
 fn save(value: &Value) -> Result<(), String> {
     fs::create_dir_all(home()).map_err(|e| e.to_string())?;
@@ -93,7 +104,7 @@ fn save(value: &Value) -> Result<(), String> {
 }
 fn broker(command: &Value, timeout: u64) -> Result<Value, String> {
     let mut stream = UnixStream::connect(home().join("client.sock"))
-        .map_err(|_| "请先登录 Coflux 应用或运行 coflux login")?;
+        .map_err(|_| err("You are not signed in.", LOGIN_NEXT))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(timeout)))
         .map_err(|e| e.to_string())?;
@@ -106,19 +117,19 @@ fn broker(command: &Value, timeout: u64) -> Result<Value, String> {
     stream
         .take(8 * 1024 * 1024 + 1)
         .read_to_string(&mut text)
-        .map_err(|_| "Coflux 应用连接已中断，请查询操作结果")?;
+        .map_err(|_| err("The connection to the Coflux app was interrupted.", QUERY_NEXT))?;
     if text.len() > 8 * 1024 * 1024 {
-        return Err("响应过大".into());
+        return Err("The response was too large.".into());
     }
-    response(serde_json::from_str(&text).map_err(|_| "Coflux 应用响应无效")?)
+    response(serde_json::from_str(&text).map_err(|_| err("The Coflux app's response is not valid.", "Update the Coflux app, then try again."))?)
 }
 fn required<'a>(args: &'a ParsedArgs, key: &str) -> Result<&'a str, String> {
     args.string(key)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("缺少 --{key}"))
+        .ok_or_else(|| err(&format!("Missing --{key}."), USAGE_NEXT))
 }
 fn id(args: &ParsedArgs) -> Result<&str, String> {
-    args.positional(2).ok_or_else(|| "缺少目标 ID".into())
+    args.positional(2).ok_or_else(|| err("Missing id.", USAGE_NEXT))
 }
 
 /// A path that will be resolved on the **target device**: absolute, or a `~` prefix. Same rule as
@@ -127,15 +138,18 @@ fn device_path(path: &str) -> bool {
     path.starts_with('/') || path == "~" || path.starts_with("~/")
 }
 
-/// `project import <path>` 的路径位；措辞要说的是「路径」，不是 `id()` 的「目标 ID」。
+/// The path of `project import <path>`.
 fn import_path(args: &ParsedArgs) -> Result<&str, String> {
     let path = args
         .positional(2)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or("缺少要导入的路径（导入当前目录写 coflux project import \"$PWD\"）")?;
+        .ok_or_else(|| err("Missing path.", "To import the current directory, run coflux project import \"$PWD\"."))?;
     if !device_path(path) {
-        return Err("路径要绝对路径或 ~ 开头（它在目标设备上解析）；导入当前目录写 coflux project import \"$PWD\"".into());
+        return Err(err(
+            "The path must be absolute or start with ~, because it is resolved on the device.",
+            "To import the current directory, run coflux project import \"$PWD\".",
+        ));
     }
     Ok(path)
 }
@@ -148,7 +162,7 @@ fn device_target(args: &ParsedArgs) -> Result<String, String> {
     let from_env = std::env::var("COFLUX_DEVICE_ID").unwrap_or_default();
     let from_env = from_env.trim();
     if from_env.is_empty() {
-        return Err("缺少设备：请加 --device <id>（coflux device list 可以看到）".into());
+        return Err(err("Missing device.", "Pass --device <id>. Run coflux device list to see your devices."));
     }
     Ok(from_env.to_string())
 }
@@ -167,16 +181,19 @@ fn device_exec(
     let device_id = args
         .positional(2)
         .filter(|value| !value.is_empty())
-        .ok_or("缺少设备 ID（coflux device list 可以看到）")?;
+        .ok_or_else(|| err("Missing device id.", "Run coflux device list to see your devices."))?;
     let command = required(args, "cmd")?;
     let timeout = args
         .string("timeout")
         .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
         .parse::<u32>()
-        .map_err(|_| "--timeout 必须是整数秒")?;
-    // 上限在这里就说清楚，别让中心的入参校验回一句「请求失败」。
+        .map_err(|_| err("--timeout must be a whole number of seconds.", "Use a value from 1 to 600."))?;
+    // State the limits here rather than let the server's validation answer with a bare failure.
     if !(1..=600).contains(&timeout) {
-        return Err("--timeout 取 1-600 秒；更久、或需要用户看见的长任务请改用 coflux terminal new".into());
+        return Err(err(
+            "--timeout must be between 1 and 600 seconds.",
+            "For longer work the user should see, open a terminal with coflux terminal new.",
+        ));
     }
     let value = call(json!({
         "op": "device.exec",
@@ -187,7 +204,7 @@ fn device_exec(
     }))?;
     let exit_code = value["exitCode"]
         .as_i64()
-        .ok_or("设备回执缺少退出码（中心版本过旧？）")?;
+        .ok_or_else(|| err("The device did not report an exit code.", "The server may need an update; try again later."))?;
     // 顺序固定：stdout、stderr、`# exit=`；每段写完就 flush，终端里的先后次序才与远端一致。
     let mut out = io::stdout().lock();
     let _ = out.write_all(value["stdout"].as_str().unwrap_or("").as_bytes());
@@ -229,15 +246,16 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             let post = |path: &str, body: Value| http(&server, path, None, body, 30);
             let granted = crate::browser_login::run(&server, &post)?;
             save(&json!({"server":server,"token":granted.token,"accountId":granted.account_id}))?;
-            let who = if granted.login.is_empty() { "当前账号".to_string() } else { granted.login };
-            println!("已登录为 {who}");
+            if granted.login.is_empty() {
+                crate::ui::success("Signed in");
+            } else {
+                crate::ui::success(&format!("Signed in as {}", granted.login));
+            }
             return Ok(());
         }
         let username = required(args, "username")?;
         if !args.flag("password-stdin") {
-            return Err(
-                "用 --password-stdin 从标准输入读取密码；密码不进入命令参数或配置文件".into(),
-            );
+            return Err(err("Missing --password-stdin.", "Pipe the password on stdin and pass --password-stdin."));
         }
         let mut password = String::new();
         io::stdin()
@@ -261,7 +279,7 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
     }
     let session = match fs::read(home().join("cli-session.json")) {
         Ok(bytes) => Some(
-            serde_json::from_slice::<Value>(&bytes).map_err(|_| "CLI 登录记录损坏，请重新登录")?,
+            serde_json::from_slice::<Value>(&bytes).map_err(|_| err("This CLI's sign-in record is damaged.", "Run coflux login again."))?,
         ),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
@@ -275,16 +293,18 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
     let timeout = if long_running { 610 } else { 40 };
     let call = |operation: Value| -> Result<Value, String> {
         if let Some(session) = &session {
-            let server = origin(session["server"].as_str().ok_or("CLI 服务器记录无效")?)?;
+            let server = origin(session["server"].as_str().ok_or_else(|| {
+                err("This CLI's sign-in record is damaged.", "Run coflux login again.")
+            })?)?;
             if let Some(requested) = args.string("server") {
                 if origin(requested)? != server {
-                    return Err("目标服务器与登录记录不一致，请先登录目标服务器".into());
+                    return Err(err("You are signed in to a different server.", "Run coflux login --server <url> first."));
                 }
             }
             let token = session["token"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .ok_or("请先登录")?;
+                .ok_or_else(|| err("You are not signed in.", "Run coflux login."))?;
             http(
                 &server,
                 "/api/client/command",
@@ -294,14 +314,14 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             )
         } else {
             if args.string("server").is_some() {
-                return Err("请先登录指定服务器".into());
+                return Err(err("You are not signed in to that server.", "Run coflux login --server <url> first."));
             }
             broker(&operation, timeout)
         }
     };
     if command == "logout" {
         if session.is_none() {
-            return Err("此 CLI 未单独登录；应用账号请在 Coflux 中退出".into());
+            return Err(err("This CLI is not signed in on its own.", "To sign out of the app account, sign out in Coflux."));
         }
         call(json!({"op":"logout"}))?;
         fs::remove_file(home().join("cli-session.json")).map_err(|e| e.to_string())?;
@@ -316,8 +336,8 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         match device_exec(args, &call) {
             Ok(code) => std::process::exit(code),
             Err(message) => {
-                eprintln!("✗ {message}");
-                std::process::exit(EXEC_CLI_FAILURE);
+                let (what, next) = message.split_once('\n').unwrap_or((message.as_str(), USAGE_NEXT));
+                crate::ui::fail(what, next, EXEC_CLI_FAILURE);
             }
         }
     }
@@ -342,13 +362,13 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             json!({"op":"terminal.run","terminalId":id(args)?,"command":required(args,"cmd")?})
         }
         ("terminal", "read") => {
-            json!({"op":"terminal.read","terminalId":id(args)?,"lines":args.string("lines").unwrap_or("200").parse::<u32>().map_err(|_| "--lines 必须是整数")?})
+            json!({"op":"terminal.read","terminalId":id(args)?,"lines":args.string("lines").unwrap_or("200").parse::<u32>().map_err(|_| err("--lines must be a whole number.", USAGE_NEXT))?})
         }
         ("terminal", "send") => {
             json!({"op":"terminal.send","terminalId":id(args)?,"text":required(args,"text")?,"enter":args.flag("enter")})
         }
         ("terminal", "wait") => {
-            json!({"op":"terminal.wait","terminalId":id(args)?,"timeout":args.string("timeout").unwrap_or("30").parse::<u32>().map_err(|_| "--timeout 必须是整数")?})
+            json!({"op":"terminal.wait","terminalId":id(args)?,"timeout":args.string("timeout").unwrap_or("30").parse::<u32>().map_err(|_| err("--timeout must be a whole number of seconds.", USAGE_NEXT))?})
         }
         ("terminal", "stop" | "remove") => {
             json!({"op":format!("terminal.{sub}"),"terminalId":id(args)?})
@@ -356,14 +376,22 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         ("whoami" | "ports", _) | ("device" | "project" | "workspace" | "terminal", "list") => {
             json!({"op":"snapshot"})
         }
-        _ => return Err("未知账号命令".into()),
+        _ => {
+            return Err(err(
+                &format!("Unknown command: {}", args.positionals.join(" ")),
+                "Run coflux --help to see the commands.",
+            ))
+        }
     };
     // `project.import` 与 snapshot 一样按设备寻址，所以 `--device` 对它是入参而非筛选参数。
     if operation["op"] != "snapshot"
         && ((args.string("device").is_some() && operation["op"] != "project.import")
             || (args.string("workspace").is_some() && operation["op"] != "terminal.new"))
     {
-        return Err("目标 ID 已确定作用范围，请不要附加设备或工作区筛选参数".into());
+        return Err(err(
+            "--device and --workspace cannot be combined with an id.",
+            "Drop the filter; the id already names the target.",
+        ));
     }
     let mut operation = operation;
     if operation["name"].is_null() {
@@ -389,7 +417,9 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
         if let Some(target) = args.string("workspace") {
             handle::check_filter("workspace", handle::HandleKind::Workspace, target)?;
         }
-        let items = value[field].as_array().ok_or("账号快照无效")?;
+        let items = value[field]
+            .as_array()
+            .ok_or_else(|| err("The account snapshot is not valid.", "Update the Coflux app or the server, then try again."))?;
         value = Value::Array(
             items
                 .iter()

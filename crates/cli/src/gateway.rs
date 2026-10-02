@@ -63,7 +63,7 @@ pub fn local_gateway_port_from(raw: Option<&str>) -> Result<u16, String> {
     if raw.is_empty() {
         return Ok(DEFAULT_LOCAL_GATEWAY_PORT);
     }
-    let invalid = || format!("COFLUX_LOCAL_GATEWAY_PORT={raw} 无法定位固定监听端口");
+    let invalid = || format!("COFLUX_LOCAL_GATEWAY_PORT={raw} is not a valid port");
     let number: f64 = raw.trim().parse().map_err(|_| invalid())?;
     if !number.is_finite() || number.fract() != 0.0 || !(1.0..=65535.0).contains(&number) {
         return Err(invalid());
@@ -131,15 +131,15 @@ pub fn parse_response(raw: &[u8]) -> Result<HttpResponse, String> {
     let head_end = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or("响应头不完整")?;
+        .ok_or("incomplete response headers")?;
     let head = String::from_utf8_lossy(&raw[..head_end]);
     let mut lines = head.lines();
-    let status_line = lines.next().ok_or("响应为空")?;
+    let status_line = lines.next().ok_or("empty response")?;
     let status = status_line
         .split_whitespace()
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("状态行畸形: {status_line}"))?;
+        .ok_or_else(|| format!("malformed status line: {status_line}"))?;
     let mut content_length: Option<usize> = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
@@ -216,7 +216,7 @@ fn budget(timeout: Duration) -> impl Fn() -> Result<Duration, String> {
         timeout
             .checked_sub(started.elapsed())
             .filter(|left| !left.is_zero())
-            .ok_or_else(|| "请求超时".to_string())
+            .ok_or_else(|| "request timed out".to_string())
     }
 }
 
@@ -254,7 +254,7 @@ fn connect_agent_socket() -> SocketAttempt {
             SocketAttempt::Absent
         }
         Err(error) => SocketAttempt::Denied(format!(
-            "cannot connect to the coflux daemon's agent socket at {} ({error}); this process is not allowed to reach it (a sandbox without local network access?)",
+            "This process is not allowed to reach the Coflux service at {}: {error}\nIf this runs in a sandbox, allow access to that socket.",
             path.display()
         )),
     }
@@ -281,7 +281,9 @@ pub fn local_post(path: &str, mut body: Map<String, Value>, timeout: Duration) -
         SocketAttempt::Denied(message) => return Err(AgentError::Refused(message)),
         SocketAttempt::Absent => {}
     }
-    let port = local_gateway_port().map_err(AgentError::Refused)?;
+    let port = local_gateway_port().map_err(|error| {
+        AgentError::Refused(format!("{error}\nUnset COFLUX_LOCAL_GATEWAY_PORT, or set it to a port number."))
+    })?;
     body.insert("pid".into(), Value::from(pid()));
     body.insert("ppid".into(), Value::from(ppid()));
     let payload = Value::Object(body).to_string();
@@ -296,16 +298,23 @@ pub enum AgentError {
     /// is **unknown**.
     Transport(String),
     /// The daemon refused explicitly (configuration errors included); the text is a sentence meant
-    /// for the calling agent and is passed through verbatim.
+    /// for the calling agent and is passed through verbatim. A local refusal may carry its next
+    /// step after a newline.
     Refused(String),
 }
 
+/// Next step when the local service cannot be reached at all (the node `SERVICE_NEXT`).
+pub const SERVICE_NEXT: &str = "Check that Coflux is running on this device: open Coflux.app, or run cofluxd status.";
+/// Next step for a refusal about a terminal (the node `TERMINAL_NEXT`).
+pub const TERMINAL_NEXT: &str = "Run coflux terminal list to check the terminal.";
+
 impl AgentError {
-    /// The final sentence written to stderr (wording aligned with the node `agentPost`).
+    /// The error and, after a newline when there is one, its next step (wording aligned with the
+    /// node `agentPost`).
     pub fn message(&self) -> String {
         match self {
             Self::Transport(error) => {
-                format!("连不上本机 daemon：{error}（daemon 没在跑？先看 cofluxd status）")
+                format!("Cannot reach the Coflux service on this device: {error}\n{SERVICE_NEXT}")
             }
             Self::Refused(error) => error.clone(),
         }
@@ -332,7 +341,7 @@ pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentErr
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| format!("daemon 返回 {}", response.status));
+            .unwrap_or_else(|| format!("The Coflux service answered with HTTP {}.", response.status));
         return Err(AgentError::Refused(error));
     }
     Ok(parsed.unwrap_or(Value::Null))
@@ -340,9 +349,20 @@ pub fn agent_post_result(mut body: Map<String, Value>) -> Result<Value, AgentErr
 
 /// Send one `/agent` request; any failure calls `die` (wording aligned with the node `agentPost`).
 pub fn agent_post(body: Map<String, Value>) -> Value {
+    agent_post_or(body, crate::ui::HELP_NEXT)
+}
+
+/// [`agent_post`] with the next step shown under a refusal the daemon sent without one.
+pub fn agent_post_or(body: Map<String, Value>, next: &str) -> Value {
     match agent_post_result(body) {
         Ok(value) => value,
-        Err(error) => crate::die(&error.message()),
+        Err(error) => {
+            let message = error.message();
+            match message.split_once('\n') {
+                Some((what, own_next)) => crate::ui::fail(what, own_next, 1),
+                None => crate::ui::fail(&message, next, 1),
+            }
+        }
     }
 }
 
@@ -359,7 +379,7 @@ mod tests {
         assert_eq!(local_gateway_port_from(Some("1e3")), Ok(1000));
         assert_eq!(
             local_gateway_port_from(Some("0")),
-            Err("COFLUX_LOCAL_GATEWAY_PORT=0 无法定位固定监听端口".to_string())
+            Err("COFLUX_LOCAL_GATEWAY_PORT=0 is not a valid port".to_string())
         );
         assert!(local_gateway_port_from(Some("65536")).is_err());
         assert!(local_gateway_port_from(Some("12.5")).is_err());

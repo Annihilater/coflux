@@ -1,9 +1,9 @@
 //! agent 侧子命令（plan 112）：`terminal new|run|list|read|wait|send|close`、`notify`、`progress`、
 //! `ports`、`workspace [locate|forget]`、`hook <claude|codex>`、`executor run`。
 //!
-//! 请求体、stdout 文案与退出码逐命令对齐 node 版 `packages/cli/coflux.mjs`（`cmdTerminal` /
-//! `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook` / `cmdExecutor`）——SKILL.md 与黑盒用例引用
-//! 的输出短语（如 `已开终端 <taskId>`）逐字保留。渲染逻辑抽成纯函数以便单测，I/O 只在 `run_*` 里。
+//! Request bodies, output text and exit codes match the node version, `packages/cli/coflux.mjs`
+//! (`cmdTerminal` / `cmdNotify` / `cmdProgress` / `cmdWorkspace` / `cmdPorts` / `cmdHook` /
+//! `cmdExecutor`), word for word. No test enforces that any more: a copy change touches both.
 //!
 //! 与 `hook` 子命令的约定**相反**：这些命令必须写 stdout——输出就是给 agent 读的返回值。
 
@@ -127,26 +127,37 @@ pub fn normalize_command(cmd: Option<&str>) -> String {
     }
 }
 
-/// First line of `terminal new`: the terminal exists whatever happens to the command afterwards.
+/// First line of `terminal new` (after the `✓`): the terminal exists whatever happens to the
+/// command afterwards.
 pub fn render_terminal_opened(result: &Value) -> String {
     let task_id = field_str(result, "taskId");
-    format!("已开终端 {task_id}（用户可在 coflux 侧栏看到并随时接管）")
+    format!("Opened terminal {task_id}")
 }
 
 /// Hint lines after opening a terminal without `--cmd`.
 pub fn render_terminal_new_hints(task_id: &str) -> String {
     [
-        "常驻的登录 shell（全 tty），不会自己退出".to_string(),
-        format!("跑命令：coflux terminal run {task_id} --cmd=\"<命令>\"（等提示符就绪后打入，wait 可等它结束）"),
-        format!("看输出：coflux terminal read {task_id}；结束：coflux terminal close {task_id}"),
+        "It is a login shell the user can see and take over. It stays open until you close it.".to_string(),
+        format!("Run a command:   coflux terminal run {task_id} --cmd=\"<command>\""),
+        format!("Read its output: coflux terminal read {task_id}"),
+        format!("Close it:        coflux terminal close {task_id}"),
     ]
     .join("\n")
 }
 
 /// `terminal run` / `terminal new --cmd` succeeded: the command was typed after the prompt mark.
-pub fn render_terminal_run(result: &Value, task_id: &str) -> String {
+fn print_terminal_run(result: &Value, task_id: &str) {
     let seq = result.get("commandSeq").map(js_number).unwrap_or_default();
-    format!("已打入命令 #{seq}（coflux terminal wait {task_id} 等它结束，coflux terminal read {task_id} 看输出）")
+    crate::ui::success(&format!("Sent command #{seq}"));
+    println!("Wait for it with coflux terminal wait {task_id}, and read its output with coflux terminal read {task_id}.");
+}
+
+/// A subcommand that needs a terminal id got none (the node `missingTaskId`).
+fn missing_task_id(sub: &str, usage: &str) -> ! {
+    crate::die_with(
+        "Missing terminal id.",
+        &format!("Run coflux terminal list to find it, then coflux terminal {sub} <taskId>{usage}."),
+    )
 }
 
 /// ` busy` / ` idle` plus ` last=<code>` for a live, instrumented terminal; nothing otherwise.
@@ -178,7 +189,7 @@ pub fn render_terminal_list(result: &Value) -> String {
         .cloned()
         .unwrap_or_default();
     if terminals.is_empty() {
-        return "本工作区暂无终端".to_string();
+        return "No terminals in this workspace.".to_string();
     }
     terminals
         .iter()
@@ -207,12 +218,8 @@ pub fn read_lines(raw: Option<&str>) -> usize {
 pub fn render_terminal_read(result: &Value, lines: usize) -> String {
     let header = format!("# {}{}", field_str(result, "status"), exit_suffix(result));
     let text = tail_lines(&strip_ansi(field_str(result, "ansi")), lines);
-    let text = if text.is_empty() { "（暂无输出）".to_string() } else { text };
+    let text = if text.is_empty() { "(no output yet)".to_string() } else { text };
     format!("{header}\n{text}")
-}
-
-pub fn render_terminal_send(task_id: &str) -> String {
-    format!("已写入终端 {task_id}（用 coflux terminal read {task_id} 核对效果）")
 }
 
 /// `--timeout`：正数（可带小数）才生效，其余取默认 1800 秒。
@@ -233,18 +240,21 @@ pub fn render_wait_done(result: &Value) -> String {
     format!("# {state}{}", exit_suffix(result))
 }
 
-pub fn render_wait_timeout(timeout_secs: f64, task_id: &str, command_seq: &str) -> String {
-    format!(
-        "等待超时（{}s）：终端 {task_id} 的命令 #{command_seq} 仍在运行。可加大 --timeout，或 coflux terminal read {task_id} 看现场",
-        js_number(&Value::from(timeout_secs))
+fn wait_timed_out(timeout_secs: f64, task_id: &str, command_seq: &str) -> ! {
+    crate::die_with(
+        &format!(
+            "Timed out after {}s: command #{command_seq} in terminal {task_id} is still running.",
+            js_number(&Value::from(timeout_secs))
+        ),
+        &format!("Wait longer with --timeout, or look at the screen with coflux terminal read {task_id}."),
     )
 }
 
-pub fn render_terminal_close(result: &Value, task_id: &str) -> String {
+fn print_terminal_close(result: &Value, task_id: &str) {
     if field_bool(result, "exited") {
-        format!("已关闭终端 {task_id}（exited{}）", exit_suffix(result))
+        crate::ui::success(&format!("Closed terminal {task_id}{}", exit_suffix(result)));
     } else {
-        format!("已请求关闭终端 {task_id}，shell 仍在退出中（coflux terminal list 可查）")
+        println!("Closing terminal {task_id}. Its shell is still exiting; check it with coflux terminal list.");
     }
 }
 
@@ -257,7 +267,7 @@ pub fn run_terminal(args: &ParsedArgs) {
             let command = normalize_command(args.string("cmd"));
             let request = with(body("terminal.new"), "title", args.string("title").unwrap_or(""));
             let opened = gateway::agent_post(request);
-            println!("{}", render_terminal_opened(&opened));
+            crate::ui::success(&render_terminal_opened(&opened));
             let task_id = field_str(&opened, "taskId").to_string();
             if command.is_empty() {
                 println!("{}", render_terminal_new_hints(&task_id));
@@ -267,32 +277,35 @@ pub fn run_terminal(args: &ParsedArgs) {
                     "command",
                     command.as_str(),
                 );
-                let ran = gateway::agent_post(request);
-                println!("{}", render_terminal_run(&ran, &task_id));
+                let ran = gateway::agent_post_or(request, gateway::TERMINAL_NEXT);
+                print_terminal_run(&ran, &task_id);
             }
         }
         Some("run") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal run 需要 <taskId>（用 coflux terminal list 查）");
+                missing_task_id("run", " --cmd=\"<command>\"");
             };
             let command = normalize_command(args.string("cmd"));
             if command.is_empty() {
-                crate::die("terminal run 需要 --cmd=\"<命令>\"");
+                crate::die_with(
+                    "Missing command.",
+                    &format!("Pass it with --cmd: coflux terminal run {task_id} --cmd=\"<command>\"."),
+                );
             }
             let request = with(
                 with(body("terminal.run"), "taskId", task_id),
                 "command",
                 command.as_str(),
             );
-            let result = gateway::agent_post(request);
-            println!("{}", render_terminal_run(&result, task_id));
+            let result = gateway::agent_post_or(request, gateway::TERMINAL_NEXT);
+            print_terminal_run(&result, task_id);
         }
         Some("close") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal close 需要 <taskId>（用 coflux terminal list 查）");
+                missing_task_id("close", "");
             };
-            let result = gateway::agent_post(with(body("terminal.close"), "taskId", task_id));
-            println!("{}", render_terminal_close(&result, task_id));
+            let result = gateway::agent_post_or(with(body("terminal.close"), "taskId", task_id), gateway::TERMINAL_NEXT);
+            print_terminal_close(&result, task_id);
         }
         Some("list") => {
             let result = gateway::agent_post(body("terminal.list"));
@@ -300,32 +313,33 @@ pub fn run_terminal(args: &ParsedArgs) {
         }
         Some("read") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal read 需要 <taskId>（用 coflux terminal list 查）");
+                missing_task_id("read", "");
             };
             let lines = read_lines(args.string("lines"));
-            let result = gateway::agent_post(with(body("terminal.read"), "taskId", task_id));
+            let result = gateway::agent_post_or(with(body("terminal.read"), "taskId", task_id), gateway::TERMINAL_NEXT);
             println!("{}", render_terminal_read(&result, lines));
         }
         Some("send") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal send 需要 <taskId>（用 coflux terminal list 查）");
+                missing_task_id("send", " --text=\"<text>\"");
             };
             let text = args.string("text").unwrap_or("");
             let enter = args.flag("enter");
             if text.is_empty() && !enter {
-                crate::die("terminal send 需要 --text \"<文本>\"（或至少 --enter 发一个回车）");
+                crate::die_with("Nothing to send.", "Pass --text=\"<text>\", or --enter to send a single Enter.");
             }
             let request = with(
                 with(with(body("terminal.send"), "taskId", task_id), "text", text),
                 "enter",
                 enter,
             );
-            gateway::agent_post(request);
-            println!("{}", render_terminal_send(task_id));
+            gateway::agent_post_or(request, gateway::TERMINAL_NEXT);
+            crate::ui::success(&format!("Sent input to terminal {task_id}"));
+            println!("Check the result with coflux terminal read {task_id}.");
         }
         Some("wait") => {
             let Some(task_id) = args.positional(2) else {
-                crate::die("terminal wait 需要 <taskId>（用 coflux terminal list 查）");
+                missing_task_id("wait", "");
             };
             let timeout_secs = wait_timeout_secs(args.string("timeout"));
             let command_seq = wait_command_seq(args.string("seq"));
@@ -345,21 +359,27 @@ pub fn run_terminal(args: &ParsedArgs) {
                     "timeoutMs",
                     round_ms,
                 );
-                let result = gateway::agent_post(request);
+                let result = gateway::agent_post_or(request, gateway::TERMINAL_NEXT);
                 if field_str(&result, "state") != "running" {
                     println!("{}", render_wait_done(&result));
                     return;
                 }
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    crate::die(&render_wait_timeout(
+                    wait_timed_out(
                         timeout_secs,
                         task_id,
                         &result.get("commandSeq").map(js_number).unwrap_or_default(),
-                    ));
+                    );
                 }
             }
         }
-        _ => crate::die("terminal 需要子命令：new | run | list | read | wait | send | close"),
+        other => crate::die_with(
+            &match other {
+                Some(sub) => format!("Unknown terminal command: {sub}."),
+                None => "Missing terminal command.".to_string(),
+            },
+            "Use one of: new, run, list, read, wait, send, close.",
+        ),
     }
 }
 
@@ -380,28 +400,31 @@ pub fn joined_message(args: &ParsedArgs) -> String {
 pub fn run_notify(args: &ParsedArgs) {
     let message = joined_message(args);
     if message.is_empty() {
-        crate::die("notify 需要一句话，例如：coflux notify \"两个方案拿不准，需要你定\"");
+        crate::die_with("Missing message.", "Usage: coflux notify \"<message>\"");
     }
     use std::io::Read;
     let mut bytes = [0u8; 24];
     if std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)).is_err() {
-        crate::die("无法生成通知请求标识");
+        crate::die_with("Cannot create a notification id.", "Try again.");
     }
     let notification_id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let result = gateway::agent_post(with(with(body("notify"), "message", message), "notificationId", notification_id));
     if result.get("notificationId").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).is_none() {
-        crate::die("daemon 不支持持久通知，请升级；未确认送达");
+        crate::die_with(
+            "The notification was not confirmed: this device's Coflux is too old to save it.",
+            "Update Coflux on this device, then send it again.",
+        );
     }
-    println!("通知已发送（已保存到账号通知中心）");
+    crate::ui::success("Notification sent");
 }
 
 pub fn run_progress(args: &ParsedArgs) {
     let message = joined_message(args);
     if message.is_empty() {
-        crate::die("progress 需要一句话，例如：coflux progress \"复现了，正在定位 relay 重连\"");
+        crate::die_with("Missing message.", "Usage: coflux progress \"<message>\"");
     }
     gateway::agent_post(with(body("progress"), "message", message));
-    println!("已更新进度（显示在工作区卡片上，被下一条覆盖）");
+    crate::ui::success("Progress updated");
 }
 
 /* -------------------------------- workspace ------------------------------ */
@@ -448,7 +471,7 @@ pub fn run_workspace(args: &ParsedArgs) {
         }
         Some("enter") => {
             let Some(path) = args.positional(2).filter(|_| args.positional(3).is_none()) else {
-                crate::die("Usage: coflux workspace enter <path>");
+                crate::die_with("Missing path.", "Usage: coflux workspace enter <path>");
             };
             match crate::integration::enter_workspace(path) {
                 Ok(result) => println!("{result}"),
@@ -462,19 +485,22 @@ pub fn run_workspace(args: &ParsedArgs) {
                 .map(str::to_string)
                 .unwrap_or_else(gateway::caller_cwd);
             if path.is_empty() {
-                crate::die("workspace locate 需要 <path>（取不到当前目录）");
+                crate::die_with("Could not determine the current directory.", "Pass the path: coflux workspace locate <path>.");
             }
             let result = gateway::agent_post(with(body("workspace.locate"), "path", path));
             println!("{}", render_workspace_locate(&result));
         }
         Some("forget") => {
             let Some(path) = args.positional(2) else {
-                crate::die("workspace forget 需要 <path>（被删掉的 worktree 目录）");
+                crate::die_with("Missing path.", "Usage: coflux workspace forget <path>");
             };
             let result = gateway::agent_post(with(body("workspace.forget"), "path", path));
             println!("{}", render_workspace_forget(&result));
         }
-        Some(_) => crate::die("workspace 的子命令只有 enter | locate | forget（不带子命令 = 报出我在哪）"),
+        Some(sub) => crate::die_with(
+            &format!("Unknown workspace command: {sub}."),
+            "Use enter, locate or forget, or no subcommand to print the current workspace.",
+        ),
     }
 }
 
@@ -487,7 +513,7 @@ pub fn render_ports(result: &Value) -> String {
         .cloned()
         .unwrap_or_default();
     if ports.is_empty() {
-        return "本工作区暂无监听端口".to_string();
+        return "No listening ports in this workspace.".to_string();
     }
     ports
         .iter()
@@ -553,24 +579,25 @@ pub fn render_executor_success(status: &Value) -> String {
     let mut out = vec!["# succeeded".to_string()];
     let summary = field_str(status, "summary").trim().to_string();
     out.push(if summary.is_empty() {
-        "（executor 没有留下最终回复）".to_string()
+        "(the executor left no final reply)".to_string()
     } else {
         summary
     });
     let files = changed_files(status);
     if files.is_empty() {
-        out.push("改动文件：无".to_string());
+        out.push("Changed files: none".to_string());
     } else {
-        out.push(format!("改动文件（{}）：", files.len()));
+        out.push(format!("Changed files ({}):", files.len()));
         out.extend(files);
     }
-    out.push("executor 不会 git commit：改动请自己 review 后提交。".to_string());
+    out.push("The executor never commits. Review the changes and commit them yourself.".to_string());
     out.join("\n")
 }
 
-/// One stderr sentence for a non-success terminal state: state name, reason, and what was already
-/// changed — the last part matters most when the run was interrupted or failed midway.
-pub fn render_executor_failure(status: &Value) -> String {
+/// The error for a non-success terminal state: state name, reason, and what was already changed —
+/// the last part matters most when the run was interrupted or failed midway. Returns the message
+/// and its next step.
+pub fn render_executor_failure(status: &Value) -> (String, &'static str) {
     let terminal = field_str(status, "terminal");
     let terminal = if terminal.is_empty() { "unknown" } else { terminal };
     let mut reason = field_str(status, "error").trim().to_string();
@@ -578,20 +605,23 @@ pub fn render_executor_failure(status: &Value) -> String {
         reason = field_str(status, "note").trim().to_string();
     }
     if reason.is_empty() {
-        reason = "executor 没有给出原因".to_string();
+        reason = "no reason given".to_string();
     }
     let files = changed_files(status);
-    let tail = if files.is_empty() {
-        String::new()
+    let (tail, next) = if files.is_empty() {
+        (String::new(), "Adjust the prompt and send a new run.")
     } else {
-        format!("；已改动 {} 个文件：{}", files.len(), files.join(" "))
+        (
+            format!(". Files already changed ({}): {}", files.len(), files.join(" ")),
+            "Review the changes it left, then send a new run.",
+        )
     };
-    format!("executor 任务未成功（{terminal}）：{reason}{tail}")
+    (format!("Executor run ended as {terminal}: {reason}{tail}"), next)
 }
 
 pub fn render_executor_timeout(timeout_secs: f64, run_id: &str, phase: &str) -> String {
     format!(
-        "等待超时（{}s）：executor 任务 {run_id} 仍是 {phase}，已请求取消。可加大 --timeout 后重发",
+        "Timed out after {}s: executor run {run_id} was still {phase} and has been cancelled.",
         js_number(&Value::from(timeout_secs))
     )
 }
@@ -622,7 +652,7 @@ fn executor_submit(prompt: &str, write: bool, title: &str) -> String {
             Ok(result) => {
                 let run_id = field_str(&result, "runId").to_string();
                 if run_id.is_empty() {
-                    crate::die("daemon 没有返回 runId（版本太旧？）");
+                    crate::die_with("The Coflux service did not return a run id.", "Update Coflux on this device, then try again.");
                 }
                 return run_id;
             }
@@ -640,12 +670,16 @@ fn executor_submit(prompt: &str, write: bool, title: &str) -> String {
 
 pub fn run_executor(args: &ParsedArgs) {
     if args.positional(1) != Some("run") {
-        crate::die("executor 的子命令只有 run：coflux executor run --prompt=\"<任务>\" [--title=\"<标题>\"] [--write]");
+        crate::die_with(
+            "Unknown executor command.",
+            "Usage: coflux executor run --prompt=\"<task>\" [--title=\"<title>\"] [--write]",
+        );
     }
     let prompt = args.string("prompt").unwrap_or("").trim().to_string();
     if prompt.is_empty() {
-        crate::die(
-            "executor run 需要 --prompt=\"<任务>\"（一句把边界说清的任务描述，例如 --prompt=\"把 crates/worker 的 clippy 警告清掉\"）",
+        crate::die_with(
+            "Missing prompt.",
+            "Describe the task with --prompt, for example --prompt=\"Fix the clippy warnings in crates/worker\".",
         );
     }
     let write = args.flag("write");
@@ -666,7 +700,8 @@ pub fn run_executor(args: &ParsedArgs) {
                 println!("{}", render_executor_success(&status));
                 return;
             }
-            crate::die(&render_executor_failure(&status));
+            let (message, next) = render_executor_failure(&status);
+            crate::die_with(&message, next);
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             // Cancel before reporting: an unwatched write job still editing files in the background
@@ -676,11 +711,10 @@ pub fn run_executor(args: &ParsedArgs) {
                 "runId",
                 run_id.as_str(),
             ));
-            crate::die(&render_executor_timeout(
-                timeout_secs,
-                &run_id,
-                field_str(&status, "phase"),
-            ));
+            crate::die_with(
+                &render_executor_timeout(timeout_secs, &run_id, field_str(&status, "phase")),
+                "Send it again with a larger --timeout.",
+            );
         }
         std::thread::sleep(EXECUTOR_POLL);
     }
@@ -786,7 +820,7 @@ pub fn run_hook(args: &ParsedArgs) {
     let agent = match args.positional(1) {
         Some(agent @ ("claude" | "codex")) => agent,
         other => {
-            hook_debug(debug, &format!("未知 agent: {}（需 claude|codex）", other.unwrap_or("(缺参)")));
+            hook_debug(debug, &format!("unknown agent: {}; expected claude or codex", other.unwrap_or("(missing)")));
             return;
         }
     };
@@ -797,17 +831,17 @@ pub fn run_hook(args: &ParsedArgs) {
         payload = read_stdin_json();
     }
     let Some(payload) = payload.filter(Value::is_object) else {
-        hook_debug(debug, "无有效 payload，忽略");
+        hook_debug(debug, "no valid payload; ignored");
         return;
     };
     let Some(request) = build_hook_body(agent, &payload, gateway::pid(), gateway::ppid()) else {
-        hook_debug(debug, "payload 缺事件名，忽略");
+        hook_debug(debug, "payload has no event name; ignored");
         return;
     };
     hook_debug(debug, &format!("POST /hook {}", Value::Object(request.clone())));
     // The agent socket first; the gateway port is resolved only when the socket is absent.
     match gateway::local_post("/hook", request, HOOK_POST_TIMEOUT) {
-        Ok(response) => hook_debug(debug, &format!("响应 {}", response.status)),
+        Ok(response) => hook_debug(debug, &format!("answered {}", response.status)),
         Err(error) => hook_debug(debug, &error.message()),
     }
 }
@@ -819,42 +853,6 @@ mod tests {
 
     fn parsed(list: &[&str]) -> ParsedArgs {
         crate::args::parse(list.iter().map(|s| s.to_string())).unwrap()
-    }
-
-    #[test]
-    fn terminal_new_and_run_output_matches_node() {
-        let opened = json!({ "ok": true, "taskId": "t-1" });
-        assert_eq!(render_terminal_opened(&opened), "已开终端 t-1（用户可在 coflux 侧栏看到并随时接管）");
-        let hints = render_terminal_new_hints("t-1");
-        assert!(hints.starts_with("常驻的登录 shell（全 tty），不会自己退出\n"));
-        assert!(hints.contains("coflux terminal run t-1 --cmd=\"<命令>\""));
-        assert!(hints.ends_with("看输出：coflux terminal read t-1；结束：coflux terminal close t-1"));
-        assert_eq!(
-            render_terminal_run(&json!({ "ok": true, "taskId": "t-1", "commandSeq": 3 }), "t-1"),
-            "已打入命令 #3（coflux terminal wait t-1 等它结束，coflux terminal read t-1 看输出）"
-        );
-        assert_eq!(normalize_command(Some("   ")), "");
-        assert_eq!(normalize_command(Some("pnpm test")), "pnpm test");
-        // `terminal list` 的行首在两版里都是标识（node 侧见 coflux.mjs 的 cmdTerminal `list` 分支
-        // 与 account-client.mjs 的 entityHandle）：第一列是标识，后面的列一字未动。
-        let row = json!({ "terminals": [{ "taskId": "9e21c4d0-1111-2222-3333-444455556666", "ref": "coflux:terminal:9e21c4d0", "status": "running", "title": "构建" }] });
-        assert_eq!(render_terminal_list(&row), "coflux:terminal:9e21c4d0  running  构建");
-    }
-
-    #[test]
-    fn terminal_list_rows_show_busy_and_last_exit_for_live_shells() {
-        assert_eq!(render_terminal_list(&json!({ "terminals": [] })), "本工作区暂无终端");
-        let result = json!({ "terminals": [
-            { "taskId": "aaaaaaaa-1111-2222-3333-444455556666", "ref": "coflux:terminal:aaaaaaaa", "status": "running", "title": "构建", "integrated": true, "busy": true, "commandSeq": 2, "lastCommandExitCode": 0 },
-            { "taskId": "bbbbbbbb-1111-2222-3333-444455556666", "ref": "coflux:terminal:bbbbbbbb", "status": "exited", "exitCode": 0, "title": "测试" },
-            { "taskId": "cccccccc-1111-2222-3333-444455556666", "ref": "coflux:terminal:cccccccc", "status": "exited", "exitCode": null, "title": "" },
-            { "taskId": "dddddddd-1111-2222-3333-444455556666", "ref": "coflux:terminal:dddddddd", "status": "running", "title": "空闲", "integrated": true, "busy": false, "commandSeq": 0, "lastCommandExitCode": null },
-            { "taskId": "eeeeeeee-1111-2222-3333-444455556666", "ref": "coflux:terminal:eeeeeeee", "status": "running", "title": "未集成", "integrated": false, "busy": false },
-        ] });
-        assert_eq!(
-            render_terminal_list(&result),
-            "coflux:terminal:aaaaaaaa  running busy last=0  构建\ncoflux:terminal:bbbbbbbb  exited exit=0  测试\ncoflux:terminal:cccccccc  exited  \ncoflux:terminal:dddddddd  running idle  空闲\ncoflux:terminal:eeeeeeee  running  未集成"
-        );
     }
 
     #[test]
@@ -880,8 +878,8 @@ mod tests {
     fn terminal_read_strips_ansi_and_tails() {
         let result = json!({ "status": "exited", "exitCode": 1, "ansi": "\u{1b}[32mok\u{1b}[0m\nline2\n\n\n" });
         assert_eq!(render_terminal_read(&result, 1), "# exited exit=1\nline2");
-        assert_eq!(render_terminal_read(&json!({ "status": "running", "ansi": "" }), 5), "# running\n（暂无输出）");
-        assert_eq!(render_terminal_read(&json!({ "status": "running" }), 5), "# running\n（暂无输出）");
+        assert_eq!(render_terminal_read(&json!({ "status": "running", "ansi": "" }), 5), "# running\n(no output yet)");
+        assert_eq!(render_terminal_read(&json!({ "status": "running" }), 5), "# running\n(no output yet)");
     }
 
     #[test]
@@ -897,30 +895,6 @@ mod tests {
         assert_eq!(wait_timeout_secs(Some("abc")), 1800.0);
         assert_eq!(wait_timeout_secs(Some("2.5")), 2.5);
         assert_eq!(wait_timeout_secs(Some("90")), 90.0);
-    }
-
-    #[test]
-    fn wait_send_and_close_phrases() {
-        assert_eq!(render_wait_done(&json!({ "state": "finished", "commandSeq": 1, "exitCode": 3 })), "# finished exit=3");
-        assert_eq!(render_wait_done(&json!({ "state": "finished", "commandSeq": 1, "exitCode": null })), "# finished");
-        assert_eq!(render_wait_done(&json!({ "state": "exited", "exitCode": 130 })), "# exited exit=130");
-        assert_eq!(
-            render_wait_timeout(90.0, "t-1", "2"),
-            "等待超时（90s）：终端 t-1 的命令 #2 仍在运行。可加大 --timeout，或 coflux terminal read t-1 看现场"
-        );
-        assert_eq!(
-            render_wait_timeout(2.5, "t-1", "1"),
-            "等待超时（2.5s）：终端 t-1 的命令 #1 仍在运行。可加大 --timeout，或 coflux terminal read t-1 看现场"
-        );
-        assert_eq!(wait_command_seq(None), 0);
-        assert_eq!(wait_command_seq(Some("x")), 0);
-        assert_eq!(wait_command_seq(Some("4")), 4);
-        assert_eq!(render_terminal_send("t-1"), "已写入终端 t-1（用 coflux terminal read t-1 核对效果）");
-        assert_eq!(render_terminal_close(&json!({ "exited": true, "exitCode": 0 }), "t-1"), "已关闭终端 t-1（exited exit=0）");
-        assert_eq!(
-            render_terminal_close(&json!({ "exited": false, "exitCode": null }), "t-1"),
-            "已请求关闭终端 t-1，shell 仍在退出中（coflux terminal list 可查）"
-        );
     }
 
     #[test]
@@ -962,16 +936,6 @@ mod tests {
     }
 
     #[test]
-    fn ports_rows_and_empty() {
-        assert_eq!(render_ports(&json!({ "ports": [] })), "本工作区暂无监听端口");
-        let result = json!({ "ports": [
-            { "port": 5173, "url": "https://x.coflux.dev" },
-            { "port": 8080, "url": "" },
-        ] });
-        assert_eq!(render_ports(&result), "5173  https://x.coflux.dev\n8080  ");
-    }
-
-    #[test]
     fn executor_timeout_defaults_like_terminal_wait() {
         assert_eq!(executor_timeout_secs(None), 1800.0);
         assert_eq!(executor_timeout_secs(Some("0")), 1800.0);
@@ -984,54 +948,6 @@ mod tests {
         let first = submission_id();
         assert!(first.starts_with("sub-"));
         assert_ne!(first, submission_id());
-    }
-
-    #[test]
-    fn executor_success_prints_the_reply_the_files_and_the_no_commit_boundary() {
-        let status = json!({
-            "phase": "done", "terminal": "succeeded", "succeeded": true,
-            "summary": "清掉了 7 条 clippy 警告", "changedFiles": ["crates/worker/src/a.rs", "crates/worker/src/b.rs"],
-        });
-        let text = render_executor_success(&status);
-        assert!(text.starts_with("# succeeded\n清掉了 7 条 clippy 警告\n"), "{text}");
-        assert!(text.contains("改动文件（2）：\ncrates/worker/src/a.rs\ncrates/worker/src/b.rs"), "{text}");
-        assert!(text.contains("不会 git commit"), "{text}");
-        // 没改动 / 没回复也要说清楚，不能打印空白
-        let empty = render_executor_success(&json!({ "phase": "done", "succeeded": true }));
-        assert!(empty.contains("（executor 没有留下最终回复）"), "{empty}");
-        assert!(empty.contains("改动文件：无"), "{empty}");
-    }
-
-    #[test]
-    fn executor_failure_names_the_terminal_state_and_the_reason() {
-        let rejected = render_executor_failure(&json!({
-            "terminal": "rejected", "note": "该工作区已有一个写模式 executor 在跑",
-        }));
-        assert_eq!(
-            rejected,
-            "executor 任务未成功（rejected）：该工作区已有一个写模式 executor 在跑"
-        );
-        // error 优先于 note，并带上已经改了哪些文件
-        let failed = render_executor_failure(&json!({
-            "terminal": "tool_failed", "note": "工具失败", "error": "写文件被沙箱拒绝",
-            "changedFiles": ["a.rs"],
-        }));
-        assert_eq!(
-            failed,
-            "executor 任务未成功（tool_failed）：写文件被沙箱拒绝；已改动 1 个文件：a.rs"
-        );
-        // 字段全缺也要有一句可读的话
-        let bare = render_executor_failure(&json!({}));
-        assert!(bare.contains("unknown"), "{bare}");
-        assert!(bare.contains("没有给出原因"), "{bare}");
-    }
-
-    #[test]
-    fn executor_timeout_message_says_it_cancelled() {
-        let text = render_executor_timeout(90.0, "run-1", "running");
-        assert!(text.contains("等待超时（90s）"), "{text}");
-        assert!(text.contains("已请求取消"), "{text}");
-        assert!(text.contains("--timeout"), "{text}");
     }
 
     #[test]

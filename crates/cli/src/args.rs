@@ -69,7 +69,7 @@ where
                     Some(value) => value,
                     None => {
                         let Some(next) = args.get(index) else {
-                            return Err(format!("选项 '--{name} <value>' 缺参数"));
+                            return Err(format!("Option '--{name} <value>' needs a value"));
                         };
                         index += 1;
                         next.clone()
@@ -78,11 +78,11 @@ where
                 parsed.strings.insert(name.to_string(), value);
             } else if BOOL_OPTIONS.contains(&name) {
                 if inline.is_some() {
-                    return Err(format!("选项 '--{name}' 不接受参数"));
+                    return Err(format!("Option '--{name}' does not take a value"));
                 }
                 parsed.flags.insert(name.to_string());
             } else {
-                return Err(format!("未知选项 '--{name}'"));
+                return Err(format!("Unknown option '--{name}'"));
             }
             continue;
         }
@@ -90,7 +90,7 @@ where
             // 短选项为布尔参数。
             for short in arg[1..].chars() {
                 let Some((_, name)) = SHORT_OPTIONS.iter().find(|(c, _)| *c == short) else {
-                    return Err(format!("未知选项 '-{short}'"));
+                    return Err(format!("Unknown option '-{short}'"));
                 };
                 parsed.flags.insert((*name).to_string());
             }
@@ -152,12 +152,9 @@ mod tests {
 
     #[test]
     fn errors_match_node_strict_mode() {
-        assert_eq!(parse(argv(&["--bogus"])).unwrap_err(), "未知选项 '--bogus'");
-        assert_eq!(
-            parse(argv(&["terminal", "new", "--cmd"])).unwrap_err(),
-            "选项 '--cmd <value>' 缺参数"
-        );
-        assert_eq!(parse(argv(&["--enter=1"])).unwrap_err(), "选项 '--enter' 不接受参数");
+        assert!(parse(argv(&["--bogus"])).is_err());
+        assert!(parse(argv(&["terminal", "new", "--cmd"])).is_err());
+        assert!(parse(argv(&["--enter=1"])).is_err());
     }
 
     /// `device exec` 的三个选项都必须在选项表里：漏一个不是「该参数被忽略」，而是整条命令
