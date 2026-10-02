@@ -300,10 +300,12 @@ function spawnApp(rel, env) {
   return child;
 }
 
-// daemon = Rust ptyd（持 PTY，长生）+ Rust supervisor + Rust worker（三个二进制，零 node 运行时）。
-// 默认用 target/debug 下的产物（pretest 会 cargo build）；可用环境变量覆盖路径。
-const SUPERVISOR_BIN = process.env.COFLUX_SUPERVISOR_BIN || join(ROOT, "target/debug/coflux-supervisor");
-const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target/debug/coflux-worker");
+// daemon = Rust ptyd (owns every PTY, long-lived) + Rust launcher (version pointer, probation,
+// rollback) + Rust runtime (sessiond + centre connection + gateway), zero node runtime
+// (plan 20261002-runtime-launcher-merge). Defaults to target/debug (pretest runs cargo build);
+// the paths can be overridden through the environment.
+const LAUNCHER_BIN = process.env.COFLUX_LAUNCHER_BIN || join(ROOT, "target/debug/coflux-launcher");
+const RUNTIME_BIN = process.env.COFLUX_RUNTIME_BIN || join(ROOT, "target/debug/coflux-runtime");
 const PTYD_BIN = process.env.COFLUX_PTYD_BIN || join(ROOT, "target/debug/coflux-ptyd");
 /** Rust 版 agent 命令 `coflux`（plan 112，crates/cli；pretest 一并构建）：与 npm 版同名、供桌面版内置。
  * 黑盒在 coflux 终端里直接执行它，验证与 node 版 `packages/cli/coflux.mjs` 的 stdout 短语/退出码一致。 */
@@ -318,30 +320,31 @@ async function waitForSocket(path, timeoutMs = 10000) {
 }
 
 /**
- * ptyd 与 supervisor 各自一个 detached 进程组（plan 20260918-ptyd-terminal-custody）：替换 / 杀掉 supervisor
- * 不能带走 ptyd。ptyd 挂在 supervisor 子进程句柄的 `cofluxCompanions` 上，整树 teardown 时一起收——
- * 一个跑在测试之外的 ptyd 会污染下一次运行。
+ * ptyd and the launcher each run in their own detached process group (plan
+ * 20260918-ptyd-terminal-custody): replacing or killing the launcher (and the runtime in its group)
+ * must not take ptyd with it. ptyd hangs off the launcher child handle's `cofluxCompanions` and is
+ * collected with the whole tree on teardown — a ptyd left running outside a test pollutes the next.
  */
 function spawnPtyd(env) {
   const child = spawn(PTYD_BIN, [], { env, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
   child.cofluxProcessGroupId = child.pid;
   return child;
 }
-function spawnSupervisor(env, companions) {
-  const env2 = { ...env, COFLUX_WORKER_CMD: WORKER_BIN, COFLUX_WORKER_ARGS: "[]" };
-  const child = spawn(SUPERVISOR_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
+function spawnLauncher(env, companions) {
+  const env2 = { ...env, COFLUX_RUNTIME_CMD: RUNTIME_BIN, COFLUX_RUNTIME_ARGS: "[]" };
+  const child = spawn(LAUNCHER_BIN, [], { env: env2, cwd: ROOT, stdio: DEBUG ? "inherit" : "ignore", detached: true });
   child.cofluxProcessGroupId = child.pid;
   child.cofluxCompanions = companions;
   return child;
 }
 export async function spawnDaemon(env) {
-  // 上一个 ptyd 被 SIGKILL 时不会清理自己的 socket 文件：不先删掉它，下面的"等 socket 出现"会立刻
-  // 返回，supervisor 连上一个已死的 socket 就退出（restartDaemon 曾因此让整套栈再也起不来）。
+  // A SIGKILLed ptyd leaves its socket file behind: without removing it first, "wait for the
+  // socket" returns at once and the runtime connects to a dead socket and exits.
   const socket = join(env.COFLUX_HOME, "ptyd.sock");
   rmSync(socket, { force: true });
   const ptyd = spawnPtyd(env);
   await waitForSocket(socket);
-  return spawnSupervisor(env, [ptyd]);
+  return spawnLauncher(env, [ptyd]);
 }
 function waitForChildExit(child, timeoutMs = 10000) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -367,7 +370,7 @@ function processGroupExists(groupId) {
   }
 }
 
-/** 整树 = supervisor 的进程组 + 它的 companions（ptyd）各自的进程组。 */
+/** The whole tree = the launcher's process group (runtime included) + each companion's (ptyd). */
 function signalProcessTree(child, signal = "SIGKILL") {
   if (!child) return;
   const errors = [];
@@ -932,7 +935,7 @@ export async function startStack(opts = {}) {
       ref.server = spawnApp("apps/server/src/index.ts", ref.serverEnv);
       await waitHealth(port, 12000, signal);
     },
-    /** 杀掉整个 daemon 进程树（supervisor+worker），模拟用户机器离线（offline-view.test.mjs） */
+    /** Kill the whole daemon tree (ptyd + launcher + runtime): the user's machine went offline. */
     async stopDaemon() {
       const daemonProcess = ref.daemon;
       if (!daemonProcess) return;
@@ -941,36 +944,38 @@ export async function startStack(opts = {}) {
       await stopProcessTrees([daemonProcess], { strict: strictCleanup });
       if (!strictCleanup) await sleep(100);
     },
-    /** 整树重启 ptyd + supervisor + worker，并复用原 COFLUX_HOME/设备凭证。活 PTY（在 ptyd）与未 ack
-     * tombstone（在 supervisor）一起丢失；该入口用于验证之后的 catalog 自愈。 */
+    /** Restart the whole tree (ptyd + launcher + runtime) on the same COFLUX_HOME / credentials. Live
+     * PTYs (in ptyd) and unacknowledged tombstones (in sessiond) are lost together; used to verify
+     * the catalog self-heals afterwards. */
     async restartDaemon() {
       await stack.stopDaemon();
       throwIfStackAborted(signal, "daemon restart");
       ref.daemon = await spawnDaemon(ref.daemonEnv);
     },
-    /** 只替换 supervisor（plan 20260918-ptyd-terminal-custody）：SIGTERM = leave-sessions（worker 随之结束，
-     * shell 留在 ptyd 里），等它退出后用同一份 env 起一个新的 supervisor，ptyd 不动。 */
-    async replaceSupervisor() {
+    /** Replace only the launcher (+ runtime): SIGTERM = leave (the runtime ends with it, shells stay in
+     * ptyd); once it exited, start a new launcher with the same env. ptyd is untouched. */
+    async replaceLauncher() {
       const previous = ref.daemon;
       if (!previous) throw new Error("no daemon to replace");
-      throwIfStackAborted(signal, "supervisor replace");
+      throwIfStackAborted(signal, "launcher replace");
       const exited = waitForChildExit(previous);
       process.kill(previous.pid, "SIGTERM");
       await exited;
-      ref.daemon = spawnSupervisor(ref.daemonEnv, previous.cofluxCompanions ?? []);
+      ref.daemon = spawnLauncher(ref.daemonEnv, previous.cofluxCompanions ?? []);
     },
-    /** 杀掉 supervisor（连同它进程组里的 worker），模拟崩溃；ptyd 不动，然后像看门狗那样把 supervisor 拉起来。 */
-    async killSupervisor() {
+    /** Kill the launcher's process group (runtime included) like a crash; ptyd stays; then bring the
+     * launcher back the way a service manager would. */
+    async killLauncher() {
       const previous = ref.daemon;
       if (!previous) throw new Error("no daemon to kill");
-      throwIfStackAborted(signal, "supervisor kill");
+      throwIfStackAborted(signal, "launcher kill");
       const exited = waitForChildExit(previous);
       process.kill(-previous.pid, "SIGKILL");
       await exited;
-      ref.daemon = spawnSupervisor(ref.daemonEnv, previous.cofluxCompanions ?? []);
+      ref.daemon = spawnLauncher(ref.daemonEnv, previous.cofluxCompanions ?? []);
     },
-    /** 当前 supervisor 子进程的 pid（黑盒据此确认替换后确实是新进程）。 */
-    supervisorPid() { return ref.daemon?.pid; },
+    /** The current launcher child's pid (a replacement must yield a different one). */
+    launcherPid() { return ref.daemon?.pid; },
     /** 给 server 发 SIGTERM，等其优雅退出，返回退出码（或 'timeout'） */
     gracefulStopServer(ms = 3000) {
       return new Promise((res) => {

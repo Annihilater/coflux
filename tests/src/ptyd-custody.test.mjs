@@ -101,7 +101,7 @@ async function collectUntil(device, sessionId, from, until, timeout = 15000) {
   return device.log.slice(from).filter((m) => m.case === "ptyOutput" && m.sessionId === sessionId);
 }
 
-test("替换 supervisor：shell 进程不变、序号逐字节相同、屏幕逐行相同、输入照常", async () => {
+test("替换 launcher：shell 进程不变、序号逐字节相同、屏幕逐行相同、输入照常", async () => {
   const { device, sessionId } = await openTerminal("KEEP_ALIVE_MARK");
   // 基线必须在 shell 安静之后取：marker 之后还有 shell 集成的 mark 与下一条提示符在流。
   const settledSeq = await settle(device, sessionId);
@@ -112,10 +112,10 @@ test("替换 supervisor：shell 进程不变、序号逐字节相同、屏幕逐
   assert.equal(beforeSnapshot.snapshotSeq, before.outputSeq);
   const linesBefore = await screenLines(beforeSnapshot.ansiSnapshot, 80, 24);
   assert.ok(linesBefore.some((line) => line === "KEEP_ALIVE_MARK"), `屏幕上应有 marker 那一行：\n${linesBefore.join("\n")}`);
-  const oldSupervisor = stack.supervisorPid();
+  const oldLauncher = stack.launcherPid();
 
-  await stack.replaceSupervisor();
-  assert.notEqual(stack.supervisorPid(), oldSupervisor, "确实换了一个 supervisor 进程");
+  await stack.replaceLauncher();
+  assert.notEqual(stack.launcherPid(), oldLauncher, "确实换了一个 launcher 进程");
   await reconnect(device);
 
   const after = await catalogEntry(device, sessionId);
@@ -145,7 +145,7 @@ test("替换期间的输出不丢，序号连续：计数器没有洞，resume �
   const seen = device.log.slice(from).filter((m) => m.case === "ptyOutput" && m.sessionId === sessionId);
   const lastSeq = seen[seen.length - 1].toSeq;
 
-  await stack.replaceSupervisor();
+  await stack.replaceLauncher();
   await reconnect(device);
   // attach 的 replay 紧跟在 sessionAttached 之后，可能在 attach() 返回前就已入日志：起点取在 attach 之前。
   const resumeFrom = device.mark();
@@ -175,7 +175,7 @@ test("跨替换在途的输入恰好应用一次：客户端重投同一 seq 拿
   const inputSeq = control.inputSeq + 1n;
   // 不等 ack 就替换：这条输入可能已进 PTY，也可能没有——两种情况下重投都必须恰好落地一次。
   device.send("ptyInput", { requestId: "inflight-once", sessionId, holderEpoch: control.holderEpoch, inputSeq, data: new TextEncoder().encode("echo ONCE_MARK_OUT\r") });
-  await stack.replaceSupervisor();
+  await stack.replaceLauncher();
   await reconnect(device);
   await device.attach(sessionId);
   const ack = await device.input(sessionId, "echo ONCE_MARK_OUT\r", { inputSeq });
@@ -188,11 +188,11 @@ test("跨替换在途的输入恰好应用一次：客户端重投同一 seq 拿
   device.close();
 });
 
-test("杀掉 supervisor：拉起后同样接回终端，屏幕与输入都在", async () => {
+test("杀掉 launcher：拉起后同样接回终端，屏幕与输入都在", async () => {
   const { device, sessionId } = await openTerminal("CRASH_MARK");
   await settle(device, sessionId);
   const before = await catalogEntry(device, sessionId);
-  await stack.killSupervisor();
+  await stack.killLauncher();
   await reconnect(device);
   const after = await catalogEntry(device, sessionId);
   assert.ok(after, "崩溃后 session 仍在");
@@ -220,7 +220,7 @@ test("环绕过的 ring + 有效 checkpoint：超过 4 MiB 输出后替换，仍
   const seen = device.log.slice(from).filter((m) => m.case === "ptyOutput" && m.sessionId === sessionId);
   const lastSeq = seen[seen.length - 1].toSeq;
 
-  await stack.replaceSupervisor();
+  await stack.replaceLauncher();
   await reconnect(device);
   const after = await catalogEntry(device, sessionId);
   assert.equal(after.outputSeq, before.outputSeq, "序号跨替换逐字节相同");
@@ -240,7 +240,7 @@ test("环绕过的 ring + 有效 checkpoint：超过 4 MiB 输出后替换，仍
 test("停止终端仍然结束 shell：替换不共用 stop 的路径", async () => {
   const { device, sessionId } = await openTerminal("STOP_MARK");
   const before = await catalogEntry(device, sessionId);
-  await stack.replaceSupervisor();
+  await stack.replaceLauncher();
   await reconnect(device);
   assert.equal((await catalogEntry(device, sessionId))?.pid, before.pid);
   await device.attach(sessionId);
