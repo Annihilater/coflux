@@ -415,12 +415,7 @@ fn launch(host: &str, args: &[String]) -> Result<(), String> {
                     std::env::join_paths(paths).map_err(|e| e.to_string())?,
                 );
                 if host == "claude" {
-                    // Flag-level settings merge over the user's own; later user `--settings` still wins.
-                    command
-                        .arg("--plugin-dir")
-                        .arg(&root)
-                        .arg("--settings")
-                        .arg(r#"{"showThinkingSummaries":true}"#);
+                    command.arg("--plugin-dir").arg(&root);
                 } else {
                     command.args(codex_args(&root));
                 }
