@@ -397,8 +397,7 @@ impl Watcher {
             Ok(child) => child,
             Err(error) => {
                 logln!("[watch] cannot start {}: {error}", self.ptyd_bin.display());
-                let delay = self.ptyd_backoff.crashed(Duration::ZERO);
-                logln!("[watch] retrying in {}ms", delay.as_millis());
+                self.ptyd_start_failed();
                 return;
             }
         };
@@ -410,26 +409,32 @@ impl Watcher {
             }
             if let Some(status) = proc.exited() {
                 logln!("[watch] terminal host exited during start ({status})");
-                let delay = self.ptyd_backoff.crashed(Duration::ZERO);
-                logln!("[watch] retrying in {}ms", delay.as_millis());
-                if self.foreground {
-                    self.cleanup();
-                    std::process::exit(1);
-                }
+                self.ptyd_start_failed();
                 return;
             }
             if Instant::now() >= deadline {
                 logln!("[watch] terminal host did not answer within {}s; stopping it", PTYD_READY_TIMEOUT.as_secs());
                 proc.signal(libc::SIGKILL);
                 proc.wait_gone(Duration::from_secs(2));
-                let delay = self.ptyd_backoff.crashed(Duration::ZERO);
-                logln!("[watch] retrying in {}ms", delay.as_millis());
+                self.ptyd_start_failed();
                 return;
             }
             thread::sleep(Duration::from_millis(50));
         }
         logln!("[watch] terminal host started pid={}", proc.pid());
         self.ptyd = Some(Supervised { proc, started: Instant::now() });
+    }
+
+    /// ptyd could not be started. Foreground mode hands over to the outer supervisor by exiting 1;
+    /// background mode retries with backoff.
+    fn ptyd_start_failed(&mut self) {
+        if self.foreground {
+            self.stop_launcher();
+            self.cleanup();
+            std::process::exit(1);
+        }
+        let delay = self.ptyd_backoff.crashed(Duration::ZERO);
+        logln!("[watch] retrying in {}ms", delay.as_millis());
     }
 
     fn start_launcher(&mut self) {
