@@ -105,7 +105,7 @@ export function fileIndexFailure(error: unknown): FileIndexResult {
     : { kind: "failed", error: errorText(error) };
 }
 
-const OUTDATED_READ ="设备上的 daemon 版本过旧，更新后才能查看文件";
+const OUTDATED_READ = "设备上的 daemon 版本过旧，更新后才能查看文件";
 
 /**
  * A read response as the view sees it. A worker that predates the typed read leaves `status`

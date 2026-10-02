@@ -334,12 +334,12 @@ export function ChangesView({
   const totals = useMemo(() => {
     let added = 0;
     let deleted = 0;
-    for (const file of changedOnly ? filteredFiles : changes) {
+    for (const file of changedOnly ? filteredFiles : (shownList?.files ?? [])) {
       added += file.additions;
       deleted += file.deletions;
     }
     return { added, deleted };
-  }, [changedOnly, filteredFiles, changes]);
+  }, [changedOnly, filteredFiles, shownList]);
 
   /** `opening`: the overlay was just opened. A vanished selection then falls back to the first file;
    * during a refresh while open it moves to its neighbour in tree order instead. Started only by the
@@ -687,14 +687,10 @@ export function ChangesView({
 
   /* ----- Reveal (⌘+click on a terminal path) ----- */
 
-  // A new request is taken during render and applied once the change list of the scope on screen
-  // is there (it decides diff or content); a directory workspace has none to wait for.
-  const [pendingReveal, setPendingReveal] = useState<FileReveal | null>(null);
-  const [takenRevealSeq, setTakenRevealSeq] = useState<number | null>(null);
-  if (reveal && reveal.seq !== takenRevealSeq) {
-    setTakenRevealSeq(reveal.seq);
-    setPendingReveal(reveal);
-  }
+  // A request is pending while its `seq` is not the handled one. It is applied once the view is open
+  // and the change list of the scope on screen is there (it decides diff or content); a directory
+  // workspace has none to wait for.
+  const handledRevealSeqRef = useRef<number | null>(null);
   const applyReveal = useEffectEvent((target: FileReveal) => {
     const { path } = target;
     const change = fileByPath.get(path);
@@ -738,13 +734,12 @@ export function ChangesView({
       setFileReveal(target);
     }
   });
+  const revealReady = active && (isDirWorkspace || shownList !== null || listError !== null);
   useEffect(() => {
-    if (!pendingReveal || !active) return;
-    if (!isDirWorkspace && !shownList && !listError) return;
-    const target = pendingReveal;
-    setPendingReveal(null);
-    applyReveal(target);
-  }, [pendingReveal, active, isDirWorkspace, shownList, listError]);
+    if (!reveal || !revealReady || handledRevealSeqRef.current === reveal.seq) return;
+    handledRevealSeqRef.current = reveal.seq;
+    applyReveal(reveal);
+  }, [reveal, revealReady]);
 
   /* ----- File menu ----- */
 
