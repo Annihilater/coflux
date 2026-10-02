@@ -224,6 +224,11 @@ jobs:
         run: |
           mkdir -p dist
           bin="target/${{ matrix.target }}/release"
+          # cofluxd tells a launcher with `watch` apart by this byte run; 2.16.0 lost it on x86_64.
+          if ! LC_ALL=C grep -q -a -F "coflux-watch/1" "$bin/coflux-launcher"; then
+            echo "::error::coflux-launcher for ${{ matrix.target }} does not contain coflux-watch/1"
+            exit 1
+          fi
           # Raw binaries use stable asset names; cofluxd resolves the exact tag, then downloads and
           # verifies by that tag's manifest (schema 3: runtime + launcher, no raw signatures).
           cp "$bin/coflux-launcher" "dist/coflux-launcher-${{ matrix.target }}"
