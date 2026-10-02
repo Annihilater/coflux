@@ -12,7 +12,7 @@ coflux-screen (Swift, native/screen)                            renderer: screen
   ScreenCaptureKit → VideoToolbox H.264 (Annex B)                 input capture, product states, immersive
   CGEvent input, NSPasteboard, permission/lock state                    ▲ MessagePort
         ▲ $COFLUX_HOME/ipc/screen.sock (ScreenHelperFrame)       main: screen-host.ts — two owned RPC lanes
-coflux-worker: crates/worker/src/screen.rs                             per session, clipboard polling,
+coflux-runtime: crates/runtime/src/screen.rs                             per session, clipboard polling,
   scope gate, lane ↔ helper bridge, capability `screen_v1`             setIgnoreMenuShortcuts while focused
         ▲ coflux-transport (Tailcat, TCP) ─────────────────────────────┘
 ```
@@ -26,7 +26,7 @@ coflux-worker: crates/worker/src/screen.rs                             per sessi
   never in the daemon release tarballs or the worker hot-upgrade set. The desktop runtime passes
   `COFLUX_SCREEN_HELPER` (absolute path) and `COFLUX_SCREEN_VERSION` to the supervisor, which passes
   its environment to every worker, hot-upgraded ones included.
-- **Worker** (`crates/worker/src/screen.rs`): keeps one connection to the helper, starting it
+- **Worker** (`crates/runtime/src/screen.rs`): keeps one connection to the helper, starting it
   detached (own process group, not `kill_on_drop`) when nothing answers, so a worker restart or hot
   upgrade reattaches to the live session. Advertises `screen_v1` only after the versioned hello was
   acknowledged. Screen payloads are consumed right after the RPC scope gate; each lane holds the

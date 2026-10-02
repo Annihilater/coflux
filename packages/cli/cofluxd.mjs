@@ -49,7 +49,7 @@ const PENDING_AUTH = join(HOME, "pending-auth.json"); // worker 落盘的待授�
 // and deletes it on the server's answer, recording what happened in the outcome file (0600 each).
 const JOIN_KEY = join(HOME, "join-key.json");
 const JOIN_OUTCOME = join(HOME, "join-outcome.json");
-const CONN_STATE = join(HOME, "conn-state.json"); // worker 落盘的连接态快照（plan 033，见 crates/worker/src/conn_state.rs）
+const CONN_STATE = join(HOME, "conn-state.json"); // worker 落盘的连接态快照（plan 033，见 crates/runtime/src/conn_state.rs）
 const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/origin/grant；doctor 只读结构与数量，绝不打印秘密
 const FDA_STATUS = join(HOME, "fda-status"); // runtime 启动时探测落盘（仅 macOS，见 crates/runtime/src/fda.rs）
 // Device process set (plan 20261002-runtime-launcher-merge): the launcher owns the runtime version

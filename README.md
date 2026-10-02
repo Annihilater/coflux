@@ -145,8 +145,9 @@ Integration tests run real servers, runtimes, and WebSocket clients with tempora
 | `apps/desktop` | Electron, React, and xterm.js desktop app |
 | `apps/server` | Authentication, coordination, and PostgreSQL storage |
 | `apps/ios` | iOS client source; not part of the 1.0 desktop release |
-| `crates/supervisor` | PTYs, screen state, history, and Worker lifecycle |
-| `crates/worker` | Networking, Git, filesystem, and device operations |
+| `crates/ptyd` | PTY custody |
+| `crates/launcher` | Runtime version pointer, probation, and rollback |
+| `crates/runtime` | Sessiond, networking, Git, filesystem, and device operations |
 | `crates/cli` | Native `coflux` bundled with the desktop app |
 | `transport/tailcat` | Pinned native remote networking helper; stock DERP is self-hosted |
 | `packages/cli` | npm delivery of `coflux` and `cofluxd` |

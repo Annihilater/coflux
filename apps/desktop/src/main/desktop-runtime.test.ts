@@ -59,7 +59,7 @@ test("leave：让在跑的进程走 leave 退出，直到同一实例消失；�
   assert.equal(runtimeIsLauncher(launcher), true);
 });
 
-test("switch：请 launcher 切换 runtime，等它自己判定候选健康；候选回退到旧 id 即失败", async () => {
+test("switch：请 launcher 切换 runtime，结果只看它自己的 switch 记录：healthy 成功、rolledBack 失败并带原因", async () => {
   const seen: string[] = [];
   let polls = 0;
   const f = await fixture((request, socket) => {
@@ -71,7 +71,7 @@ test("switch：请 launcher 切换 runtime，等它自己判定候选健康；�
     }
     polls += 1;
     // pending and not yet healthy, then healthy.
-    socket.end(JSON.stringify({ ...launcher, runtimeId: "new", pending: true, healthy: polls > 1 }) + "\n");
+    socket.end(JSON.stringify({ ...launcher, runtimeId: "new", pending: true, healthy: polls > 1, lastSwitch: { runtimeId: "new", state: polls > 1 ? "healthy" : "pending" } }) + "\n");
   });
   try {
     const status = await switchRuntime(f.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" });
@@ -80,16 +80,28 @@ test("switch：请 launcher 切换 runtime，等它自己判定候选健康；�
     assert.ok(polls >= 2, "waited for the launcher's own health verdict");
   } finally { await f.dispose(); }
 
-  let rollbackPolls = 0;
+  // The launcher already rolled back by the time we poll: no sampling of the candidate in flight
+  // is needed, the record says so and carries the reason.
   const r = await fixture((request, socket) => {
     if (request.op === "switch") { socket.end('{"ok":true}\n'); return; }
-    rollbackPolls += 1;
-    // The candidate was seen once, then the launcher rolled back to the previous id.
-    socket.end(JSON.stringify({ ...launcher, runtimeId: rollbackPolls === 1 ? "new" : "runtime", pending: false, healthy: true }) + "\n");
+    socket.end(JSON.stringify({ ...launcher, runtimeId: "runtime", pending: false, healthy: true, lastSwitch: { runtimeId: "new", state: "rolledBack", reason: "exited repeatedly during probation" } }) + "\n");
   });
   try {
-    await assert.rejects(switchRuntime(r.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" }), /已恢复上一版本/);
+    await assert.rejects(switchRuntime(r.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" }), /已恢复上一版本.*exited repeatedly/);
   } finally { await r.dispose(); }
+
+  // A record about another id (an earlier switch) decides nothing for this one.
+  let stalePolls = 0;
+  const stale = await fixture((request, socket) => {
+    if (request.op === "switch") { socket.end('{"ok":true}\n'); return; }
+    stalePolls += 1;
+    socket.end(JSON.stringify({ ...launcher, runtimeId: "new", pending: true, healthy: false, lastSwitch: stalePolls > 1 ? { runtimeId: "new", state: "committed" } : { runtimeId: "older", state: "rolledBack", reason: "x" } }) + "\n");
+  });
+  try {
+    const status = await switchRuntime(stale.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" });
+    assert.equal(status.runtimeId, "new");
+    assert.ok(stalePolls >= 2, "the stale rolledBack record for another id was ignored");
+  } finally { await stale.dispose(); }
 
   const refused = await fixture((request, socket) => {
     socket.end(request.op === "switch" ? '{"ok":false,"error":"nope"}\n' : JSON.stringify(launcher) + "\n");

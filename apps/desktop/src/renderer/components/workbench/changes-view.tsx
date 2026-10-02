@@ -57,7 +57,7 @@ const TREE_WIDTH_KEY = "coflux_changes_tree_width";
  * changed-line count crosses either threshold waits for 「仍然加载」. */
 const LARGE_FILE_BYTES = 1024 * 1024;
 const LARGE_CHANGED_LINES = 3000;
-/** The worker refuses sides above 6 MB (crates/worker/src/changes.rs `MAX_SIDE_BYTES`). */
+/** The worker refuses sides above 6 MB (crates/runtime/src/changes.rs `MAX_SIDE_BYTES`). */
 const MAX_FILE_BYTES = 6 * 1024 * 1024;
 
 const SCOPE_LABEL: Record<ChangesScope, string> = {

@@ -3,7 +3,7 @@
  * the write lock.
  *
  * Why here and not in the daemon: worker memory is lost on hot upgrade (already stated in the
- * command-log index comment in `crates/worker/src/main.rs`), and `docs/architecture.md` states that
+ * command-log index comment in `crates/runtime/src/main.rs`), and `docs/architecture.md` states that
  * ordinary mutations offer no cross-worker deduplication. The daemon keeps only the state and
  * terminal outcomes the CLI polls; it neither schedules nor re-dispatches.
  *

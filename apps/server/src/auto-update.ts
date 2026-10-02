@@ -164,10 +164,10 @@ export class AutoUpdater {
 
   private async pollOnce(): Promise<void> {
     try {
-      const release = await fetchJson(`${config.autoUpdateApiBase}/repos/${config.autoUpdateRepo}/releases/latest`);
-      const tag = typeof release?.tag_name === "string" ? release.tag_name : null;
+      const github = await fetchJson(`${config.autoUpdateApiBase}/repos/${config.autoUpdateRepo}/releases/latest`);
+      const tag = typeof github?.tag_name === "string" ? github.tag_name : null;
       if (!tag) return;
-      const assets: { name: string; browser_download_url: string }[] = Array.isArray(release.assets) ? release.assets : [];
+      const assets: { name: string; browser_download_url: string }[] = Array.isArray(github.assets) ? github.assets : [];
       const manifestAsset = assets.find((a) => a.name === "manifest.json");
       if (!manifestAsset) {
         log.warn("release 缺少 manifest.json 资产", { tag });

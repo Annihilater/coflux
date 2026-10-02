@@ -725,10 +725,11 @@ impl RemoteUpgrader {
     }
 
     /// The launcher's committed remote release floor (learned at `ready`); a candidate at or
-    /// below it is refused before any download. The launcher re-checks on `switch`.
+    /// below it is refused before any download. The launcher re-checks on `switch` and is the
+    /// authority; without a launcher no floor is known here and nothing can switch anyway.
     fn ensure_release_is_newer(&self, candidate: &ReleaseVersion) -> Result<(), String> {
         let Some(launcher) = &self.launcher else {
-            return Err("no launcher: a bare runtime never switches versions".into());
+            return Ok(());
         };
         if let Some(floor) = launcher.release_floor() {
             if !candidate.is_newer_than(&floor) {

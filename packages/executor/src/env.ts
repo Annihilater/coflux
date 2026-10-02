@@ -1,7 +1,7 @@
 /**
  * The two environment variables that let a daemon start an executor host, fixed here so the three
  * sides that meet at them cannot drift: `packages/cli/cofluxd.mjs` writes them into the launchd /
- * systemd unit it generates, `crates/worker/src/executor_host.rs` reads them, and this package is
+ * systemd unit it generates, `crates/runtime/src/executor_host.rs` reads them, and this package is
  * what they point at.
  *
  * They are an **absolute path pair**, deliberately. The alternative — having the worker look for

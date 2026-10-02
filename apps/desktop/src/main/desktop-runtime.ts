@@ -31,6 +31,13 @@ export type RuntimeStatus = {
   /** A candidate is under observation (`pending`) and has / has not passed the launcher's checks (`healthy`). */
   pending?: boolean;
   healthy?: boolean;
+  /**
+   * The launcher's record of its most recent switch: the candidate's id and whether it is still
+   * pending, passed the launcher's checks, committed, or was rolled back (with the reason). The
+   * launcher resets it to `pending` the moment a new switch to that id begins, so an outcome read
+   * after our own `switch` request is always this attempt's.
+   */
+  lastSwitch?: { runtimeId: string; state: "pending" | "healthy" | "committed" | "rolledBack"; reason?: string | null };
   sessions: { id: string; pid?: number; taskId?: string }[];
 };
 
@@ -276,11 +283,12 @@ export async function stopRuntime(home: string, status: RuntimeStatus): Promise<
 
 /**
  * Ask the running launcher to stage-and-switch to the runtime in `directory` (plan
- * 20261002-runtime-launcher-merge). Resolves once the launcher reports the candidate healthy under its
- * own checks (nonce, every ptyd session taken over, gateway port accepting); rejects when the launcher
- * refuses, when the runtime id falls back to the previous one (the candidate failed and was rolled
- * back), or when nothing happens within the bound. Terminals stay in ptyd throughout; the app never
- * spawns, kills or rolls back a runtime itself.
+ * 20261002-runtime-launcher-merge). The outcome is read from the launcher's own switch record
+ * (`lastSwitch`), never from catching the candidate in flight between two polls: resolves once the
+ * launcher reports the candidate healthy under its checks (nonce, every ptyd session taken over,
+ * gateway port accepting) or committed; rejects when the launcher refuses, when it reports the
+ * candidate rolled back (with its reason), or when nothing is decided within the bound. Terminals
+ * stay in ptyd throughout; the app never spawns, kills or rolls back a runtime itself.
  */
 export async function switchRuntime(home: string, status: RuntimeStatus, next: { runtimeId: string; directory: string; version: string }): Promise<RuntimeStatus> {
   const result = await runtimeRequest(join(home, "runtime.sock"), {
@@ -288,18 +296,18 @@ export async function switchRuntime(home: string, status: RuntimeStatus, next: {
   }) as { ok?: boolean; error?: string };
   if (result?.ok !== true) throw new Error(result?.error ? `本机运行组件拒绝切换：${result.error}` : "本机运行状态已变化，请重新确认");
   const deadline = Date.now() + RUNTIME_SWITCH_TIMEOUT_MS;
-  let seenCandidate = false;
   while (Date.now() < deadline) {
     let current: RuntimeStatus | null = null;
     try { current = await runtimeStatus(home); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ERR_RUNTIME_TIMEOUT") throw error; }
     if (current) {
       if (current.instanceId !== status.instanceId) throw new Error("本机出现新运行实例，已保留，请重新确认");
-      if (current.runtimeId === next.runtimeId) {
-        seenCandidate = true;
-        if (current.healthy) return current;
-      } else if (seenCandidate) {
-        throw new Error("新版本未能通过健康检查，已恢复上一版本，终端未受影响");
+      const record = current.lastSwitch;
+      if (record && record.runtimeId === next.runtimeId) {
+        if (record.state === "healthy" || record.state === "committed") return current;
+        if (record.state === "rolledBack") {
+          throw new Error(`更新未能应用，已恢复上一版本，终端未受影响${record.reason ? `：${record.reason}` : ""}`);
+        }
       }
     }
     await delay(250);

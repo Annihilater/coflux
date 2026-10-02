@@ -10,7 +10,7 @@
 //!   the caller's workspace; the value never reaches this process.
 //!
 //! Everything travels over the worker's kernel-attested socket `$COFLUX_HOME/ipc/secret.sock`
-//! (`crates/worker/src/secret/socket.rs` holds the wire format), never over the loopback `/agent`
+//! (`crates/runtime/src/secret/socket.rs` holds the wire format), never over the loopback `/agent`
 //! endpoint: the worker identifies the caller by the pid the kernel reports for this connection,
 //! so the request carries none. The path is derived from `COFLUX_HOME` (default `~/.coflux`), not
 //! from a PTY variable, so terminals opened before a worker upgrade still find it.
@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::die;
 
-/// Mirrors `SOCKET_FILE` in `crates/worker/src/secret/socket.rs` (the directory is
+/// Mirrors `SOCKET_FILE` in `crates/runtime/src/secret/socket.rs` (the directory is
 /// `gateway::IPC_DIR`).
 const SOCKET_FILE: &str = "secret.sock";
 const DEFAULT_ASK_TIMEOUT_SECS: u64 = 10 * 60;

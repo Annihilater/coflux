@@ -10,6 +10,7 @@ import type { DaemonBundle } from "./daemon-bundle";
 import { buildDaemonSettings, daemonSettingsJson, parseCredentialsDaemonId, parseFdaStatus, parsePendingAuth, parseRuntimeVersion } from "./daemon-files";
 import { LAUNCHD_LABEL, type DaemonHomePaths } from "./daemon-paths";
 import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
+import { shouldStartLauncher } from "./launcher-watchdog";
 import { bundleLauncherId, bundlePtydId, bundleRuntimeId, leaveRuntime, ptydStatus, readVersionStamp, runtimeIsLauncher, runtimeStatus, runtimeSupportsLeave, stageRuntime, startPtyd, startRuntime, stopPtyd, stopRuntime, switchRuntime, type PtydStatus, type RuntimeStatus } from "./desktop-runtime";
 import { resolveRuntimeUpdate, shouldFollowBundledRuntime, type RuntimeFollowFacts } from "./runtime-follow";
 
@@ -90,14 +91,17 @@ function appFdaStatus(): DesktopDaemonFda {
   }
 }
 
+/** 两次自动拉起 launcher 之间的最短间隔：起不来就别每 1.5 秒撞一次。 */
+const LAUNCHER_RESTART_BACKOFF_MS = 10_000;
+
 /**
  * 桌面拥有生命周期，托管实例可跨更新存活。旧 LaunchAgent 仅用于有确认的迁移。
  *
  * plan 20261002-runtime-launcher-merge：三个进程——ptyd（持 PTY，长生）、launcher（持 runtime.sock，
  * 管版本指针、观察期与回滚，很少变）与 runtime（会话权威 + 中心连接，随 app 更新）。app 只起
  * launcher，之后请它切换 runtime；它自己不起、不杀、不回滚 runtime。"运行中"与"几个终端"两个事实来自
- * ptyd 与 launcher：launcher 在，runtime 换来换去面板都不翻；launcher 不在而 ptyd 还在（launcher 崩了）
- * 面板停在「已停止」让用户点「启动」——起 launcher 接回终端，没有 app 侧看门狗。
+ * ptyd 与 launcher：launcher 在，runtime 换来换去面板都不翻；launcher 崩了而 ptyd 还在，app 像 launchd /
+ * systemd 的 KeepAlive 那样把标记指向的 launcher 再拉起来（无版本判断、无回滚，那些在 launcher 里）。
  */
 export function createDaemonManager(options: DaemonManagerOptions): DaemonManager {
   const { paths, bundle, commands, log } = options;
@@ -113,6 +117,8 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
   let refreshError: DaemonFacts["error"];
   let disposed = false;
   let action: Promise<void> | null = null;
+  let lastAutoStartFailureAt: number | null = null;
+  const runtimeDir = (id: string) => join(paths.home, "desktop-runtimes", id);
   /**
    * Bundled runtime ids an automatic replacement was dispatched for during this app launch
    * (plan 20261002-runtime-follows-app). Never cleared: a version that failed to start does not
@@ -167,7 +173,26 @@ export function createDaemonManager(options: DaemonManagerOptions): DaemonManage
     try { ptyd = await ptydStatus(paths.home); }
     catch (failure) { log.warn("读取本机终端托管进程状态失败", String(failure)); ptyd = null; }
     emit();
+    watchdog();
     follow();
+  }
+  /** The launcher is gone while ptyd still holds the terminals: start the one the marker points at. */
+  function watchdog(): void {
+    if (disposed) return;
+    const facts = {
+      ptydAlive: ptyd !== null, launcherAlive: runtime !== null, installed: existsSync(marker), busy: action !== null,
+      lastFailureAt: lastAutoStartFailureAt, now: Date.now(), backoffMs: LAUNCHER_RESTART_BACKOFF_MS,
+    };
+    if (!shouldStartLauncher(facts)) return;
+    log.info("本机运行组件不在而终端托管进程仍在，自动拉起 launcher");
+    void run("start", async () => {
+      const id = readText(marker)?.trim();
+      if (!id || !existsSync(runtimeDir(id))) throw new Error("找不到本机运行组件目录，请重新接入");
+      if (!desiredLauncherId) throw new Error("此安装包不完整，请重新安装 Coflux");
+      try { runtime = await startRuntime(paths.home, runtimeDir(id), id, desiredLauncherId, paths.logFile); }
+      catch (failure) { lastAutoStartFailureAt = Date.now(); throw failure; }
+      lastAutoStartFailureAt = null;
+    });
   }
   /**
    * The runtime follows the app (plan 20261002-runtime-follows-app): a running, leave-capable

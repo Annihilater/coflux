@@ -56,12 +56,43 @@ pub struct HealthRefusal {
     pub retry: bool,
 }
 
+/// Outcome of the most recent switch, reported on `runtime.sock` so the desktop decides from
+/// launcher state instead of catching a candidate in flight between two polls. Keyed by the
+/// candidate's id and reset to `Pending` the moment a new switch to that id begins, so a stale
+/// outcome from an earlier attempt is never read as this one's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwitchState {
+    Pending,
+    Healthy,
+    Committed,
+    RolledBack,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwitchRecord {
+    pub id: String,
+    pub state: SwitchState,
+    pub reason: Option<String>,
+}
+
+impl SwitchRecord {
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            SwitchState::Pending => "pending",
+            SwitchState::Healthy => "healthy",
+            SwitchState::Committed => "committed",
+            SwitchState::RolledBack => "rolledBack",
+        }
+    }
+}
+
 /// What `runtime.sock` reports.
 pub struct Snapshot {
     pub runtime_id: String,
     pub runtime_version: String,
     pub pending: bool,
     pub healthy: bool,
+    pub last_switch: Option<SwitchRecord>,
 }
 
 struct State {
@@ -94,6 +125,7 @@ struct State {
     started_at: Instant,
     next_spawn_at: Instant,
     shutting_down: bool,
+    last_switch: Option<SwitchRecord>,
 }
 
 pub struct Manager {
@@ -193,8 +225,13 @@ impl Manager {
                 started_at: now,
                 next_spawn_at: now,
                 shutting_down: false,
+                last_switch: None,
             }),
         })
+    }
+
+    fn record_switch(st: &mut State, id: &str, state: SwitchState, reason: Option<String>) {
+        st.last_switch = Some(SwitchRecord { id: id.to_string(), state, reason });
     }
 
     fn recover_active(home: &str, builtin: &RuntimeSpec, known: &HashMap<String, RuntimeSpec>) -> Option<RuntimeSpec> {
@@ -316,6 +353,7 @@ impl Manager {
             st.release_floor_durable = true;
         }
         logln!("[launcher] runtime switch committed id={} version={}", pending.id, pending.version);
+        Self::record_switch(st, &pending.id, SwitchState::Committed, None);
         st.active = pending;
         st.pending_crashes = 0;
         st.pending_healthy = false;
@@ -324,9 +362,10 @@ impl Manager {
         st.restarts = 0;
     }
 
-    fn rollback_pending(&self, st: &mut State, from: &str) {
+    fn rollback_pending(&self, st: &mut State, from: &str, reason: &str) {
         let fallback = st.pending_fallback.take().unwrap_or_else(|| st.active.clone());
-        logln!("[launcher] runtime rollback from={from} to={}", fallback.id);
+        logln!("[launcher] runtime rollback from={from} to={}: {reason}", fallback.id);
+        Self::record_switch(st, from, SwitchState::RolledBack, Some(reason.to_string()));
         st.pending = None;
         st.pending_release = None;
         st.active = fallback;
@@ -393,7 +432,7 @@ impl Manager {
                     st.pending_crashes += 1;
                     if st.pending_crashes >= MAX_PENDING_CRASHES {
                         logln!("[launcher] pending runtime cannot start id={}", spec.id);
-                        self.rollback_pending(st, &spec.id);
+                        self.rollback_pending(st, &spec.id, &format!("cannot start: {e}"));
                     }
                 }
                 st.next_spawn_at = Instant::now() + Duration::from_millis(500);
@@ -430,7 +469,11 @@ impl Manager {
                         logln!("[launcher] pending runtime exited id={exited_id} crashes={crashes}");
                         if crashes >= MAX_PENDING_CRASHES {
                             logln!("[launcher] pending runtime crash-looping id={exited_id}");
-                            this.rollback_pending(&mut st, &exited_id);
+                            let reason = match st.last_switch.as_ref().and_then(|record| record.reason.clone()) {
+                                Some(refusal) if st.pending_termination_requested => refusal,
+                                _ => "exited repeatedly during probation".to_string(),
+                            };
+                            this.rollback_pending(&mut st, &exited_id, &reason);
                         }
                         st.next_spawn_at = Instant::now() + Duration::from_millis(300);
                     } else {
@@ -458,6 +501,12 @@ impl Manager {
                             let _ = child.kill();
                         }
                         st.pending_termination_requested = true;
+                        // Remember why, so the eventual rollback reports the health refusal
+                        // rather than a bare crash count.
+                        let running_id = st.running_id.clone();
+                        if let Some(record) = st.last_switch.as_mut().filter(|record| record.id == running_id) {
+                            record.reason.get_or_insert_with(|| "did not pass the launcher's health checks within probation".to_string());
+                        }
                     }
                 }
 
@@ -499,6 +548,11 @@ impl Manager {
     ) -> Result<Option<String>, HealthRefusal> {
         let refuse = |message: String, retry: bool| {
             logln!("[launcher] ready refused: {message}");
+            // Keep the latest refusal on the switch record: it becomes the rollback reason.
+            let mut st = self.state.lock().unwrap();
+            if let Some(record) = st.last_switch.as_mut().filter(|record| record.state == SwitchState::Pending) {
+                record.reason = Some(message.clone());
+            }
             Err(HealthRefusal { message, retry })
         };
         let (expected_nonce, floor) = {
@@ -543,9 +597,10 @@ impl Manager {
             && !st.pending_termination_requested
         {
             st.pending_healthy = true;
+            let id = st.running_id.clone();
+            Self::record_switch(&mut st, &id, SwitchState::Healthy, None);
             logln!(
-                "[launcher] pending runtime healthy id={} generation={generation} sessions={} gateway={port}",
-                st.running_id,
+                "[launcher] pending runtime healthy id={id} generation={generation} sessions={} gateway={port}",
                 live.len()
             );
         }
@@ -602,6 +657,7 @@ impl Manager {
         // A recovered runtime that has not passed probation never becomes the new candidate's
         // fallback: the fallback stays the builtin.
         logln!("[launcher] switching runtime from={} to={}", st.active.id, spec.id);
+        Self::record_switch(st, &spec.id, SwitchState::Pending, None);
         st.pending = Some(spec);
         st.pending_release = release;
         st.pending_crashes = 0;
@@ -622,6 +678,7 @@ impl Manager {
             runtime_version: spec.version,
             pending: st.pending.is_some(),
             healthy: st.pending.is_none() || st.pending_healthy,
+            last_switch: st.last_switch.clone(),
         }
     }
 
@@ -793,7 +850,7 @@ mod tests {
     }
 
     fn builtin() -> RuntimeSpec {
-        RuntimeSpec { id: "builtin".into(), version: "builtin".into(), cmd: "/bin/true".into(), args: vec![] }
+        RuntimeSpec { id: "builtin".into(), version: "builtin".into(), cmd: "/bin/sh".into(), args: vec![] }
     }
 
     fn manager(home: &Path, builtin: RuntimeSpec, known: HashMap<String, RuntimeSpec>) -> Arc<Manager> {
@@ -850,7 +907,7 @@ mod tests {
         let manager = manager(&home, builtin(), HashMap::new());
         {
             let mut state = manager.state.lock().unwrap();
-            state.pending = Some(RuntimeSpec { id: "candidate".into(), version: "candidate".into(), cmd: "/bin/true".into(), args: vec![] });
+            state.pending = Some(RuntimeSpec { id: "candidate".into(), version: "candidate".into(), cmd: "/bin/sh".into(), args: vec![] });
             state.running_id = "candidate".into();
             state.spawn_nonce = "expected".into();
             state.child = Some(Command::new("/bin/sh").args(["-c", "sleep 5"]).spawn().unwrap());
@@ -874,18 +931,19 @@ mod tests {
     #[test]
     fn builtin_semver_seeds_durable_floor_and_remote_switch_rejects_downgrade_or_replay() {
         let home = test_home("floor");
-        let builtin = RuntimeSpec { id: "v3.0.0".into(), version: "v3.0.0".into(), cmd: "/bin/true".into(), args: vec![] };
+        let builtin = RuntimeSpec { id: "v3.0.0".into(), version: "v3.0.0".into(), cmd: "/bin/sh".into(), args: vec![] };
         let manager = manager(&home, builtin, HashMap::new());
         assert_eq!(std::fs::read_to_string(home.join(RELEASE_FLOOR_MARKER)).unwrap(), "v3.0.0");
         install(&home, "v2.9.9", 0o755);
         install(&home, "v3.0.0", 0o755);
         install(&home, "v3.0.1", 0o755);
-        assert!(manager.switch("v2.9.9", true).is_err());
-        assert!(manager.switch("v3.0.0", true).is_ok(), "already active is a no-op, not a refusal");
+        assert!(manager.switch("v2.9.9", true).is_err(), "a downgrade is refused by the floor");
+        assert!(manager.switch("v3.0.0", true).is_err(), "equal precedence to the committed floor is a replay");
         assert!(manager.switch("v3.0.1", true).is_ok());
         let state = manager.state.lock().unwrap();
         assert_eq!(state.pending.as_ref().map(|s| s.id.as_str()), Some("v3.0.1"));
         assert_eq!(state.pending_release.as_ref().map(ReleaseVersion::as_str), Some("v3.0.1"));
+        assert_eq!(state.last_switch.as_ref().map(|r| (r.id.as_str(), r.state.clone())), Some(("v3.0.1", SwitchState::Pending)));
         drop(state);
         std::fs::remove_dir_all(home).unwrap();
     }
@@ -893,11 +951,11 @@ mod tests {
     #[test]
     fn administrator_switch_is_not_floor_bound_and_remote_unknown_non_release_is_refused() {
         let home = test_home("admin");
-        let builtin = RuntimeSpec { id: "v3.0.0".into(), version: "v3.0.0".into(), cmd: "/bin/true".into(), args: vec![] };
+        let builtin = RuntimeSpec { id: "v3.0.0".into(), version: "v3.0.0".into(), cmd: "/bin/sh".into(), args: vec![] };
         let manager = manager(&home, builtin, HashMap::new());
         assert!(manager.switch("canary", true).is_err(), "remote switch to an unregistered non-release id");
         manager
-            .register(RuntimeSpec { id: "canary".into(), version: "v2.0.0".into(), cmd: "/bin/true".into(), args: vec![] })
+            .register(RuntimeSpec { id: "canary".into(), version: "v2.0.0".into(), cmd: "/bin/sh".into(), args: vec![] })
             .unwrap();
         assert!(manager.switch("canary", false).is_ok(), "an administrator may switch to an older version");
         let state = manager.state.lock().unwrap();
@@ -918,9 +976,12 @@ mod tests {
             .begin_switch(&mut state, RuntimeSpec { id: "candidate".into(), version: "candidate".into(), cmd: "/bin/false".into(), args: vec![] }, None)
             .unwrap();
         assert_eq!(state.pending_fallback.as_ref().map(|s| s.id.as_str()), Some("builtin"));
-        manager.rollback_pending(&mut state, "candidate");
+        manager.rollback_pending(&mut state, "candidate", "exited repeatedly during probation");
         assert_eq!(state.active.id, "builtin");
         assert_eq!(std::fs::read_to_string(home.join(ACTIVE_MARKER)).unwrap(), "builtin");
+        let record = state.last_switch.as_ref().unwrap();
+        assert_eq!((record.id.as_str(), record.state.clone()), ("candidate", SwitchState::RolledBack));
+        assert!(record.reason.as_deref().is_some_and(|reason| reason.contains("exited repeatedly")));
         drop(state);
         std::fs::remove_dir_all(home).unwrap();
     }
@@ -953,6 +1014,7 @@ mod tests {
             assert!(state.pending.is_none());
             assert_eq!(state.active.id, "v1.0.0");
             assert_eq!(state.committed_release_floor.as_ref().map(ReleaseVersion::as_str), Some("v1.0.0"));
+            assert_eq!(state.last_switch.as_ref().map(|r| r.state.clone()), Some(SwitchState::Committed));
         }
         assert_eq!(std::fs::read_to_string(&floor_path).unwrap(), "v1.0.0");
         std::fs::remove_dir_all(home).unwrap();

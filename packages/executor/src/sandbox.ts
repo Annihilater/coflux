@@ -28,7 +28,7 @@
  * ## Why tool processes never get the network
  *
  * The daemon's loopback `/agent` endpoint identifies its caller by a pid the request body reports
- * about itself (`crates/worker/src/hook.rs`), and checks "this pid belongs to some session's process
+ * about itself (`crates/runtime/src/hook.rs`), and checks "this pid belongs to some session's process
  * tree" rather than "this connection really came from it". So any tool process inside the sandbox
  * that can reach loopback can use `terminal.new` to have the **entirely unsandboxed daemon** run
  * arbitrary commands for it — the sandbox would be pointless. Model calls happen in the runner,

@@ -13,7 +13,7 @@ import readline from "node:readline";
 // （生成时固定取前 8 位）。解析大小写不敏感并归一成小写；凡是收 ID 的地方都收标识。
 //
 // 规则是纯拼接，故各端各自本地生成，不上协议：Rust 侧同一份规则在 crates/cli/src/handle.rs 与
-// crates/worker/src/handle.rs——两版 CLI 的输出是逐字对齐的契约，改一边必须改另一边。
+// crates/runtime/src/handle.rs——两版 CLI 的输出是逐字对齐的契约，改一边必须改另一边。
 const HANDLE_KINDS = ["device", "project", "workspace", "terminal"];
 
 /** `id` 的标识。空进空出：缺坐标时不能造出 `coflux:x:` 这样的半截标识。 */

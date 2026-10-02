@@ -132,10 +132,13 @@ impl RuntimeControl {
                         .into_iter()
                         .map(|id| json!({"id": id}))
                         .collect();
+                    let last_switch = snapshot.last_switch.as_ref().map(|record| {
+                        json!({"runtimeId": record.id, "state": record.state_name(), "reason": record.reason})
+                    });
                     json!({"ok":true,"protocol":1,"instanceId":self.instance_id,
                         "launcher":true,"launcherId":self.launcher_id,"version":crate::LAUNCHER_VERSION,
                         "runtimeId":snapshot.runtime_id,"runtimeVersion":snapshot.runtime_version,
-                        "pending":snapshot.pending,"healthy":snapshot.healthy,
+                        "pending":snapshot.pending,"healthy":snapshot.healthy,"lastSwitch":last_switch,
                         "custody":"ptyd","sessions":sessions})
                 } else if request.op == "switch" && current {
                     let spec = RuntimeSpec {

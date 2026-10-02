@@ -7,7 +7,7 @@
 //! UUID). A handle is accepted anywhere the id is, and every entity that comes back carries one.
 //!
 //! The rule is a pure concatenation, so it is composed locally rather than carried on the wire.
-//! It is mirrored verbatim by `crates/worker/src/handle.rs` (the daemon side of the same local
+//! It is mirrored verbatim by `crates/runtime/src/handle.rs` (the daemon side of the same local
 //! protocol) and by `parseHandle` / `entityHandle` in `packages/cli/account-client.mjs` (the node
 //! CLI, whose output is contractually word-for-word identical to this one's).
 

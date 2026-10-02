@@ -3,7 +3,7 @@
  * dev/测试的 worker 上报 `builtin`，仓库的自动升级也刻意不做 semver 比较；而旧 worker 对未知
  * ServerToDaemon 载荷是静默丢弃的——不设门禁，agent 会白等到超时且没有任何可读原因。
  *
- * 能力名是协议契约的一部分，与 crates/worker/src/main.rs 的常量保持一致；新增控制消息时同步加名字。
+ * 能力名是协议契约的一部分，与 crates/runtime/src/main.rs 的常量保持一致；新增控制消息时同步加名字。
  */
 
 /** 认识 PreparedDeviceOperationExecute：中心可触发已安装 prepared 操作的执行（建/删 worktree、建会话）。 */

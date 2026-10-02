@@ -49,7 +49,7 @@ export const DEVICE_PROTOCOL_VERSION = 1;
 export const CONTROL_PROTOCOL_VERSION = 2;
 /** The capability name an executor host declares when it registers with the local daemon.
  * The daemon gates registration on this exact name (`CAPABILITY_EXECUTOR_HOST` in
- * `crates/worker/src/agent_ctl/executor.rs`), so the two must stay identical: a mismatch makes every
+ * `crates/runtime/src/agent_ctl/executor.rs`), so the two must stay identical: a mismatch makes every
  * registration refused, and the only symptom is `coflux executor run` reporting that this machine
  * has no executor host. The hosts themselves read it from `@coflux/executor`, which cannot depend on
  * this package (it is published to npm and this one is not); `packages/executor/src/capability.test.ts`
