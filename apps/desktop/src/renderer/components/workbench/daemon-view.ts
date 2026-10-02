@@ -67,7 +67,7 @@ export function daemonStatusLine(state: DesktopDaemonState): DaemonStatusLine {
 
 /**
  * 「有更新」后半句（plan 20261002-runtime-follows-app）：留在 ptyd 里的终端让更新自动应用；自动应用
- * 失败后即使错误行被清掉，这里仍要说清楚它没应用、可重试；旧 supervisor 只能靠用户点「更新」。
+ * 失败后即使错误行被清掉，这里仍要说清楚它没应用、可重试；早于 ptyd 的 supervisor 只能靠用户点「更新」。
  */
 function runtimeUpdateDetail(state: DesktopDaemonState): string {
   switch (state.runtimeUpdate) {

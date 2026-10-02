@@ -1012,7 +1012,7 @@ mod tests {
         assert!(!home.join("runtimes/v2.0.0/coflux-transport").exists());
         assert!(!home.join("runtimes/v2.0.0/transport-pair.json").exists());
         assert_eq!(
-            std::fs::read(home.join("runtimes/v2.0.0/coflux-worker")).unwrap(),
+            std::fs::read(home.join("runtimes/v2.0.0/coflux-runtime")).unwrap(),
             worker
         );
         std::fs::remove_dir_all(home).unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
         let body = b"signed worker bytes";
         let digest: [u8; 32] = Sha256::digest(body).into();
         let staged = stage_verified_bytes(&home, "v2", body, digest).unwrap();
-        let final_path = home.join("runtimes/v2/coflux-worker");
+        let final_path = home.join("runtimes/v2/coflux-runtime");
         assert!(!final_path.exists(), "晋升前正式路径不可见");
         assert!(
             staged.temp_path.as_ref().unwrap().exists(),

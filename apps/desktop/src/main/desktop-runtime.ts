@@ -6,20 +6,35 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { DaemonBundle } from "./daemon-bundle";
-import { DAEMON_BINARIES, DAEMON_VERSION_FILE, PTYD_BINARY, RUNTIME_BINARIES, SCREEN_HELPER_BINARY, SCREEN_HELPER_ENV, SCREEN_HELPER_VERSION_ENV } from "./daemon-paths";
+import { DAEMON_BINARIES, DAEMON_VERSION_FILE, LAUNCHER_BINARY, PTYD_BINARY, RUNTIME_BINARIES, RUNTIME_BINARY, SCREEN_HELPER_BINARY, SCREEN_HELPER_ENV, SCREEN_HELPER_VERSION_ENV } from "./daemon-paths";
 
+/**
+ * What answers `runtime.sock`. Since plan 20261002-runtime-launcher-merge that is `coflux-launcher`
+ * (`launcher: true`), which owns the socket across runtime swaps; a pre-plan supervisor answers with
+ * the same shape minus the launcher fields and is migrated on first sight.
+ */
 export type RuntimeStatus = {
   ok: true;
   protocol: 1;
   instanceId: string;
+  /** The content-addressed id of the runtime the launcher runs (or is observing); the app's follow decision compares it with the bundle's. */
   runtimeId: string;
+  /** The answering process's own version (launcher, or pre-plan supervisor). */
   version: string;
-  /** "ptyd" = 这个 supervisor 的 PTY 在 coflux-ptyd 里，支持 `leave`（替换时终端不动）；缺失 = 旧 supervisor */
+  /** "ptyd" = terminals live in coflux-ptyd, so `leave` keeps them; missing = a pre-ptyd supervisor */
   custody?: string;
-  sessions: { id: string; taskId: string; pid: number }[];
+  /** Present when a launcher answers. */
+  launcher?: boolean;
+  /** Identity of the launcher binary (COFLUX_LAUNCHER_ID the app passed at start); a changed bundled launcher is replaced through leave + start. */
+  launcherId?: string;
+  runtimeVersion?: string;
+  /** A candidate is under observation (`pending`) and has / has not passed the launcher's checks (`healthy`). */
+  pending?: boolean;
+  healthy?: boolean;
+  sessions: { id: string; pid?: number; taskId?: string }[];
 };
 
-/** coflux-ptyd 的只读状态（plan 20260918-ptyd-terminal-custody）：supervisor 缺席期间桌面靠它数终端、判断"还在跑"。 */
+/** coflux-ptyd 的只读状态（plan 20260918-ptyd-terminal-custody）：launcher 缺席期间桌面靠它数终端、判断"还在跑"。 */
 export type PtydStatus = {
   protocolVersion: number;
   /** 二进制身份（app 启动它时经 COFLUX_PTYD_ID 交下去的 bundlePtydId），与内置的比较得出「ptyd 有更新」 */
@@ -31,8 +46,10 @@ export type PtydStatus = {
 
 export const PTYD_SOCKET = "ptyd.sock";
 
-/** Upper bound for a starting supervisor to answer; session recovery grows with the number of live terminals. */
+/** Upper bound for a starting launcher to answer; the first runtime's session recovery grows with the number of live terminals. */
 const RUNTIME_START_TIMEOUT_MS = 60_000;
+/** Upper bound for a switched runtime to pass the launcher's checks (gateway bound, every ptyd session taken over). */
+const RUNTIME_SWITCH_TIMEOUT_MS = 90_000;
 
 /** ptyd record：`[u32 总长][u32 header_len][header JSON][raw]`（与 crates/protocol/src/ptyd.rs 一致）。 */
 function encodePtydRecord(header: Record<string, unknown>): Buffer {
@@ -109,9 +126,10 @@ export async function ptydStatus(home: string): Promise<PtydStatus | null> {
   };
 }
 
+const gone = (error: unknown) => ["ERR_RUNTIME_INCOMPLETE", "ECONNRESET", "EPIPE", "ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "");
+
 /** 结束本机全部终端并让 ptyd 退出（"停止" / 退出 / 退出登录 / ptyd 自身更新）。 */
 export async function stopPtyd(home: string, status: PtydStatus): Promise<void> {
-  const gone = (error: unknown) => ["ERR_RUNTIME_INCOMPLETE", "ECONNRESET", "EPIPE", "ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "");
   try {
     const result = await ptydRequest(join(home, PTYD_SOCKET), { op: "shutdown", instance_id: status.instanceId });
     if (result.kind !== "ok") throw new Error("本机终端托管进程状态已变化，请重新确认");
@@ -128,8 +146,8 @@ export async function stopPtyd(home: string, status: PtydStatus): Promise<void> 
 }
 
 /**
- * 启动 ptyd（与 supervisor 平级、由主应用直接 spawn、detached）。只有生命周期拥有者会启动它，
- * supervisor 永远不会。`ptydId` 是内置二进制的身份，ptyd 原样报回来，之后拿它判断"ptyd 有更新"。
+ * 启动 ptyd（与 launcher 平级、由主应用直接 spawn、detached）。只有生命周期拥有者会启动它，
+ * launcher 与 runtime 永远不会。`ptydId` 是内置二进制的身份，ptyd 原样报回来，之后拿它判断"ptyd 有更新"。
  */
 export async function startPtyd(home: string, directory: string, ptydId: string, logFile: string): Promise<PtydStatus> {
   const existing = await ptydStatus(home);
@@ -158,16 +176,21 @@ export async function startPtyd(home: string, directory: string, ptydId: string,
 }
 
 /**
- * 让 supervisor 走 leave-sessions 退出：杀 worker、退出，shell 全留在 ptyd 里。与 `stopRuntime`
- * 不共用路径——那条会结束每个终端。旧 supervisor（status 没有 custody）不认识 `leave`，调用方
- * 必须先看 `runtimeSupportsLeave`，别把一个会结束终端的更新伪装成无感更新。
+ * Whether the process on runtime.sock can be replaced with its terminals kept: a launcher, or a
+ * pre-plan supervisor whose PTYs already live in ptyd. A supervisor without `custody` predates ptyd;
+ * replacing it ends terminals, so the caller must keep the confirmed path for it.
  */
 export function runtimeSupportsLeave(status: RuntimeStatus): boolean {
   return status.custody === "ptyd";
 }
 
+/** A launcher answers runtime.sock (as opposed to a pre-plan supervisor that is migrated on sight). */
+export function runtimeIsLauncher(status: RuntimeStatus): boolean {
+  return status.launcher === true;
+}
+
+/** `leave`: the process on runtime.sock exits with every shell left in ptyd. Never shares a path with `stopRuntime`. */
 export async function leaveRuntime(home: string, status: RuntimeStatus): Promise<void> {
-  const gone = (error: unknown) => ["ERR_RUNTIME_INCOMPLETE", "ECONNRESET", "EPIPE", "ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "");
   try {
     const result = await runtimeRequest(join(home, "runtime.sock"), { op: "leave", instanceId: status.instanceId }) as { ok?: boolean };
     if (result?.ok !== true) throw new Error("本机运行状态已变化，请重新确认");
@@ -183,8 +206,12 @@ export async function leaveRuntime(home: string, status: RuntimeStatus): Promise
   throw new Error("本机运行组件尚未退出，已取消更新");
 }
 
+export type RuntimeRequest =
+  | { op: "status" | "stop" | "leave"; instanceId?: string }
+  | { op: "switch"; instanceId: string; runtimeId: string; cmd: string; version: string };
+
 /** 每次只发一个有界请求。实例随机标识防止退出确认跨过进程重启后误停新实例。 */
-export function runtimeRequest(socketPath: string, request: { op: "status" | "stop" | "leave"; instanceId?: string }): Promise<unknown> {
+export function runtimeRequest(socketPath: string, request: RuntimeRequest): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let data = "";
@@ -222,33 +249,65 @@ export async function runtimeStatus(home: string): Promise<RuntimeStatus | null>
   const status = value as Partial<RuntimeStatus> | null;
   if (!status || status.ok !== true || status.protocol !== 1 || typeof status.instanceId !== "string" ||
     typeof status.runtimeId !== "string" || typeof status.version !== "string" || !Array.isArray(status.sessions) ||
-    !status.sessions.every((s) => s && typeof s.id === "string" && typeof s.taskId === "string" && typeof s.pid === "number")) {
+    !status.sessions.every((s) => s && typeof s.id === "string")) {
     throw new Error("本机运行组件版本不兼容，现有终端已保留，请稍后更新");
   }
   return status as RuntimeStatus;
 }
 
-/** 结束本机全部终端后让 supervisor 退出（"停止"）。ptyd 由调用方另行 `stopPtyd`。 */
+/** 结束本机全部终端后让 launcher 退出（"停止"）。ptyd 由调用方另行 `stopPtyd`。 */
 export async function stopRuntime(home: string, status: RuntimeStatus): Promise<void> {
   // 停止会关闭 UDS；ack 或紧随其后的 status 都可能遇到 EOF。只能重查同一实例是否
   // 消失，不能把 EOF 直接当成功，也不能向可能已替换的新实例重发 stop。
-  const stoppingConnection = (error: unknown) => ["ERR_RUNTIME_INCOMPLETE", "ECONNRESET", "EPIPE", "ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "");
   try {
     const result = await runtimeRequest(join(home, "runtime.sock"), { op: "stop", instanceId: status.instanceId }) as { ok?: boolean };
     if (result?.ok !== true) throw new Error("本机运行状态已变化，请重新确认");
-  } catch (error) { if (!stoppingConnection(error)) throw error; }
+  } catch (error) { if (!gone(error)) throw error; }
   for (let i = 0; i < 100; i++) {
     try {
       const current = await runtimeStatus(home);
       if (!current) return;
       if (current.instanceId !== status.instanceId) throw new Error("本机出现新运行实例，已保留，请重新确认");
-    } catch (error) { if (!stoppingConnection(error)) throw error; }
+    } catch (error) { if (!gone(error)) throw error; }
     await delay(50);
   }
   throw new Error("本机终端尚未结束，已取消退出");
 }
 
-/** 运行目录按内容寻址。更新 .app 不会删掉活进程使用的 worker、CLI 或插件文件。ptyd 不参与：它的身份单独比较。 */
+/**
+ * Ask the running launcher to stage-and-switch to the runtime in `directory` (plan
+ * 20261002-runtime-launcher-merge). Resolves once the launcher reports the candidate healthy under its
+ * own checks (nonce, every ptyd session taken over, gateway port accepting); rejects when the launcher
+ * refuses, when the runtime id falls back to the previous one (the candidate failed and was rolled
+ * back), or when nothing happens within the bound. Terminals stay in ptyd throughout; the app never
+ * spawns, kills or rolls back a runtime itself.
+ */
+export async function switchRuntime(home: string, status: RuntimeStatus, next: { runtimeId: string; directory: string; version: string }): Promise<RuntimeStatus> {
+  const result = await runtimeRequest(join(home, "runtime.sock"), {
+    op: "switch", instanceId: status.instanceId, runtimeId: next.runtimeId, cmd: join(next.directory, RUNTIME_BINARY), version: next.version,
+  }) as { ok?: boolean; error?: string };
+  if (result?.ok !== true) throw new Error(result?.error ? `本机运行组件拒绝切换：${result.error}` : "本机运行状态已变化，请重新确认");
+  const deadline = Date.now() + RUNTIME_SWITCH_TIMEOUT_MS;
+  let seenCandidate = false;
+  while (Date.now() < deadline) {
+    let current: RuntimeStatus | null = null;
+    try { current = await runtimeStatus(home); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ERR_RUNTIME_TIMEOUT") throw error; }
+    if (current) {
+      if (current.instanceId !== status.instanceId) throw new Error("本机出现新运行实例，已保留，请重新确认");
+      if (current.runtimeId === next.runtimeId) {
+        seenCandidate = true;
+        if (current.healthy) return current;
+      } else if (seenCandidate) {
+        throw new Error("新版本未能通过健康检查，已恢复上一版本，终端未受影响");
+      }
+    }
+    await delay(250);
+  }
+  throw new Error("新版本在限定时间内未能就绪，请稍后重试");
+}
+
+/** 运行目录按内容寻址。更新 .app 不会删掉活进程使用的 runtime、CLI 或插件文件。ptyd 不参与：它的身份单独比较。 */
 export function bundleRuntimeId(bundle: DaemonBundle): string {
   const hash = createHash("sha256");
   hash.update(bundle.version ?? "dev");
@@ -262,6 +321,11 @@ export function bundleRuntimeId(bundle: DaemonBundle): string {
 /** 内置 ptyd 的身份：只由它自己的字节决定，不含版本戳——ptyd 不变则跨任意多次发版都相同。 */
 export function bundlePtydId(bundle: DaemonBundle): string {
   return createHash("sha256").update(readFileSync(join(bundle.dir, PTYD_BINARY))).digest("hex").slice(0, 24);
+}
+
+/** 内置 launcher 的身份：同 ptyd，只由字节决定。launcher 没变时，一次更新只让它切换 runtime；变了才 leave + 重新起。 */
+export function bundleLauncherId(bundle: DaemonBundle): string {
+  return createHash("sha256").update(readFileSync(join(bundle.dir, LAUNCHER_BINARY))).digest("hex").slice(0, 24);
 }
 
 export function stageRuntime(home: string, bundle: DaemonBundle, runtimeId: string): string {
@@ -278,16 +342,17 @@ export function stageRuntime(home: string, bundle: DaemonBundle, runtimeId: stri
   return destination;
 }
 
-/**
- * 启动 supervisor（由主应用直接启动，保持应用的权限责任链；不交给独立 LaunchAgent，也不重签二进制）。
- * ptyd 必须已经在跑（`startPtyd`）：supervisor 找不到它会立刻退出。
- */
 /** The staged runtime's VERSION stamp (CI writes vX.Y.Z; a local pack falls back to dev). */
-function readVersionStamp(directory: string): string {
+export function readVersionStamp(directory: string): string {
   try { return readFileSync(join(directory, DAEMON_VERSION_FILE), "utf8").trim() || "dev"; } catch { return "dev"; }
 }
 
-export async function startRuntime(home: string, directory: string, runtimeId: string, logFile: string): Promise<RuntimeStatus> {
+/**
+ * 启动 launcher（由主应用直接启动，保持应用的权限责任链；不交给独立 LaunchAgent，也不重签二进制）。
+ * launcher 从同目录起内置的 runtime；ptyd 必须已经在跑（`startPtyd`）：runtime 找不到它会立刻退出。
+ * The launcher passes its environment through to every runtime, centre-pushed ones included.
+ */
+export async function startRuntime(home: string, directory: string, runtimeId: string, launcherId: string, logFile: string): Promise<RuntimeStatus> {
   const existing = await runtimeStatus(home);
   if (existing) return existing;
   const temporaryHome = join(home, "terminal-data");
@@ -297,22 +362,20 @@ export async function startRuntime(home: string, directory: string, runtimeId: s
   let exited = false;
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn(join(directory, "coflux-supervisor"), [], {
+    child = spawn(join(directory, LAUNCHER_BINARY), [], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
-      env: { ...process.env, TMPDIR: temporaryHome, COFLUX_HOME: home, COFLUX_RUNTIME_CONTROL: "1", COFLUX_RUNTIME_ID: runtimeId,
-        COFLUX_WORKER_CMD: join(directory, "coflux-worker"), COFLUX_CLAUDE_PLUGIN_DIR: join(directory, "claude-plugin"),
-        // The supervisor passes its environment through to every worker, hot-upgraded ones included.
+      env: { ...process.env, TMPDIR: temporaryHome, COFLUX_HOME: home, COFLUX_RUNTIME_CONTROL: "1", COFLUX_RUNTIME_ID: runtimeId, COFLUX_LAUNCHER_ID: launcherId,
+        COFLUX_RUNTIME_CMD: join(directory, RUNTIME_BINARY), COFLUX_CLAUDE_PLUGIN_DIR: join(directory, "claude-plugin"),
         [SCREEN_HELPER_ENV]: join(directory, SCREEN_HELPER_BINARY), [SCREEN_HELPER_VERSION_ENV]: readVersionStamp(directory) },
     });
     child.once("error", (error) => { launchError = error; });
     child.once("exit", () => { exited = true; });
     child.unref();
   } finally { closeSync(logFd); }
-  // The supervisor binds runtime.sock before it re-attaches the sessions left in ptyd, and only
-  // answers once that is done; with a few dozen terminals that takes seconds. A status request that
-  // times out while our child is still alive means "still starting", not "failed" — treating it as a
-  // failure rolled back updates that were in fact coming up.
+  // The launcher binds runtime.sock at once; its runtime re-attaches the sessions left in ptyd
+  // before serving anyone, which with a few dozen terminals takes seconds. A status request that
+  // times out while our child is still alive means "still starting", not "failed".
   const deadline = Date.now() + RUNTIME_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     let status: RuntimeStatus | null = null;
@@ -323,8 +386,6 @@ export async function startRuntime(home: string, directory: string, runtimeId: s
     if (exited) throw new Error("本机运行组件启动失败，请查看 Coflux 日志");
     await delay(50);
   }
-  // Give up on this instance for good, so a rollback that starts the previous version cannot
-  // mistake it, answering a moment later, for the one it started.
   if (!exited) child.kill("SIGTERM");
   throw new Error("本机运行组件启动超时，请稍后重试");
 }

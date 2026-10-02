@@ -4,9 +4,10 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { leaveRuntime, ptydStatus, runtimeSupportsLeave, stopPtyd, stopRuntime, type RuntimeStatus } from "./desktop-runtime";
+import { leaveRuntime, ptydStatus, runtimeIsLauncher, runtimeSupportsLeave, stopPtyd, stopRuntime, switchRuntime, type RuntimeStatus } from "./desktop-runtime";
 
 const original: RuntimeStatus = { ok: true, protocol: 1, instanceId: "old", runtimeId: "runtime", version: "test", sessions: [] };
+const launcher: RuntimeStatus = { ...original, custody: "ptyd", launcher: true, launcherId: "l1", runtimeVersion: "v1", pending: false, healthy: true };
 
 async function fixture(handle: (request: { op: string }, socket: Socket, close: () => void) => void) {
   const home = mkdtempSync(join(tmpdir(), "coflux-stop-race-"));
@@ -41,7 +42,7 @@ for (const lostResponse of ["stop", "status"]) {
   });
 }
 
-test("leave：让在跑的 supervisor 走 leave-sessions 退出，直到同一实例消失；旧 supervisor 不支持 leave", async () => {
+test("leave：让在跑的进程走 leave 退出，直到同一实例消失；早于 ptyd 的 supervisor 不支持 leave", async () => {
   const requests: string[] = [];
   const f = await fixture((request, socket, close) => {
     requests.push(request.op);
@@ -54,6 +55,48 @@ test("leave：让在跑的 supervisor 走 leave-sessions 退出，直到同一�
   } finally { await f.dispose(); }
   assert.equal(runtimeSupportsLeave(original), false, "没有 custody 字段 = 早于 ptyd 的 supervisor");
   assert.equal(runtimeSupportsLeave({ ...original, custody: "ptyd" }), true);
+  assert.equal(runtimeIsLauncher({ ...original, custody: "ptyd" }), false, "a pre-plan leave-capable supervisor is not a launcher");
+  assert.equal(runtimeIsLauncher(launcher), true);
+});
+
+test("switch：请 launcher 切换 runtime，等它自己判定候选健康；候选回退到旧 id 即失败", async () => {
+  const seen: string[] = [];
+  let polls = 0;
+  const f = await fixture((request, socket) => {
+    seen.push(request.op);
+    if (request.op === "switch") {
+      assert.deepEqual(request, { op: "switch", instanceId: "old", runtimeId: "new", cmd: "/dir/coflux-runtime", version: "v2" });
+      socket.end('{"ok":true}\n');
+      return;
+    }
+    polls += 1;
+    // pending and not yet healthy, then healthy.
+    socket.end(JSON.stringify({ ...launcher, runtimeId: "new", pending: true, healthy: polls > 1 }) + "\n");
+  });
+  try {
+    const status = await switchRuntime(f.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" });
+    assert.equal(status.runtimeId, "new");
+    assert.equal(seen[0], "switch");
+    assert.ok(polls >= 2, "waited for the launcher's own health verdict");
+  } finally { await f.dispose(); }
+
+  let rollbackPolls = 0;
+  const r = await fixture((request, socket) => {
+    if (request.op === "switch") { socket.end('{"ok":true}\n'); return; }
+    rollbackPolls += 1;
+    // The candidate was seen once, then the launcher rolled back to the previous id.
+    socket.end(JSON.stringify({ ...launcher, runtimeId: rollbackPolls === 1 ? "new" : "runtime", pending: false, healthy: true }) + "\n");
+  });
+  try {
+    await assert.rejects(switchRuntime(r.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" }), /已恢复上一版本/);
+  } finally { await r.dispose(); }
+
+  const refused = await fixture((request, socket) => {
+    socket.end(request.op === "switch" ? '{"ok":false,"error":"nope"}\n' : JSON.stringify(launcher) + "\n");
+  });
+  try {
+    await assert.rejects(switchRuntime(refused.home, launcher, { runtimeId: "new", directory: "/dir", version: "v2" }), /拒绝切换/);
+  } finally { await refused.dispose(); }
 });
 
 /** ptyd 的 record 分帧：`[u32 总长][u32 header_len][header JSON][raw]`，连上先发 hello。 */

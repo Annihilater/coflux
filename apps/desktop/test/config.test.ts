@@ -336,7 +336,7 @@ test("coflux-screen: desktop-bundled helper, built from native/screen, absent fr
   assert.match(runtime, /\[SCREEN_HELPER_ENV\]: join\(directory, SCREEN_HELPER_BINARY\)/);
   assert.match(runtime, /\[SCREEN_HELPER_VERSION_ENV\]/);
   assert.equal(SCREEN_HELPER_ENV, "COFLUX_SCREEN_HELPER");
-  // Same spelling as the worker (crates/worker/src/screen.rs HELPER_ENV).
-  const worker = readFileSync(resolve(repoRoot, "crates/worker/src/screen.rs"), "utf8");
+  // Same spelling as the worker (crates/runtime/src/screen.rs HELPER_ENV).
+  const worker = readFileSync(resolve(repoRoot, "crates/runtime/src/screen.rs"), "utf8");
   assert.match(worker, new RegExp(`HELPER_ENV: &str = "${SCREEN_HELPER_ENV}"`));
 });
