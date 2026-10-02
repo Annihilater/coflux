@@ -46,7 +46,7 @@ function releaseStatementFor(component, metadata) {
     case "cli": return cliReleaseStatement(metadata);
     case "transport": return transportReleaseStatement(metadata);
     case "ptyd": return ptydReleaseStatement(metadata);
-    default: throw new Error(`未知 release component: ${JSON.stringify(component)}`);
+    default: throw new Error(`Unknown release component: ${JSON.stringify(component)}`);
   }
 }
 
@@ -58,11 +58,11 @@ export const MAX_RELEASE_ARTIFACT_BYTES = 128 * 1024 * 1024;
 
 function parseReleaseVersion(version) {
   const match = typeof version === "string" ? STRICT_RELEASE_VERSION.exec(version) : null;
-  if (!match) throw new Error(`release version 不是带 v 前缀的严格 SemVer: ${JSON.stringify(version)}`);
+  if (!match) throw new Error(`Release version must be strict SemVer with a v prefix: ${JSON.stringify(version)}`);
   const prerelease = match[4]
     ? match[4].split(".").map((identifier) => {
       if (/^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith("0")) {
-        throw new Error(`release version 的数字 prerelease 标识符含前导 0: ${JSON.stringify(version)}`);
+        throw new Error(`Release version has a numeric prerelease identifier with a leading zero: ${JSON.stringify(version)}`);
       }
       return /^\d+$/.test(identifier)
         ? { numeric: true, value: BigInt(identifier) }
@@ -121,13 +121,13 @@ function lenPrefixed(value) {
 function artifactReleaseStatement(domain, { version, target, sha256, size }) {
   assertReleaseVersion(version);
   if (typeof target !== "string" || !target || Buffer.byteLength(target) > 128) {
-    throw new Error("release target 非法");
+    throw new Error("Release target is invalid");
   }
   if (typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
-    throw new Error("release sha256 必须是 32 字节 hex");
+    throw new Error("Release sha256 must be 32 bytes of hex");
   }
   if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_RELEASE_ARTIFACT_BYTES) {
-    throw new Error("release size 必须是有效且有界的正整数");
+    throw new Error("Release size must be a positive integer within bounds");
   }
   const sizeBytes = Buffer.allocUnsafe(8);
   sizeBytes.writeBigUInt64BE(BigInt(size));
@@ -157,7 +157,7 @@ export function cliReleaseStatement(metadata) {
 export function createReleasePublicKey(publicKeyHex) {
   const normalized = typeof publicKeyHex === "string" ? publicKeyHex.trim() : "";
   if (!ED25519_PUBLIC_KEY_HEX.test(normalized)) {
-    throw new Error("发布公钥必须是 32 字节 hex");
+    throw new Error("The release public key must be 32 bytes of hex");
   }
   return crypto.createPublicKey({
     format: "jwk",
@@ -182,15 +182,15 @@ function isRecord(value) {
 export function parseReleaseManifestEntry(manifest, component, version, target) {
   assertReleaseVersion(version);
   if (!RELEASE_COMPONENTS.includes(component)) {
-    throw new Error(`未知 release component: ${JSON.stringify(component)}`);
+    throw new Error(`Unknown release component: ${JSON.stringify(component)}`);
   }
   if (!isRecord(manifest) || manifest.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.version !== version) {
-    throw new Error("release manifest schema/version 与请求不一致");
+    throw new Error("Release manifest schema/version does not match the request");
   }
   const entries = manifest[component];
   const entry = isRecord(entries) ? entries[target] : undefined;
   if (!isRecord(entry) || entry.target !== target) {
-    throw new Error(`release manifest 缺少匹配的 ${component}/${target}`);
+    throw new Error(`Release manifest has no matching ${component}/${target}`);
   }
   if (
     typeof entry.sha256 !== "string" ||
@@ -201,7 +201,7 @@ export function parseReleaseManifestEntry(manifest, component, version, target) 
     typeof entry.releaseSignature !== "string" ||
     !ED25519_SIGNATURE_HEX.test(entry.releaseSignature)
   ) {
-    throw new Error(`release manifest 的 ${component}/${target} 元数据非法`);
+    throw new Error(`Release manifest metadata is invalid for ${component}/${target}`);
   }
   // No component of schema 3 carries a legacy raw-binary signature (the worker's was the back
   // door old supervisors still check); a stray `signature` field is ignored, never trusted.
@@ -215,18 +215,18 @@ export function parseReleaseManifestEntry(manifest, component, version, target) 
 
 /** 校验实际 bytes 与 manifest 元数据及 component-separated release 签名。 */
 export function verifyReleaseArtifact({ component, version, entry, data, publicKey }) {
-  if (!Buffer.isBuffer(data)) throw new Error("release 产物必须是 Buffer");
+  if (!Buffer.isBuffer(data)) throw new Error("Release artifact must be a Buffer");
   if (data.byteLength !== entry.size) {
-    throw new Error(`${component} 产物大小不匹配：期望 ${entry.size}，实际 ${data.byteLength}`);
+    throw new Error(`${component} artifact size does not match: expected ${entry.size}, got ${data.byteLength}`);
   }
   const sha256 = crypto.createHash("sha256").update(data).digest("hex");
   if (sha256 !== entry.sha256) {
-    throw new Error(`${component} 产物 sha256 不匹配`);
+    throw new Error(`${component} artifact sha256 does not match`);
   }
   const metadata = { version, target: entry.target, sha256, size: data.byteLength };
   const statement = releaseStatementFor(component, metadata);
   if (!crypto.verify(null, statement, publicKey, Buffer.from(entry.releaseSignature, "hex"))) {
-    throw new Error(`${component} 产物 release Ed25519 签名无效`);
+    throw new Error(`${component} artifact release Ed25519 signature is invalid`);
   }
 }
 
@@ -265,7 +265,7 @@ export function installStagedPair(staged) {
       catch (restoreError) { restoreFailures.push(restoreError); }
     }
     if (restoreFailures.length > 0) {
-      throw new AggregateError([error, ...restoreFailures], "daemon 二进制替换失败且旧版本恢复不完整");
+      throw new AggregateError([error, ...restoreFailures], "Replacing the binaries failed and the previous version could not be fully restored");
     }
     throw error;
   }

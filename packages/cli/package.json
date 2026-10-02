@@ -1,7 +1,7 @@
 {
   "name": "cofluxd",
   "version": "2.15.0",
-  "description": "Coflux 无界面宿主（cofluxd）与统一操作工具（coflux）",
+  "description": "Run a headless Coflux device (cofluxd) and work with Coflux terminals, workspaces and your account (coflux)",
   "type": "module",
   "bin": {
     "cofluxd": "cofluxd.mjs",
@@ -11,6 +11,7 @@
     "cofluxd.mjs",
     "coflux.mjs",
     "account-client.mjs",
+    "output.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",
     "service-unit.mjs",

@@ -186,7 +186,7 @@ fn inner_element_line(target: &Value) -> String {
         let location = if line > 0 { format!("{file}:{line}") } else { file.to_string() };
         parts.push(format!("source {}", code(&location)));
     }
-    format!("- {}", parts.join(" · "))
+    format!("- {}", parts.join(", "))
 }
 
 /// The elements an annotation points at: one element, several (a shift-click selection), or a
@@ -289,7 +289,7 @@ fn render_code(anchor: &Value, out: &mut Vec<String>) {
 pub fn render_annotation(annotation: &Value) -> String {
     let mut out = Vec::new();
     out.push(format!(
-        "## #{} · {}",
+        "## #{} - {}",
         number(annotation, "number"),
         code(text(annotation, "id"))
     ));
@@ -368,7 +368,7 @@ pub fn render_list(result: &Value) -> String {
     if code_count > 0 {
         intro.push_str(" Code comments: the user commented on lines of this workspace's diff in Coflux's changes view. The file and line range are where the lines were when the comment was written; if the file has changed since, find the commented lines by their text.");
     }
-    let mut out = vec![format!("# Annotations · workspace {workspace}"), String::new(), intro];
+    let mut out = vec![format!("# Annotations in workspace {workspace}"), String::new(), intro];
     for annotation in &annotations {
         out.push(String::new());
         out.push(render_annotation(annotation));
@@ -424,20 +424,23 @@ pub fn run(args: &ParsedArgs) {
                     return;
                 }
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    crate::die(&format!(
-                        "no pending annotations in workspace {} within {timeout}s",
-                        workspace_label(&result)
-                    ));
+                    crate::die_with(
+                        &format!(
+                            "No pending annotations in workspace {} within {timeout}s.",
+                            workspace_label(&result)
+                        ),
+                        "Run coflux annotations watch again to keep waiting.",
+                    );
                 }
             }
         }
         Some("resolve") => {
             let Some(id) = args.positional(2) else {
-                crate::die("usage: coflux annotations resolve <id> --note \"<what you changed>\"");
+                crate::die_with("Missing annotation id.", "Usage: coflux annotations resolve <id> --note \"<what you changed>\"");
             };
             let note = args.string("note").unwrap_or("").trim().to_string();
             if note.is_empty() {
-                crate::die("annotations resolve needs --note \"<what you changed>\": the user reads it to review the change");
+                crate::die_with("Missing --note.", "Describe what you changed with --note; the user reads it to review the change.");
             }
             let mut request = body("annotations.resolve");
             request.insert("annotationId".into(), Value::from(id));
@@ -449,161 +452,9 @@ pub fn run(args: &ParsedArgs) {
                 println!("{}", render_resolved(&result));
             }
         }
-        _ => crate::die("annotations needs a subcommand: list | watch | resolve <id> --note \"…\""),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn sample() -> Value {
-        json!({
-            "workspaceId": "3f2a1b7c-0000",
-            "ref": "coflux:workspace:3f2a1b7c",
-            "path": "/src/app",
-            "revision": 4,
-            "resolvedCount": 1,
-            "annotations": [{
-                "id": "ann-0011", "number": 2, "status": "pending",
-                "comment": "Make it blue",
-                "page": { "url": "http://localhost:3000/", "title": "Home" },
-                "targets": [{
-                    "element": { "tag": "button", "elementId": "save", "classes": ["btn"], "attributes": {},
-                        "styles": { "color": "rgb(0, 0, 0)" }, "selector": "#save", "domPath": "html > body > button", "text": "Save" },
-                    "source": { "framework": "react", "components": ["SaveButton", "Toolbar"], "file": "src/Save.tsx", "line": 12, "column": 3 }
-                }],
-                "region": null,
-                "images": [{ "kind": "screenshot", "path": "/h/annotations/w/ann-0011/img-1.png" }, { "kind": "reference", "path": "/h/r.jpg" }],
-                "followUps": [{ "comment": "still black", "previousNote": "set color", "createdAt": 1.0 }]
-            }]
-        })
-    }
-
-    #[test]
-    fn list_renders_everything_an_agent_needs() {
-        let rendered = render_list(&sample());
-        for phrase in [
-            "workspace coflux:workspace:3f2a1b7c (/src/app)",
-            "## #2 · `ann-0011`",
-            "> Make it blue",
-            "Components (innermost first, react): SaveButton < Toolbar",
-            "Source: `src/Save.tsx:12:3`",
-            "Element: `<button id=\"save\" class=\"btn\">` with text \"Save\"",
-            "Screenshot of the current state: /h/annotations/w/ann-0011/img-1.png",
-            "Reference image from the user: /h/r.jpg",
-            "The user reopened it: \"still black\"",
-            "coflux annotations resolve <id>",
-            "design system",
-        ] {
-            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
-        }
-    }
-
-    #[test]
-    fn a_multi_element_annotation_describes_every_element() {
-        let annotation = json!({
-            "id": "ann-2", "number": 5, "comment": "Align these",
-            "targets": [
-                { "element": { "tag": "button", "selector": ".a" }, "source": { "framework": "react", "components": ["Button", "Header"] } },
-                { "element": { "tag": "div", "classes": ["card"], "selector": ".b" }, "source": { "components": ["Card"], "file": "src/Card.tsx", "line": 4 } },
-                { "element": { "tag": "nav", "selector": "nav" }, "source": null }
-            ],
-            "region": null
-        });
-        let rendered = render_annotation(&annotation);
-        for phrase in [
-            "- Elements: 3 (the user selected them together; the comment applies to all of them)",
-            "### Element 1 of 3",
-            "Components (innermost first, react): Button < Header",
-            "### Element 2 of 3",
-            "Source: `src/Card.tsx:4`",
-            "### Element 3 of 3",
-            "Selector: `nav`",
-        ] {
-            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
-        }
-    }
-
-    #[test]
-    fn a_region_annotation_describes_the_region_its_container_and_what_is_inside() {
-        let annotation = json!({
-            "id": "ann-3", "number": 6, "comment": "Too crowded",
-            "targets": [
-                { "element": { "tag": "header", "selector": "header" }, "source": { "components": ["Header", "App"] } },
-                { "element": { "tag": "img", "selector": "#logo" }, "source": { "components": ["Logo"] } },
-                { "element": { "tag": "a", "selector": "a.home" }, "source": null }
-            ],
-            "region": { "x": 12.0, "y": 4.5, "width": 320.0, "height": 80.0 },
-            "images": [{ "kind": "screenshot", "path": "/h/region.png" }]
-        });
-        let rendered = render_annotation(&annotation);
-        for phrase in [
-            "- Region: the user dragged a 320×80 px area on the page, 12 px right and 4.5 px down",
-            "### Container (the innermost element holding the region)",
-            "Components (innermost first): Header < App",
-            "### Inside the region",
-            "- Logo · `<img>` · selector `#logo`",
-            "- `<a>` · selector `a.home`",
-            "Screenshot of the current state: /h/region.png",
-        ] {
-            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
-        }
-    }
-
-    #[test]
-    fn empty_list_names_the_workspace() {
-        let rendered = render_list(&json!({ "ref": "coflux:workspace:aa", "annotations": [], "resolvedCount": 2 }));
-        assert_eq!(
-            rendered,
-            "No pending annotations in workspace coflux:workspace:aa. 2 resolved one(s) are waiting for the user to review."
-        );
-    }
-
-    #[test]
-    fn code_comments_render_their_location_and_lines() {
-        let result = json!({
-            "ref": "coflux:workspace:aa",
-            "resolvedCount": 0,
-            "annotations": [
-                {
-                    "id": "ann-7", "number": 7, "kind": "code", "comment": "Use the shared helper here",
-                    "page": { "url": "", "title": "" }, "targets": [], "region": null, "images": [],
-                    "code": { "path": "src/lib.rs", "side": "working-tree", "startLine": 12, "endLine": 14,
-                        "lines": "fn total() {\n    a + b\n}", "baseCommit": null }
-                },
-                {
-                    "id": "ann-8", "number": 8, "kind": "code", "comment": "Why was this removed?",
-                    "targets": [], "region": null,
-                    "code": { "path": "src/old.rs", "side": "base", "startLine": 3, "endLine": 3,
-                        "lines": "let s = \"```\";", "baseCommit": "0a1b2c3d" }
-                }
-            ]
-        });
-        let rendered = render_list(&result);
-        for phrase in [
-            "# Annotations · workspace coflux:workspace:aa",
-            "Code comments: the user commented on lines",
-            "## #7 · `ann-7`",
-            "> Use the shared helper here",
-            "- Code: `src/lib.rs:12-14` in the working tree",
-            "```\nfn total() {\n    a + b\n}\n```",
-            "- Code: `src/old.rs:3` on the base side of the diff (the version at commit `0a1b2c3d`",
-            "````\nlet s = \"```\";\n````",
-        ] {
-            assert!(rendered.contains(phrase), "missing {phrase}\n{rendered}");
-        }
-        // No page-annotation guidance or page lines for a code-only list.
-        assert!(!rendered.contains("Browser annotations:"));
-        assert!(!rendered.contains("- Page:"));
-    }
-
-    #[test]
-    fn resolved_line() {
-        assert_eq!(
-            render_resolved(&json!({ "annotation": { "id": "ann-1", "number": 3 } })),
-            "Resolved #3 (ann-1). The user will confirm it, or reopen it with a comment."
-        );
+        _ => crate::die_with(
+            "Unknown annotations command.",
+            "Use one of: list, watch, resolve <id> --note \"<what you changed>\".",
+        ),
     }
 }

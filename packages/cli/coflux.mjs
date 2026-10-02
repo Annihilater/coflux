@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // coflux：账号与本地、跨设备业务操作；不负责宿主生命周期。
 import { entityHandle, handlesAccountCommand, runAccountCommand } from "./account-client.mjs";
+import { error as printError, fail, info, success } from "./output.mjs";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
@@ -19,22 +20,23 @@ if (process.argv[2] === "agent" || process.argv[2] === "secret" || process.argv[
     ? join(process.env.COFLUX_AGENT_BUNDLE, "coflux")
     : join(HOME, "bin", "coflux");
   if (!existsSync(native)) {
-    console.error("Coflux integration is unavailable. Update this device with cofluxd update.");
-    process.exit(1);
+    fail("This command is not available on this device.", "Update Coflux on this device with cofluxd update, then try again.");
   }
   const result = spawnSync(native, process.argv.slice(2), { stdio: "inherit" });
-  if (result.error) console.error(result.error.message);
+  if (result.error) printError(result.error.message, "Update Coflux on this device with cofluxd update, then try again.");
   process.exit(result.status ?? 1);
 }
 const DEFAULT_LOCAL_GATEWAY_PORT = 8788;
-const die = (message) => { console.error("✗ " + message); process.exit(1); };
+/** Fallback next step for an error the daemon or the server relays without one. */
+const HELP_NEXT = "Run coflux --help for usage.";
+const die = (message, next = HELP_NEXT) => fail(message, next);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function localGatewayPort() {
   const raw = process.env.COFLUX_LOCAL_GATEWAY_PORT;
   if (raw === undefined || raw === "") return { ok: true, port: DEFAULT_LOCAL_GATEWAY_PORT };
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return { ok: false, error: `COFLUX_LOCAL_GATEWAY_PORT=${raw} 无法定位固定监听端口` };
+    return { ok: false, error: `COFLUX_LOCAL_GATEWAY_PORT=${raw} is not a valid port` };
   }
   return { ok: true, port };
 }
@@ -83,7 +85,7 @@ function socketPost(path, payload, timeoutMs) {
     );
     const timer = setTimeout(() => {
       timedOut = true;
-      req.destroy(new Error("请求超时"));
+      req.destroy(new Error("request timed out"));
     }, timeoutMs);
     req.on("error", (error) => {
       if (!timedOut && error?.syscall === "connect") {
@@ -91,7 +93,8 @@ function socketPost(path, payload, timeoutMs) {
         return finish({
           ok: false,
           kind: "denied",
-          message: `cannot connect to the coflux daemon's agent socket at ${AGENT_SOCKET} (${error.code || error.message}); this process is not allowed to reach it (a sandbox without local network access?)`,
+          message: `This process is not allowed to reach the Coflux service at ${AGENT_SOCKET}: ${error.code || error.message}`,
+          next: "If this runs in a sandbox, allow access to that socket.",
         });
       }
       finish({ ok: false, kind: "transport", message: error?.message || String(error) });
@@ -110,9 +113,9 @@ async function localPost(path, body, timeoutMs) {
   const { pid: _pid, ppid: _ppid, ...rest } = body;
   const viaSocket = await socketPost(path, JSON.stringify(rest), timeoutMs);
   if (viaSocket.ok || viaSocket.kind === "transport") return viaSocket;
-  if (viaSocket.kind === "denied") return { ok: false, kind: "refused", message: viaSocket.message };
+  if (viaSocket.kind === "denied") return { ok: false, kind: "refused", message: viaSocket.message, next: viaSocket.next };
   const portResult = localGatewayPort();
-  if (!portResult.ok) return { ok: false, kind: "refused", message: portResult.error };
+  if (!portResult.ok) return { ok: false, kind: "refused", message: portResult.error, next: "Unset COFLUX_LOCAL_GATEWAY_PORT, or set it to a port number." };
   try {
     const res = await fetch(`http://127.0.0.1:${portResult.port}${path}`, {
       method: "POST",
@@ -159,7 +162,7 @@ async function cmdHook() {
   try {
     const agent = positionals[1];
     if (agent !== "claude" && agent !== "codex") {
-      hookDebug(`未知 agent: ${agent ?? "(缺参)"}（需 claude|codex）`);
+      hookDebug(`unknown agent: ${agent ?? "(missing)"}; expected claude or codex`);
       return;
     }
     let payload = null;
@@ -168,13 +171,13 @@ async function cmdHook() {
     }
     if (!payload) payload = await readStdinJson();
     if (!payload || typeof payload !== "object") {
-      hookDebug("无有效 payload，忽略");
+      hookDebug("no valid payload; ignored");
       return;
     }
     // claude/codex hooks 引擎用 hook_event_name；codex notify 用 type
     const event = payload.hook_event_name || payload.type;
     if (typeof event !== "string" || !event) {
-      hookDebug("payload 缺事件名，忽略");
+      hookDebug("payload has no event name; ignored");
       return;
     }
     const notification = payload.notification_type ?? payload.notificationType;
@@ -195,7 +198,7 @@ async function cmdHook() {
     hookDebug("POST /hook", JSON.stringify(body));
     // The agent socket first; the gateway port is resolved only when the socket is absent.
     const res = await localPost("/hook", body, HOOK_POST_TIMEOUT_MS);
-    hookDebug(res.ok ? `响应 ${res.status}` : res.message);
+    hookDebug(res.ok ? `answered ${res.status}` : res.message);
   } catch (error) {
     hookDebug(error?.message || String(error));
   } finally {
@@ -249,18 +252,29 @@ async function agentPostResult(body) {
   const res = await localPost("/agent", { ...body, cwd: callerCwd() }, agentTimeoutMs());
   if (!res.ok) {
     if (res.kind === "refused") return res;
-    return { ok: false, kind: "transport", message: `连不上本机 daemon：${res.message}（daemon 没在跑？查看 Coflux.app 或 cofluxd status）` };
+    return {
+      ok: false,
+      kind: "transport",
+      message: `Cannot reach the Coflux service on this device: ${res.message}`,
+      next: SERVICE_NEXT,
+    };
   }
   let parsed = null;
-  try { parsed = JSON.parse(res.text); } catch { /* 非 JSON 响应按下面的兜底报错处理 */ }
-  const success = res.status >= 200 && res.status < 300;
-  if (!success || !parsed?.ok) return { ok: false, kind: "refused", message: parsed?.error || `daemon 返回 ${res.status}` };
+  try { parsed = JSON.parse(res.text); } catch { /* a non-JSON answer is reported below */ }
+  const ok = res.status >= 200 && res.status < 300;
+  if (!ok || !parsed?.ok) return { ok: false, kind: "refused", message: parsed?.error || `The Coflux service answered with HTTP ${res.status}.` };
   return { ok: true, value: parsed };
 }
 
-async function agentPost(body) {
+/** Next step when the local service cannot be reached at all. */
+const SERVICE_NEXT = "Check that Coflux is running on this device: open Coflux.app, or run cofluxd status.";
+/** Next step for a refusal about a terminal. */
+const TERMINAL_NEXT = "Run coflux terminal list to check the terminal.";
+
+/** `next` is shown under a refusal the daemon sent without one. */
+async function agentPost(body, next = HELP_NEXT) {
   const result = await agentPostResult(body);
-  if (!result.ok) die(result.message);
+  if (!result.ok) die(result.message, result.next || next);
   return result.value;
 }
 
@@ -299,8 +313,14 @@ function commandSuffix(t) {
 
 /** "do script": type a command into a terminal once its shell signalled prompt readiness. */
 async function runCommand(taskId, command) {
-  const result = await agentPost({ action: "terminal.run", taskId, command });
-  console.log(`已打入命令 #${result.commandSeq}（coflux terminal wait ${taskId} 等它结束，coflux terminal read ${taskId} 看输出）`);
+  const result = await agentPost({ action: "terminal.run", taskId, command }, TERMINAL_NEXT);
+  success(`Sent command #${result.commandSeq}`);
+  info(`Wait for it with coflux terminal wait ${taskId}, and read its output with coflux terminal read ${taskId}.`);
+}
+
+/** A subcommand that needs a terminal id got none. */
+function missingTaskId(sub, usage = "") {
+  die("Missing terminal id.", `Run coflux terminal list to find it, then coflux terminal ${sub} <taskId>${usage}.`);
 }
 
 async function cmdTerminal(values) {
@@ -311,57 +331,59 @@ async function cmdTerminal(values) {
     // the command any other way. --cmd missing and --cmd= blank are the same: nothing is typed.
     const command = (values.cmd ?? "").trim() ? values.cmd : "";
     const result = await agentPost({ action: "terminal.new", title: values.title || "" });
-    console.log(`已开终端 ${result.taskId}（用户可在 coflux 侧栏看到并随时接管）`);
+    success(`Opened terminal ${result.taskId}`);
     if (command) {
       await runCommand(result.taskId, command);
     } else {
-      console.log(`常驻的登录 shell（全 tty），不会自己退出`);
-      console.log(`跑命令：coflux terminal run ${result.taskId} --cmd="<命令>"（等提示符就绪后打入，wait 可等它结束）`);
-      console.log(`看输出：coflux terminal read ${result.taskId}；结束：coflux terminal close ${result.taskId}`);
+      info("It is a login shell the user can see and take over. It stays open until you close it.");
+      info(`Run a command:   coflux terminal run ${result.taskId} --cmd="<command>"`);
+      info(`Read its output: coflux terminal read ${result.taskId}`);
+      info(`Close it:        coflux terminal close ${result.taskId}`);
     }
   } else if (sub === "run") {
     const taskId = positionals[2];
-    if (!taskId) die("terminal run 需要 <taskId>（用 coflux terminal list 查）");
+    if (!taskId) missingTaskId("run", ' --cmd="<command>"');
     const command = (values.cmd ?? "").trim() ? values.cmd : "";
-    if (!command) die(`terminal run 需要 --cmd="<命令>"`);
+    if (!command) die("Missing command.", `Pass it with --cmd: coflux terminal run ${taskId} --cmd="<command>".`);
     await runCommand(taskId, command);
   } else if (sub === "close") {
     const taskId = positionals[2];
-    if (!taskId) die("terminal close 需要 <taskId>（用 coflux terminal list 查）");
-    const result = await agentPost({ action: "terminal.close", taskId });
+    if (!taskId) missingTaskId("close");
+    const result = await agentPost({ action: "terminal.close", taskId }, TERMINAL_NEXT);
     if (result.exited) {
       const exit = result.exitCode === undefined || result.exitCode === null ? "" : ` exit=${result.exitCode}`;
-      console.log(`已关闭终端 ${taskId}（exited${exit}）`);
+      success(`Closed terminal ${taskId}${exit}`);
     } else {
-      console.log(`已请求关闭终端 ${taskId}，shell 仍在退出中（coflux terminal list 可查）`);
+      info(`Closing terminal ${taskId}. Its shell is still exiting; check it with coflux terminal list.`);
     }
   } else if (sub === "list") {
     const { terminals } = await agentPost({ action: "terminal.list" });
-    if (!terminals.length) return void console.log("本工作区暂无终端");
+    if (!terminals.length) return void info("No terminals in this workspace.");
     for (const t of terminals) {
       const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
       console.log(`${rowHandle(t)}  ${t.status}${exit}${commandSuffix(t)}  ${t.title}`);
     }
   } else if (sub === "read") {
     const taskId = positionals[2];
-    if (!taskId) die("terminal read 需要 <taskId>（用 coflux terminal list 查）");
+    if (!taskId) missingTaskId("read");
     const requested = Number(values.lines);
     const lines = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_READ_LINES;
-    const result = await agentPost({ action: "terminal.read", taskId });
+    const result = await agentPost({ action: "terminal.read", taskId }, TERMINAL_NEXT);
     const exit = result.exitCode === undefined || result.exitCode === null ? "" : ` exit=${result.exitCode}`;
     console.log(`# ${result.status}${exit}`);
     const text = tailLines(stripAnsi(result.ansi), lines);
-    console.log(text || "（暂无输出）");
+    console.log(text || "(no output yet)");
   } else if (sub === "send") {
     const taskId = positionals[2];
-    if (!taskId) die("terminal send 需要 <taskId>（用 coflux terminal list 查）");
+    if (!taskId) missingTaskId("send", ' --text="<text>"');
     const text = values.text ?? "";
-    if (!text && !values.enter) die(`terminal send 需要 --text "<文本>"（或至少 --enter 发一个回车）`);
-    await agentPost({ action: "terminal.send", taskId, text, enter: Boolean(values.enter) });
-    console.log(`已写入终端 ${taskId}（用 coflux terminal read ${taskId} 核对效果）`);
+    if (!text && !values.enter) die("Nothing to send.", 'Pass --text="<text>", or --enter to send a single Enter.');
+    await agentPost({ action: "terminal.send", taskId, text, enter: Boolean(values.enter) }, TERMINAL_NEXT);
+    success(`Sent input to terminal ${taskId}`);
+    info(`Check the result with coflux terminal read ${taskId}.`);
   } else if (sub === "wait") {
     const taskId = positionals[2];
-    if (!taskId) die("terminal wait 需要 <taskId>（用 coflux terminal list 查）");
+    if (!taskId) missingTaskId("wait");
     const requested = Number(values.timeout);
     const timeoutSec = Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_WAIT_TIMEOUT_S;
     const seq = Number(values.seq);
@@ -371,33 +393,38 @@ async function cmdTerminal(values) {
       // Each round blocks inside the daemon (its command-state watch wakes it the moment the
       // command ends); a `running` answer only means the round elapsed.
       const roundMs = Math.min(WAIT_ROUND_MS, Math.max(1, deadline - Date.now()));
-      const t = await agentPost({ action: "terminal.wait", taskId, commandSeq, timeoutMs: roundMs });
+      const t = await agentPost({ action: "terminal.wait", taskId, commandSeq, timeoutMs: roundMs }, TERMINAL_NEXT);
       if (t.state !== "running") {
         const exit = t.exitCode === undefined || t.exitCode === null ? "" : ` exit=${t.exitCode}`;
         return void console.log(`# ${t.state === "exited" ? "exited" : "finished"}${exit}`);
       }
       if (Date.now() >= deadline) {
-        die(`等待超时（${timeoutSec}s）：终端 ${taskId} 的命令 #${t.commandSeq} 仍在运行。可加大 --timeout，或 coflux terminal read ${taskId} 看现场`);
+        die(
+          `Timed out after ${timeoutSec}s: command #${t.commandSeq} in terminal ${taskId} is still running.`,
+          `Wait longer with --timeout, or look at the screen with coflux terminal read ${taskId}.`,
+        );
       }
     }
   } else {
-    die(`terminal 需要子命令：new | run | list | read | wait | send | close`);
+    die(sub ? `Unknown terminal command: ${sub}.` : "Missing terminal command.", "Use one of: new, run, list, read, wait, send, close.");
   }
 }
 
 async function cmdNotify() {
   const message = positionals.slice(1).join(" ").trim();
-  if (!message) die(`notify 需要一句话，例如：coflux notify "两个方案拿不准，需要你定"`);
+  if (!message) die("Missing message.", 'Usage: coflux notify "<message>"');
   const result = await agentPost({ action: "notify", notificationId: randomUUID(), message });
-  if (!result.notificationId) die("daemon 不支持持久通知，请升级；未确认送达");
-  console.log("通知已发送（已保存到账号通知中心）");
+  if (!result.notificationId) {
+    die("The notification was not confirmed: this device's Coflux is too old to save it.", "Update Coflux on this device, then send it again.");
+  }
+  success("Notification sent");
 }
 
 async function cmdProgress() {
   const message = positionals.slice(1).join(" ").trim();
-  if (!message) die(`progress 需要一句话，例如：coflux progress "复现了，正在定位 relay 重连"`);
+  if (!message) die("Missing message.", 'Usage: coflux progress "<message>"');
   await agentPost({ action: "progress", message });
-  console.log("已更新进度（显示在工作区卡片上，被下一条覆盖）");
+  success("Progress updated");
 }
 
 // 「我在哪」与「跟着我搬」（plan 102 / 103）。三条都打一行 JSON，字段稳定——插件脚本按它比对，
@@ -429,7 +456,7 @@ async function cmdWorkspace() {
     // 路径缺省取调用方 cwd；插件脚本一律显式传 hook 载荷里的 cwd（hook 在会话当前目录执行，
     // 与载荷里的 cwd 未必相同）。
     const path = positionals[2] || callerCwd();
-    if (!path) die("workspace locate 需要 <path>（取不到当前目录）");
+    if (!path) die("Could not determine the current directory.", "Pass the path: coflux workspace locate <path>.");
     const result = await agentPost({ action: "workspace.locate", path });
     return void console.log(JSON.stringify({
       workspaceId: result.workspaceId,
@@ -441,7 +468,7 @@ async function cmdWorkspace() {
   }
   if (sub === "forget") {
     const path = positionals[2];
-    if (!path) die("workspace forget 需要 <path>（被删掉的 worktree 目录）");
+    if (!path) die("Missing path.", "Usage: coflux workspace forget <path>");
     const result = await agentPost({ action: "workspace.forget", path });
     return void console.log(JSON.stringify({
       workspaceId: result.workspaceId,
@@ -450,12 +477,12 @@ async function cmdWorkspace() {
       removed: Boolean(result.removed),
     }));
   }
-  die(`workspace 的子命令只有 enter | locate | forget（不带子命令 = 报出我在哪）`);
+  die(`Unknown workspace command: ${sub}.`, "Use enter, locate or forget, or no subcommand to print the current workspace.");
 }
 
 async function cmdPorts() {
   const { ports } = await agentPost({ action: "ports" });
-  if (!ports.length) return void console.log("本工作区暂无监听端口");
+  if (!ports.length) return void info("No listening ports in this workspace.");
   for (const p of ports) console.log(`${p.port}  ${p.url}`);
 }
 
@@ -496,25 +523,31 @@ function executorChangedFiles(status) {
 function renderExecutorSuccess(status) {
   const out = ["# succeeded"];
   const summary = String(status?.summary ?? "").trim();
-  out.push(summary || "（executor 没有留下最终回复）");
+  out.push(summary || "(the executor left no final reply)");
   const files = executorChangedFiles(status);
-  if (!files.length) out.push("改动文件：无");
-  else { out.push(`改动文件（${files.length}）：`); out.push(...files); }
-  out.push("executor 不会 git commit：改动请自己 review 后提交。");
+  if (!files.length) out.push("Changed files: none");
+  else { out.push(`Changed files (${files.length}):`); out.push(...files); }
+  out.push("The executor never commits. Review the changes and commit them yourself.");
   return out.join("\n");
 }
 
-/** One stderr sentence for a non-success terminal state: state, reason, and what already changed. */
+/** The error for a non-success terminal state: state, reason, and what already changed. */
 function renderExecutorFailure(status) {
   const terminal = String(status?.terminal ?? "") || "unknown";
-  const reason = String(status?.error ?? "").trim() || String(status?.note ?? "").trim() || "executor 没有给出原因";
+  const reason = String(status?.error ?? "").trim() || String(status?.note ?? "").trim() || "no reason given";
   const files = executorChangedFiles(status);
-  const tail = files.length ? `；已改动 ${files.length} 个文件：${files.join(" ")}` : "";
-  return `executor 任务未成功（${terminal}）：${reason}${tail}`;
+  const tail = files.length ? `. Files already changed (${files.length}): ${files.join(" ")}` : "";
+  return {
+    message: `Executor run ended as ${terminal}: ${reason}${tail}`,
+    next: files.length ? "Review the changes it left, then send a new run." : "Adjust the prompt and send a new run.",
+  };
 }
 
 function renderExecutorTimeout(timeoutSec, runId, phase) {
-  return `等待超时（${timeoutSec}s）：executor 任务 ${runId} 仍是 ${phase}，已请求取消。可加大 --timeout 后重发`;
+  return {
+    message: `Timed out after ${timeoutSec}s: executor run ${runId} was still ${phase} and has been cancelled.`,
+    next: "Send it again with a larger --timeout.",
+  };
 }
 
 /** Submit. A transport failure retries with the same submissionId; a refusal is reported verbatim.
@@ -526,19 +559,19 @@ async function executorSubmit(prompt, write, title) {
     const result = await agentPostResult({ action: "executor.submit", submissionId: submission, prompt, write, title });
     if (result.ok) {
       const runId = String(result.value?.runId ?? "");
-      if (!runId) die("daemon 没有返回 runId（版本太旧？）");
+      if (!runId) die("The Coflux service did not return a run id.", "Update Coflux on this device, then try again.");
       return runId;
     }
-    if (result.kind === "refused" || attempt >= EXECUTOR_SUBMIT_RETRIES) die(result.message);
+    if (result.kind === "refused" || attempt >= EXECUTOR_SUBMIT_RETRIES) die(result.message, result.next || HELP_NEXT);
     await sleep(EXECUTOR_POLL_MS);
   }
 }
 
 async function cmdExecutor(values) {
-  if (positionals[1] !== "run") die(`executor 的子命令只有 run：coflux executor run --prompt="<任务>" [--title="<标题>"] [--write]`);
+  if (positionals[1] !== "run") die("Unknown executor command.", 'Usage: coflux executor run --prompt="<task>" [--title="<title>"] [--write]');
   const prompt = String(values.prompt ?? "").trim();
   if (!prompt) {
-    die(`executor run 需要 --prompt="<任务>"（一句把边界说清的任务描述，例如 --prompt="把 crates/worker 的 clippy 警告清掉"）`);
+    die("Missing prompt.", 'Describe the task with --prompt, for example --prompt="Fix the clippy warnings in crates/worker".');
   }
   const write = Boolean(values.write);
   const title = String(values.title ?? "").trim();
@@ -553,104 +586,143 @@ async function cmdExecutor(values) {
       // `succeeded` is about the *task*; the envelope's top-level `ok` only says the request itself
       // was accepted.
       if (status.succeeded) return void console.log(renderExecutorSuccess(status));
-      die(renderExecutorFailure(status));
+      const failure = renderExecutorFailure(status);
+      die(failure.message, failure.next);
     }
     if (Date.now() >= deadline) {
       // Cancel before reporting: an unwatched write job still editing files in the background is
       // far worse than the timeout itself.
       await agentPostResult({ action: "executor.cancel", runId });
-      die(renderExecutorTimeout(timeoutSec, runId, status.phase));
+      const timeout = renderExecutorTimeout(timeoutSec, runId, status.phase);
+      die(timeout.message, timeout.next);
     }
     await sleep(EXECUTOR_POLL_MS);
   }
 }
 
-const HELP = `coflux —— 账号与终端操作
-  coflux hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
-                          （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
+const HELP = `Work with Coflux terminals, workspaces and your account.
 
-  以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
+Usage:
+  coflux <command> [subcommand] [flags]
 
-  coflux terminal new [--title="<标题>"] [--cmd="<命令>"]
-                          开一个真实终端：工作区目录下的常驻登录 shell，stdin/stdout 都是真 tty，
-                          用户在 coflux 侧栏能看到并随时接管，直到输入 exit 或 close 才结束
-                          带 --cmd = 等 shell 提示符就绪后把命令打进去（终端继续活着），等于 new + run
-  coflux terminal run <taskId> --cmd="<命令>"
-                          往已开的终端里打一条命令（提示符就绪后才打入；上一条还在跑时拒绝）
-  coflux terminal wait <taskId> [--timeout=<秒>] [--seq=<N>]
-                          阻塞等到当前（或第 N 条）命令结束，打印它的退出码：# finished exit=<code>；
-                          shell 自己退出则打印 # exited exit=<code>（默认超时 30 分钟）
-  coflux terminal read <taskId> [--lines=N]
-                          读终端滚动缓冲的尾部（纯文本，默认最后 200 行，可远超一屏）
-  coflux terminal send <taskId> --text="<文本>" [--enter]
-                          往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
-  coflux terminal list   列出本工作区的终端（含 status / 退出码，跑着的还带 busy|idle 与上一条命令的退出码）
+Commands for agents running in a Coflux terminal:
+  coflux terminal new [--title=<title>] [--cmd=<command>]
+      Open a terminal: a login shell on a real tty in the workspace directory. The user sees
+      it in the sidebar and can take it over. It stays open until you close it. With --cmd,
+      the command is typed in once the prompt is ready, the same as new followed by run.
+  coflux terminal run <taskId> --cmd=<command>
+      Type a command into the terminal once its prompt is ready. Refused while the previous
+      command is still running.
+  coflux terminal wait <taskId> [--timeout=<seconds>] [--seq=<N>]
+      Wait for the current (or Nth) command to finish and print "# finished exit=<code>",
+      or "# exited exit=<code>" when the shell itself ended. Default timeout: 30 minutes.
+  coflux terminal read <taskId> [--lines=<N>]
+      Print the end of the terminal's scrollback as plain text. Default: the last 200 lines.
+  coflux terminal send <taskId> --text=<text> [--enter]
+      Type text into the terminal; --enter adds Enter. Refused while the user has taken over.
+  coflux terminal list
+      List this workspace's terminals with their status and exit code. Live ones also show
+      busy or idle and the exit code of their last command.
   coflux terminal close <taskId>
-                          结束该终端（等价账号 CLI 的 stop）
-  coflux notify "<一句话>"  发送站内通知；服务器保存后确认送达
-  coflux progress "<一句话>"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
-  coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
-  coflux executor run --prompt="<任务>" [--title="<标题>"] [--write] [--timeout <秒>]
-                          把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
-                          执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
-                          不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
-                          Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
-                          同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
-                          （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
-                          --title 给这次运行起个短标题：用户在本终端上会看到一张进度小卡
-                          只有装了 Coflux.app 的这台机器能用
-  coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
-                          都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
-                          moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，跨工作区操作时也传这个
-                          workspaceId
+      End the terminal.
+  coflux notify "<message>"
+      Send the user a notification. Confirmed once the server has saved it.
+  coflux progress "<message>"
+      Show a progress line on the workspace card. The next one replaces it.
+  coflux ports
+      List this workspace's listening ports and their preview URLs.
+  coflux secret ask NAME --reason "<why>" [--timeout <seconds>]
+  coflux secret exec NAME [NAME…] -- <cmd> [args…]
+  coflux secret inject NAME --file <path> [--key KEY]
+      Get a secret (API key, password) from the user on their Coflux desktop without the
+      value entering your context: ask prints only provided | declined | cancelled; exec
+      runs a command with the value in a same-name environment variable and shows it as ***
+      in the output; inject writes KEY=value into a dotenv file in this workspace.
+      Details: coflux secret help
+  coflux annotations list [--json]
+  coflux annotations watch [--timeout <seconds>] [--json]
+  coflux annotations resolve <id> --note "<what you changed>"
+      Browser annotations: elements the user marked in Coflux's built-in browser for this
+      workspace, with their comment, component names and source location when known,
+      selector, and screenshot/reference image paths. list prints the pending ones as
+      markdown; watch blocks until there are some (default 30 minutes); after implementing
+      one, resolve it with a note the user reads to review the change.
+  coflux executor run --prompt=<task> [--title=<title>] [--write] [--timeout <seconds>]
+      Hand a well-bounded sub-task to the built-in executor and wait for its final reply and
+      the files it changed. Each run is one-shot. Read-only unless --write, with one writing
+      run per workspace at a time. It has no network and never commits. --title names the
+      progress card the user sees on this terminal. Needs Coflux.app on this machine.
+  coflux workspace
+      Print one JSON line: workspaceId (where your local commands land), path,
+      owningWorkspaceId (the workspace this terminal belongs to) and moved.
   coflux workspace enter <path>
-                          进入同仓库工作区并迁移当前终端；受管 Codex 会话记住选择供恢复/压缩使用。
-                          后续工具必须显式使用返回路径；不会改变宿主默认 cwd 或沙箱权限
+      Enter a workspace of the same repository and move this terminal there. Use the
+      returned path explicitly in later tool calls.
   coflux workspace locate [path]
-                          把本终端的**归属**搬到 path（缺省=当前目录）所属的工作区：进入/离开
-                          worktree 后 coflux 跟着走，未登记的同仓库 worktree 先登记出一个子工作区。
-                          插件自动调，一般不用手敲
+      Move this terminal to the workspace that owns path (default: the current directory),
+      registering a worktree of the same repository when needed. The plugin calls this.
   coflux workspace forget <path>
-                          该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
-                          （不执行 git worktree remove）
+      The worktree at path was deleted: move its terminals back to the main workspace and
+      drop its record. Does not run git worktree remove.
+  coflux hook <claude|codex>
+      Forward an agent hook event from stdin or argv to this device. Never fails the agent.
 
-实体标识：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
-coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收标识（大小写不敏感），返回实体的地方都带一个
-ref 字段给出它的标识。前缀在范围内撞车时会让你改用完整 ID；标识类型与命令要的不一致会直接报错，
-不会去动旁边那个实体。
-
-agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
-供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。
-
-账号命令（JSON 输出）：
-  coflux login --username <账号> --password-stdin [--server https://…]
+Account commands (JSON output):
+  coflux login [--server <url>]
+      Sign in through the browser. Over SSH, or with COFLUX_LOGIN_PASTE=1, paste a code.
+  coflux login --username <name> --password-stdin [--server <url>]
   coflux whoami | logout
   coflux device list | project list | workspace list
-  coflux device exec <deviceId> --cmd="<命令>" [--cwd=<目录>] [--timeout=<秒>]
-                          在另一台设备上跑一条命令并拿回结果，语义同 ssh host "cmd"：命令交给远端
-                          sh -c（管道、&&、重定向、通配、$VAR 都有效），stdout 与 stderr 分开回带，
-                          最后一行是 # exit=<code>，进程退出码透传远端（本命令自己失败时为 255）。
-                          **这不是终端**：没有 PTY、不进用户侧栏、不占工作区的终端并发额度、不需要
-                          任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
-                          --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
-                          用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
-  coflux project import <path> [--device <id>] [--name <名称>]
-                          把设备上的一个 git 仓库目录变成项目（路径在仓库里就导入仓库根），并
-                          建好它的主工作区；打印一行 JSON：projectId / name / repoPath /
-                          defaultBranch / workspaceId / path / alreadyImported。<path> 必填，
-                          只接受绝对路径或 ~ 开头的路径（它在目标设备上解析）——导入当前目录写
-                          coflux project import "$PWD"。--device 缺省取 COFLUX_DEVICE_ID。
-                          同一个仓库根导入第二次不会多出一个项目：返回已有的那个，
-                          alreadyImported=true
-  coflux workspace new --project <id> --branch <分支> [--existing-branch]
-  coflux workspace rename <id> --name <名称> | workspace remove <id>
-  coflux terminal new --workspace <id> [--cmd <命令>]
-  coflux terminal run|read|send|wait|stop|remove <id> --remote
-  coflux terminal list [--device <id>] [--workspace <id>]（跑着的终端带 busy / lastCommandExitCode，经 checkpoint 滞后 ≤2 秒）
+  coflux device exec <deviceId> --cmd=<command> [--cwd=<dir>] [--timeout=<seconds>]
+      Run one command on another device, like ssh host "cmd": it runs under sh -c, stdout
+      and stderr come back separately, the last line is "# exit=<code>", and the exit code
+      is the remote one (255 when this command itself fails). Not a terminal: no PTY,
+      nothing in the sidebar, no stdin. --cwd defaults to the device user's home and must be
+      absolute or start with ~. --timeout defaults to 60 seconds, at most 600. For
+      passwords, TUIs or long work the user should see, use coflux terminal new.
+  coflux project import <path> [--device <id>] [--name <name>]
+      Turn a git repository on a device into a project with its main workspace and print
+      one JSON line: projectId, name, repoPath, defaultBranch, workspaceId, path,
+      alreadyImported. <path> is resolved on the device and must be absolute or start with
+      ~; to import the current directory, pass "$PWD". --device defaults to
+      COFLUX_DEVICE_ID. Importing the same repository again returns the existing project
+      with alreadyImported=true.
+  coflux workspace new --project <id> --branch <branch> [--existing-branch]
+  coflux workspace rename <id> --name <name> | workspace remove <id>
+  coflux terminal new --workspace <id> [--cmd <command>] [--title <title>]
+  coflux terminal list [--device <id>] [--workspace <id>]
+  coflux terminal run|read|wait|send|stop|remove <id> --remote
   coflux ports --remote
-  已登录的 Coflux 应用可供 CLI 直接使用；独立 CLI 可自行登录。
-`;
-const { values, positionals } = parseArgs({
+      When the Coflux app is signed in, these use its account; otherwise run coflux login.
+
+Ids and handles:
+  Wherever an id is accepted you can pass a handle, coflux:<kind>:<first 8 of id>, for
+  example coflux:workspace:3f2a1b7c (case-insensitive). Results carry it as ref. A prefix
+  that matches several entities asks for the full id; a handle of the wrong kind is an error.
+
+Flags:
+  -h, --help    Show this help
+
+Environment:
+  COFLUX_AGENT_TIMEOUT_MS    Lower the wait for one local request (default 30000), for hook
+                             scripts with a hard time limit
+  NO_COLOR                   Turn off colour
+
+To manage this device, use Coflux.app or cofluxd.`;
+/** parseArgs errors in the same words as the Rust CLI (crates/cli/src/args.rs). */
+function argumentError(error) {
+  const message = String(error?.message ?? error);
+  const first = message.split(". ")[0];
+  const missing = /^Option '(.+)' argument missing/.exec(first);
+  if (missing) return `Option '${missing[1]}' needs a value`;
+  const unexpected = /^Option '(.+)' does not take an argument/.exec(first);
+  if (unexpected) return `Option '${unexpected[1]}' does not take a value`;
+  return first;
+}
+
+let parsedArgs;
+try {
+  parsedArgs = parseArgs({
   allowPositionals: true,
   options: {
     username: { type: "string" },
@@ -679,15 +751,19 @@ const { values, positionals } = parseArgs({
     enter: { type: "boolean", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
-});
+  });
+} catch (error) {
+  die(argumentError(error));
+}
+const { values, positionals } = parsedArgs;
 
 const cmd = positionals[0];
 if (values.help || cmd === "help" || !cmd) { console.log(HELP); process.exit(0); }
 if (handlesAccountCommand(positionals, values, HOME)) {
-  try { await runAccountCommand(positionals, values, HOME); } catch (error) { die(error.message); }
+  try { await runAccountCommand(positionals, values, HOME); } catch (error) { die(error.message, error.next); }
   process.exit(0);
 }
 const handlers = { hook: cmdHook, terminal: cmdTerminal, notify: cmdNotify, progress: cmdProgress, ports: cmdPorts, executor: cmdExecutor, workspace: cmdWorkspace };
 const handler = handlers[cmd];
-if (!handler) die(`未知命令: ${cmd}\n本机宿主请使用 Coflux.app 或 cofluxd。\n\n${HELP}`);
+if (!handler) die(`Unknown command: ${cmd}`, "Run coflux --help to see the commands. To manage this device, use Coflux.app or cofluxd.");
 await handler(values);

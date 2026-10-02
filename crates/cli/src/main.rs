@@ -15,121 +15,131 @@ mod handle;
 mod integration;
 mod secret;
 mod text;
+mod ui;
 
-/// `✗ <msg>` 到 stderr 并以 1 退出（node 版 `die`）。
+/// `✗ Error: <first line>` and the remaining lines as the next step, on stderr; exit 1. A
+/// one-line message gets the generic next step (the node `die`).
 pub fn die(message: &str) -> ! {
-    eprintln!("✗ {message}");
-    std::process::exit(1)
+    match message.split_once('\n') {
+        Some((what, next)) => ui::fail(what, next, 1),
+        None => ui::fail(message, ui::HELP_NEXT, 1),
+    }
 }
 
-const HELP: &str = "账号命令（JSON 输出）：
-  coflux login [--server https://…]   在浏览器中登录（打印地址并尝试打开浏览器；SSH 下改为粘贴登录码，
-                          也可用 COFLUX_LOGIN_PASTE=1 强制），打印「已登录为 <邮箱>」
-  coflux login --username <账号> --password-stdin [--server https://…]
-  coflux whoami | logout
-  coflux device list | project list | workspace list
-  coflux device exec <deviceId> --cmd=\"<命令>\" [--cwd=<目录>] [--timeout=<秒>]
-                          在另一台设备上跑一条命令并拿回结果，语义同 ssh host \"cmd\"：命令交给远端
-                          sh -c（管道、&& 、重定向、通配、$VAR 都有效），stdout 与 stderr 分开回带，
-                          最后一行是 # exit=<code>，进程退出码透传远端（本命令自己失败时为 255）。
-                          **这不是终端**：没有 PTY、不进用户侧栏、不占工作区的终端并发额度、不需要
-                          任何工作区。--cwd 默认 daemon 用户的 HOME，只接受绝对路径或 ~ 开头的路径；
-                          --timeout 默认 60 秒、最长 600 秒；没有 stdin。要输密码、驱动 TUI，或想让
-                          用户看见过程并能接管的长任务，用 coflux terminal new，不要用它
-  coflux project import <path> [--device <id>] [--name <名称>]
-                          把设备上的一个 git 仓库目录变成项目（路径在仓库里就导入仓库根），并
-                          建好它的主工作区；打印一行 JSON：projectId / name / repoPath /
-                          defaultBranch / workspaceId / path / alreadyImported。<path> 必填，
-                          只接受绝对路径或 ~ 开头的路径（它在目标设备上解析）——导入当前目录写
-                          coflux project import \"$PWD\"。--device 缺省取 COFLUX_DEVICE_ID。
-                          同一个仓库根导入第二次不会多出一个项目：返回已有的那个，
-                          alreadyImported=true
-  coflux workspace new --project <id> --branch <分支> [--existing-branch]
-  coflux workspace rename <id> --name <名称> | workspace remove <id>
-  coflux terminal new --workspace <id> [--cmd <命令>] [--title <标题>]
-  coflux terminal list [--device <id>] [--workspace <id>]（跑着的终端带 busy / lastCommandExitCode，经 checkpoint 滞后 ≤2 秒）
-  coflux terminal run|read|wait|send|stop|remove <id> --remote
-  coflux ports --remote
-  在 Coflux 应用已登录时自动使用应用账号；独立 CLI 可自行登录。
-  命令退出或升级 CLI 不会结束已运行的终端。
+/// `die` with an explicit next step.
+pub fn die_with(message: &str, next: &str) -> ! {
+    ui::fail(message, next, 1)
+}
 
-coflux —— 账号与终端操作
+const HELP: &str = r##"Work with Coflux terminals, workspaces and your account.
 
-  本机宿主管理请使用 Coflux.app 或 cofluxd。
+Usage:
+  coflux <command> [subcommand] [flags]
 
-  coflux hook <claude|codex>   [agent hook 信使] 读 stdin/argv 的事件 JSON，转发给本机 daemon
-                          （在 claude/codex 的 hook 配置里指向本命令；失败静默，不干扰 agent）
-
-  以下几条供**跑在 coflux 终端里的 agent** 调用，把工作变成用户看得见、能接管的东西：
-
-  coflux terminal new [--title=\"<标题>\"] [--cmd=\"<命令>\"]
-                          开一个真实终端：工作区目录下的常驻登录 shell，stdin/stdout 都是真 tty，
-                          用户在 coflux 侧栏能看到并随时接管，直到输入 exit 或 close 才结束
-                          带 --cmd = 等 shell 提示符就绪后把命令打进去（终端继续活着），等于 new + run
-  coflux terminal run <taskId> --cmd=\"<命令>\"
-                          往已开的终端里打一条命令（提示符就绪后才打入；上一条还在跑时拒绝）
-  coflux terminal wait <taskId> [--timeout=<秒>] [--seq=<N>]
-                          阻塞等到当前（或第 N 条）命令结束，打印它的退出码：# finished exit=<code>；
-                          shell 自己退出则打印 # exited exit=<code>（默认超时 30 分钟）
-  coflux terminal read <taskId> [--lines=N]
-                          读终端滚动缓冲的尾部（纯文本，默认最后 200 行，可远超一屏）
-  coflux terminal send <taskId> --text=\"<文本>\" [--enter]
-                          往终端里输入文本（--enter 追加回车）。用户正在接管时会被拒
-  coflux terminal list   列出本工作区的终端（含 status / 退出码，跑着的还带 busy|idle 与上一条命令的退出码）
+Commands for agents running in a Coflux terminal:
+  coflux terminal new [--title=<title>] [--cmd=<command>]
+      Open a terminal: a login shell on a real tty in the workspace directory. The user sees
+      it in the sidebar and can take it over. It stays open until you close it. With --cmd,
+      the command is typed in once the prompt is ready, the same as new followed by run.
+  coflux terminal run <taskId> --cmd=<command>
+      Type a command into the terminal once its prompt is ready. Refused while the previous
+      command is still running.
+  coflux terminal wait <taskId> [--timeout=<seconds>] [--seq=<N>]
+      Wait for the current (or Nth) command to finish and print "# finished exit=<code>",
+      or "# exited exit=<code>" when the shell itself ended. Default timeout: 30 minutes.
+  coflux terminal read <taskId> [--lines=<N>]
+      Print the end of the terminal's scrollback as plain text. Default: the last 200 lines.
+  coflux terminal send <taskId> --text=<text> [--enter]
+      Type text into the terminal; --enter adds Enter. Refused while the user has taken over.
+  coflux terminal list
+      List this workspace's terminals with their status and exit code. Live ones also show
+      busy or idle and the exit code of their last command.
   coflux terminal close <taskId>
-                          结束该终端（等价账号 CLI 的 stop）
-  coflux notify \"<一句话>\"  发送站内通知；服务器保存后确认送达
-  coflux progress \"<一句话>\"  播报进度：显示在工作区卡片上，被下一条覆盖（不打扰用户）
-  coflux ports           列出本工作区的监听端口及可直接打开的预览 URL
-  coflux secret ask NAME --reason \"<why>\" [--timeout <seconds>]
+      End the terminal.
+  coflux notify "<message>"
+      Send the user a notification. Confirmed once the server has saved it.
+  coflux progress "<message>"
+      Show a progress line on the workspace card. The next one replaces it.
+  coflux ports
+      List this workspace's listening ports and their preview URLs.
+  coflux secret ask NAME --reason "<why>" [--timeout <seconds>]
   coflux secret exec NAME [NAME…] -- <cmd> [args…]
   coflux secret inject NAME --file <path> [--key KEY]
-                          Get a secret (API key, password) from the user on their Coflux desktop
-                          without the value entering your context: ask prints only
-                          provided | declined | cancelled; exec runs a command with the value in
-                          a same-name environment variable and shows it as *** in the output;
-                          inject writes KEY=value into a dotenv file in this workspace.
-                          Details: coflux secret help
+      Get a secret (API key, password) from the user on their Coflux desktop without the
+      value entering your context: ask prints only provided | declined | cancelled; exec
+      runs a command with the value in a same-name environment variable and shows it as ***
+      in the output; inject writes KEY=value into a dotenv file in this workspace.
+      Details: coflux secret help
   coflux annotations list [--json]
   coflux annotations watch [--timeout <seconds>] [--json]
-  coflux annotations resolve <id> --note \"<what you changed>\"
-                          Browser annotations: elements the user marked in Coflux's built-in browser
-                          for this workspace, with their comment, component names and source
-                          location when known, selector, and screenshot/reference image paths.
-                          list prints the pending ones as markdown; watch blocks until there are
-                          some (default 30 minutes); after implementing one, resolve it with a note
-                          the user reads to review the change
-  coflux executor run --prompt=\"<任务>\" [--title=\"<标题>\"] [--write] [--timeout <秒>]
-                          把一个边界清楚的子任务甩给内置的轻量 executor（由本机 Coflux.app
-                          执行），阻塞到跑完并打印它的最终回复与改动文件。一次性：没有会话、
-                          不续聊，要改就再发一次。入参只有任务描述与读写模式——模型由用户在
-                          Coflux.app 里全局配一次。默认只读；--write 才允许改文件（同一工作区
-                          同时只允许一个写任务）。它被内核级沙箱锁在本工作区目录内，**不联网**
-                          （先把依赖装好再甩），也**不会 git commit**（改动由你自己 review 提交）
-                          --title 给这次运行起个短标题：用户在本终端上会看到一张进度小卡
-                          只有装了 Coflux.app 的这台机器能用
-  coflux workspace       一行 JSON 报出「我在哪」：workspaceId（cwd 所在的有效工作区，本地命令
-                          都落在它上面）、path、owningWorkspaceId（本终端此刻归属哪个工作区）、
-                          moved。用 /cd 挪进另一个 coflux 工作区后用它确认目标，跨工作区操作时也传这个
-                          workspaceId
+  coflux annotations resolve <id> --note "<what you changed>"
+      Browser annotations: elements the user marked in Coflux's built-in browser for this
+      workspace, with their comment, component names and source location when known,
+      selector, and screenshot/reference image paths. list prints the pending ones as
+      markdown; watch blocks until there are some (default 30 minutes); after implementing
+      one, resolve it with a note the user reads to review the change.
+  coflux executor run --prompt=<task> [--title=<title>] [--write] [--timeout <seconds>]
+      Hand a well-bounded sub-task to the built-in executor and wait for its final reply and
+      the files it changed. Each run is one-shot. Read-only unless --write, with one writing
+      run per workspace at a time. It has no network and never commits. --title names the
+      progress card the user sees on this terminal. Needs Coflux.app on this machine.
+  coflux workspace
+      Print one JSON line: workspaceId (where your local commands land), path,
+      owningWorkspaceId (the workspace this terminal belongs to) and moved.
   coflux workspace enter <path>
-                          进入同仓库工作区并迁移当前终端；受管 Codex 会话记住选择供恢复/压缩使用。
-                          后续工具必须显式使用返回路径；不会改变宿主默认 cwd 或沙箱权限
+      Enter a workspace of the same repository and move this terminal there. Use the
+      returned path explicitly in later tool calls.
   coflux workspace locate [path]
-                          把本终端的**归属**搬到 path（缺省=当前目录）所属的工作区：进入/离开
-                          worktree 后 coflux 跟着走，未登记的同仓库 worktree 先登记出一个子工作区。
-                          插件自动调，一般不用手敲
+      Move this terminal to the workspace that owns path (default: the current directory),
+      registering a worktree of the same repository when needed. The plugin calls this.
   coflux workspace forget <path>
-                          该 worktree 已被删掉：其下所有终端搬回项目主工作区、工作区记录消失
-                          （不执行 git worktree remove）
+      The worktree at path was deleted: move its terminals back to the main workspace and
+      drop its record. Does not run git worktree remove.
+  coflux hook <claude|codex>
+      Forward an agent hook event from stdin or argv to this device. Never fails the agent.
 
-实体标识：设备 / 项目 / 工作区 / 终端的 ID 都可以写成 coflux:<kind>:<ID 前 8 位>，例如
-coflux:workspace:3f2a1b7c。凡是收 ID 的地方都收标识（大小写不敏感），返回实体的地方都带一个
-ref 字段给出它的标识。前缀在范围内撞车时会让你改用完整 ID；标识类型与命令要的不一致会直接报错，
-不会去动旁边那个实体。
+Account commands (JSON output):
+  coflux login [--server <url>]
+      Sign in through the browser. Over SSH, or with COFLUX_LOGIN_PASTE=1, paste a code.
+  coflux login --username <name> --password-stdin [--server <url>]
+  coflux whoami | logout
+  coflux device list | project list | workspace list
+  coflux device exec <deviceId> --cmd=<command> [--cwd=<dir>] [--timeout=<seconds>]
+      Run one command on another device, like ssh host "cmd": it runs under sh -c, stdout
+      and stderr come back separately, the last line is "# exit=<code>", and the exit code
+      is the remote one (255 when this command itself fails). Not a terminal: no PTY,
+      nothing in the sidebar, no stdin. --cwd defaults to the device user's home and must be
+      absolute or start with ~. --timeout defaults to 60 seconds, at most 600. For
+      passwords, TUIs or long work the user should see, use coflux terminal new.
+  coflux project import <path> [--device <id>] [--name <name>]
+      Turn a git repository on a device into a project with its main workspace and print
+      one JSON line: projectId, name, repoPath, defaultBranch, workspaceId, path,
+      alreadyImported. <path> is resolved on the device and must be absolute or start with
+      ~; to import the current directory, pass "$PWD". --device defaults to
+      COFLUX_DEVICE_ID. Importing the same repository again returns the existing project
+      with alreadyImported=true.
+  coflux workspace new --project <id> --branch <branch> [--existing-branch]
+  coflux workspace rename <id> --name <name> | workspace remove <id>
+  coflux terminal new --workspace <id> [--cmd <command>] [--title <title>]
+  coflux terminal list [--device <id>] [--workspace <id>]
+  coflux terminal run|read|wait|send|stop|remove <id> --remote
+  coflux ports --remote
+      When the Coflux app is signed in, these use its account; otherwise run coflux login.
 
-agent 命令的环境变量：COFLUX_AGENT_TIMEOUT_MS 收窄单次请求的等待上限（默认 30000，只能调小），
-供有硬超时的 hook 脚本用——到点干净失败，好过被宿主杀在半路。";
+Ids and handles:
+  Wherever an id is accepted you can pass a handle, coflux:<kind>:<first 8 of id>, for
+  example coflux:workspace:3f2a1b7c (case-insensitive). Results carry it as ref. A prefix
+  that matches several entities asks for the full id; a handle of the wrong kind is an error.
+
+Flags:
+  -h, --help    Show this help
+
+Environment:
+  COFLUX_AGENT_TIMEOUT_MS    Lower the wait for one local request (default 30000), for hook
+                             scripts with a hard time limit
+  NO_COLOR                   Turn off colour
+
+To manage this device, use Coflux.app or cofluxd."##;
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -144,7 +154,7 @@ fn main() {
     }
     let parsed = match args::parse(std::env::args().skip(1)) {
         Ok(parsed) => parsed,
-        Err(error) => die(&format!("参数错误：{error}\n\n{HELP}")),
+        Err(error) => die_with(&error, ui::HELP_NEXT),
     };
     let command = parsed.positional(0);
     if parsed.flag("help") || command == Some("help") || command.is_none() {
@@ -166,19 +176,10 @@ fn main() {
         "workspace" => commands::run_workspace(&parsed),
         "annotations" => annotations::run(&parsed),
         other => {
-            die(&format!("未知命令: {other}\n本机宿主请使用 Coflux.app 或 cofluxd。\n\n{HELP}"));
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn help_keeps_agent_phrases_used_by_skill_docs() {
-        for phrase in ["coflux terminal new", "coflux terminal run <taskId>", "coflux terminal wait <taskId>", "coflux terminal read <taskId>", "coflux terminal close <taskId>", "coflux notify", "coflux progress", "coflux ports", "coflux workspace locate", "coflux executor run", "coflux secret ask NAME", "coflux secret exec NAME", "coflux secret inject NAME", "coflux annotations list", "coflux annotations watch", "coflux annotations resolve <id>", "coflux hook <claude|codex>", "COFLUX_AGENT_TIMEOUT_MS", "coflux device exec <deviceId>", "coflux project import <path>", "coflux:<kind>:<ID 前 8 位>", "coflux:workspace:3f2a1b7c"] {
-            assert!(HELP.contains(phrase), "HELP 缺 {phrase}");
+            die_with(
+                &format!("Unknown command: {other}"),
+                "Run coflux --help to see the commands. To manage this device, use Coflux.app or cofluxd.",
+            );
         }
     }
 }

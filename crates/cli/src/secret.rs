@@ -65,7 +65,7 @@ pub fn run(args: &[String]) {
         "exec" => exec(&args[1..]),
         "inject" => inject(&args[1..]),
         "help" | "--help" | "-h" => println!("{HELP}"),
-        other => die(&format!("unknown secret command: {other}\n\n{HELP}")),
+        other => die(&format!("Unknown secret command: {other}.\nRun coflux secret help for usage.")),
     }
 }
 
@@ -96,7 +96,7 @@ fn parse(args: &[String], options: &[&str], allow_command: bool) -> Result<Parse
         index += 1;
         if arg == "--" {
             if !allow_command {
-                return Err("unexpected `--`".into());
+                return Err("Unexpected `--`.".into());
             }
             parsed.command = args[index..].to_vec();
             return Ok(parsed);
@@ -107,13 +107,13 @@ fn parse(args: &[String], options: &[&str], allow_command: bool) -> Result<Parse
                 None => (long, None),
             };
             if !options.contains(&name) {
-                return Err(format!("unknown option --{name}"));
+                return Err(format!("Unknown option '--{name}'."));
             }
             let value = match inline {
                 Some(value) => value,
                 None => {
                     let Some(next) = args.get(index) else {
-                        return Err(format!("--{name} needs a value"));
+                        return Err(format!("Option '--{name}' needs a value."));
                     };
                     index += 1;
                     next.clone()
@@ -141,9 +141,9 @@ fn require_name(name: Option<&String>, usage: &str) -> String {
     match name {
         Some(name) if valid_name(name) => name.clone(),
         Some(name) => die(&format!(
-            "{name} is not a valid NAME: use an environment variable name ([A-Za-z_][A-Za-z0-9_]*)\nusage: {usage}"
+            "{name} is not a valid NAME. Use an environment variable name ([A-Za-z_][A-Za-z0-9_]*).\nUsage: {usage}"
         )),
-        None => die(&format!("missing NAME\nusage: {usage}")),
+        None => die(&format!("Missing NAME.\nUsage: {usage}")),
     }
 }
 
@@ -208,20 +208,22 @@ fn refusal_message(reply: &Value) -> String {
 
 fn ask(args: &[String]) {
     const USAGE: &str = "coflux secret ask NAME --reason \"<why>\" [--timeout <seconds>]";
-    let parsed = parse(args, &["reason", "timeout"], false).unwrap_or_else(|error| die(&format!("{error}\nusage: {USAGE}")));
+    let parsed = parse(args, &["reason", "timeout"], false).unwrap_or_else(|error| die(&format!("{error}\nUsage: {USAGE}")));
     if parsed.positionals.len() > 1 {
-        die(&format!("ask takes one NAME\nusage: {USAGE}"));
+        die(&format!("ask takes one NAME.\nUsage: {USAGE}"));
     }
     let name = require_name(parsed.positionals.first(), USAGE);
     let reason = parsed.option("reason").unwrap_or_default().trim().to_string();
     if reason.is_empty() {
-        die(&format!("--reason is required: tell the user why you need {name}\nusage: {USAGE}"));
+        die(&format!("Missing --reason. Tell the user why you need {name}.\nUsage: {USAGE}"));
     }
     let timeout_secs = match parsed.option("timeout") {
         None => DEFAULT_ASK_TIMEOUT_SECS,
         Some(raw) => match raw.trim().parse::<u64>() {
             Ok(secs) if (1..=MAX_ASK_TIMEOUT_SECS).contains(&secs) => secs,
-            _ => die(&format!("--timeout must be a whole number of seconds between 1 and {MAX_ASK_TIMEOUT_SECS}")),
+            _ => die(&format!(
+                "--timeout must be a whole number of seconds between 1 and {MAX_ASK_TIMEOUT_SECS}.\nUsage: {USAGE}"
+            )),
         },
     };
     let mut stream = connect();
@@ -278,17 +280,17 @@ fn ask(args: &[String]) {
 
 fn exec(args: &[String]) {
     const USAGE: &str = "coflux secret exec NAME [NAME…] -- <cmd> [args…]";
-    let parsed = parse(args, &[], true).unwrap_or_else(|error| die(&format!("{error}\nusage: {USAGE}")));
+    let parsed = parse(args, &[], true).unwrap_or_else(|error| die(&format!("{error}\nUsage: {USAGE}")));
     if parsed.positionals.is_empty() {
-        die(&format!("missing NAME\nusage: {USAGE}"));
+        die(&format!("Missing NAME.\nUsage: {USAGE}"));
     }
     for name in &parsed.positionals {
         if !valid_name(name) {
-            die(&format!("{name} is not a valid NAME\nusage: {USAGE}"));
+            die(&format!("{name} is not a valid NAME.\nUsage: {USAGE}"));
         }
     }
     if parsed.command.is_empty() {
-        die(&format!("missing the command after `--`\nusage: {USAGE}"));
+        die(&format!("Missing the command after `--`.\nUsage: {USAGE}"));
     }
     let names = parsed.positionals.clone();
     let mut values = release(&names);
@@ -474,17 +476,17 @@ impl Drop for Masker {
 
 fn inject(args: &[String]) {
     const USAGE: &str = "coflux secret inject NAME --file <path> [--key KEY]";
-    let parsed = parse(args, &["file", "key"], false).unwrap_or_else(|error| die(&format!("{error}\nusage: {USAGE}")));
+    let parsed = parse(args, &["file", "key"], false).unwrap_or_else(|error| die(&format!("{error}\nUsage: {USAGE}")));
     if parsed.positionals.len() > 1 {
-        die(&format!("inject takes one NAME\nusage: {USAGE}"));
+        die(&format!("inject takes one NAME.\nUsage: {USAGE}"));
     }
     let name = require_name(parsed.positionals.first(), USAGE);
     let Some(file) = parsed.option("file").filter(|file| !file.trim().is_empty()) else {
-        die(&format!("--file is required\nusage: {USAGE}"));
+        die(&format!("Missing --file.\nUsage: {USAGE}"));
     };
     let key = parsed.option("key").unwrap_or(&name).to_string();
     if !valid_name(&key) {
-        die(&format!("--key {key} is not a valid variable name"));
+        die(&format!("--key {key} is not a valid variable name.\nUsage: {USAGE}"));
     }
     let mut stream = connect();
     let _ = stream.set_read_timeout(Some(EXCHANGE_TIMEOUT));

@@ -10,9 +10,14 @@
 //!
 //! SIGTERM = leave: kill the runtime and exit; shells stay in ptyd. `cofluxd restart` and a
 //! launcher self-update on the desktop go through this path.
+//!
+//! `coflux-launcher watch` is a separate mode for hosts without launchd or systemd (see
+//! `watch.rs`): it starts ptyd and a normal-mode launcher and supervises both. Without `watch`
+//! the launcher ignores its arguments, exactly as before.
 
 mod manager;
 mod runtime_control;
+mod watch;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -47,6 +52,10 @@ fn sibling_runtime() -> String {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("watch") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        watch::run(&args);
+    }
     let home = std::env::var("COFLUX_HOME")
         .unwrap_or_else(|_| format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()));
     let _ = std::fs::create_dir_all(&home);

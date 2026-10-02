@@ -7,6 +7,16 @@ import net from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
+import { error as printError, success } from "./output.mjs";
+
+/** An error with the next step to show under it. */
+function cliError(message, next) {
+  const error = new Error(message);
+  if (next) error.next = next;
+  return error;
+}
+const USAGE_NEXT = "Run coflux --help for usage.";
+const LOGIN_NEXT = "Sign in to the Coflux app, or run coflux login.";
 
 /* --------------------------------- 实体标识 -------------------------------- */
 // `coflux:<kind>:<hex>`：设备 / 项目 / 工作区 / 终端 ID 的可粘贴短形式，hex 是 ID 的前几位
@@ -44,22 +54,26 @@ export function matchesTarget(target, id, kind) {
 }
 
 /** 筛选参数拿到了别的类型的标识：说清楚，不要打印空列表。不是标识的一律放行（那就是个 ID）。 */
-const HANDLE_LABELS = { device: "设备", project: "项目", workspace: "工作区", terminal: "终端" };
 export function checkFilterHandle(flag, expected, target) {
   const handle = parseHandle(target);
   if (handle && handle.kind !== expected) {
-    throw new Error(`--${flag} 需要${HANDLE_LABELS[expected]}标识或${HANDLE_LABELS[expected]} ID，给的是${HANDLE_LABELS[handle.kind]}标识 ${target}`);
+    throw cliError(
+      `--${flag} needs a ${expected} id or handle, but ${target} is a ${handle.kind} handle.`,
+      `Run coflux ${expected === "workspace" ? "workspace" : "device"} list to find the ${expected} id.`,
+    );
   }
 }
 
 function origin(raw) {
   const url = new URL(raw.replace(/^wss:/, "https:").replace(/^ws:/, "http:"));
-  if (url.username || url.password) throw new Error("服务器地址不能包含凭据");
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) throw new Error("服务器必须使用 HTTPS（本机开发可用 HTTP）");
+  if (url.username || url.password) throw cliError("The server URL must not contain credentials.", "Pass it as --server https://<host>.");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+    throw cliError("The server URL must use HTTPS.", "Use https://, or http://localhost for local development.");
+  }
   return url.origin;
 }
 function unwrap(body) {
-  if (body?.ok !== true) throw new Error(body?.error || "账号请求失败");
+  if (body?.ok !== true) throw new Error(body?.error || "The account request failed.");
   return body.value;
 }
 async function request(server, path, token, body, timeout) {
@@ -71,10 +85,10 @@ function broker(home, body, timeout) {
     const socket = net.createConnection(join(home, "client.sock"));
     let text = "";
     socket.setEncoding("utf8");
-    socket.setTimeout(timeout, () => socket.destroy(new Error("账号请求超时，请查询操作结果")));
-    socket.on("error", (error) => reject(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? new Error("请先登录 Coflux 应用或运行 coflux login") : error));
+    socket.setTimeout(timeout, () => socket.destroy(cliError("The account request timed out.", "Check whether it took effect before you try again.")));
+    socket.on("error", (error) => reject(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? cliError("You are not signed in.", LOGIN_NEXT) : error));
     socket.on("connect", () => socket.write(JSON.stringify(body) + "\n"));
-    socket.on("data", (chunk) => { text += chunk; if (Buffer.byteLength(text) > 8 * 1024 * 1024) socket.destroy(new Error("响应过大")); });
+    socket.on("data", (chunk) => { text += chunk; if (Buffer.byteLength(text) > 8 * 1024 * 1024) socket.destroy(new Error("The response was too large.")); });
     socket.on("end", () => { try { resolve(unwrap(JSON.parse(text))); } catch (error) { reject(error); } });
   });
 }
@@ -83,7 +97,11 @@ function broker(home, body, timeout) {
 // redirect with PKCE (S256), or a paste code when the browser cannot reach back (SSH, or forced with
 // COFLUX_LOGIN_PASTE=1). Same requests, same copy as the Rust CLI (crates/cli/src/browser_login.rs).
 
-const LOGIN_FAILURES = { not_allowed: "该邮箱未开通 Coflux", not_verified: "该账号的邮箱未经验证，无法登录", cancelled: "已取消登录" };
+const LOGIN_FAILURES = {
+  not_allowed: "This email address has no Coflux access.",
+  not_verified: "This account's email address is not verified.",
+  cancelled: "Sign-in was cancelled.",
+};
 
 function prefersPaste() {
   return ["COFLUX_LOGIN_PASTE", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"].some((name) => !!process.env[name]);
@@ -104,7 +122,7 @@ function escapeHtml(value) {
 }
 
 function callbackPage(title, body) {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)} · Coflux</title><style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}main{text-align:center;padding:24px}h1{font-size:18px}</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)} - Coflux</title><style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}main{text-align:center;padding:24px}h1{font-size:18px}</style></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p></main></body></html>`;
 }
 
 function listenLoopback() {
@@ -141,19 +159,19 @@ async function browserLogin(server) {
   }
   const page = new URL(registered.url);
   // Only ever open a page on the server we are logging into.
-  if (page.origin !== server) { listener?.close(); throw new Error("服务器返回的登录地址不在该服务器上"); }
+  if (page.origin !== server) { listener?.close(); throw cliError("The server returned a sign-in page on another host.", "Check the --server URL, then run coflux login again."); }
   const exchange = (code) => request(server, "/api/client/login/exchange", null, { protocolVersion: 1, code, codeVerifier: verifier }, 30000);
-  process.stderr.write(`在浏览器中打开以下地址完成登录（Ctrl-C 取消）：\n  ${page.href}\n`);
+  process.stderr.write(`To sign in, open this page in your browser:\n\n    ${page.href}\n\nPress Ctrl-C to cancel.\n`);
   if (!listener) {
-    process.stderr.write("登录后页面会显示一次性登录码。\n");
-    const code = await askLine("粘贴登录码：");
-    if (!code) throw new Error("没有输入登录码");
+    process.stderr.write("After you sign in, the page shows a one-time code.\n");
+    const code = await askLine("Paste the code: ");
+    if (!code) throw cliError("No code entered.", "Run coflux login again.");
     return exchange(code);
   }
   openBrowser(page.href);
   const waitMs = typeof registered.expiresAt === "number" && registered.expiresAt > Date.now() ? registered.expiresAt - Date.now() : 600000;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => finish(new Error("登录超时，请重新运行 coflux login")), waitMs);
+    const timer = setTimeout(() => finish(cliError("Sign-in timed out.", "Run coflux login again.")), waitMs);
     let done = false;
     function finish(error, value) {
       if (done) return;
@@ -166,17 +184,17 @@ async function browserLogin(server) {
     listener.on("request", (req, res) => {
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
       const answer = (status, title, body) => { res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); res.end(callbackPage(title, body)); };
-      if (req.method !== "GET" || url.pathname !== "/callback" || url.searchParams.get("state") !== state) { answer(404, "页面不存在", "这个地址只用于 Coflux 登录回调。"); return; }
+      if (req.method !== "GET" || url.pathname !== "/callback" || url.searchParams.get("state") !== state) { answer(404, "Not found", "This address only serves the Coflux sign-in callback."); return; }
       const failed = url.searchParams.get("error");
       if (failed) {
-        const message = LOGIN_FAILURES[failed] ?? "登录未完成，请重试";
-        answer(200, "登录未完成", `${message}。可以关闭此页面，回到终端。`);
-        finish(new Error(message));
+        const message = LOGIN_FAILURES[failed] ?? "Sign-in did not complete.";
+        answer(200, "Sign-in not completed", `${message} You can close this page and return to the terminal.`);
+        finish(cliError(message, "Run coflux login again."));
         return;
       }
       exchange(url.searchParams.get("code") ?? "").then(
-        (value) => { answer(200, "已登录", "已登录，可以回到终端。"); finish(null, value); },
-        (error) => { answer(200, "登录未完成", "登录未完成，请回到终端查看原因。"); finish(error); },
+        (value) => { answer(200, "Signed in", "You are signed in. You can return to the terminal."); finish(null, value); },
+        (error) => { answer(200, "Sign-in not completed", "Sign-in did not complete. See the terminal for the reason."); finish(error); },
       );
     });
   });
@@ -204,22 +222,24 @@ export function handlesAccountCommand(positionals, flags, home) {
 export async function runAccountCommand(positionals, flags, home) {
   const [command, sub = "list", id] = positionals;
   const sessionPath = join(home, "cli-session.json");
-  const required = (key) => { if (!flags[key]) throw new Error(`缺少 --${key}`); return flags[key]; };
-  const target = () => { if (!id) throw new Error("缺少目标 ID"); return id; };
+  const required = (key) => { if (!flags[key]) throw cliError(`Missing --${key}.`, USAGE_NEXT); return flags[key]; };
+  const target = () => { if (!id) throw cliError("Missing id.", USAGE_NEXT); return id; };
   // `project import <path>`: the path is resolved on the **target device** (`~` expansion and
   // `git rev-parse --show-toplevel` both happen there), so the CLI only checks its shape — the same
   // rule as `device exec --cwd`. Expanding it here would resolve the caller's home on the wrong machine.
   const importPath = () => {
     const value = (id ?? "").trim();
-    if (!value) throw new Error('缺少要导入的路径（导入当前目录写 coflux project import "$PWD"）');
-    if (!(value.startsWith("/") || value === "~" || value.startsWith("~/"))) throw new Error('路径要绝对路径或 ~ 开头（它在目标设备上解析）；导入当前目录写 coflux project import "$PWD"');
+    if (!value) throw cliError("Missing path.", 'To import the current directory, run coflux project import "$PWD".');
+    if (!(value.startsWith("/") || value === "~" || value.startsWith("~/"))) {
+      throw cliError("The path must be absolute or start with ~, because it is resolved on the device.", 'To import the current directory, run coflux project import "$PWD".');
+    }
     return value;
   };
   // `--device` falls back to the daemon-issued COFLUX_DEVICE_ID; empty on both sides is an error,
   // never a guess — silently importing onto the wrong machine is worse than failing.
   const deviceTarget = () => {
     const value = (flags.device || process.env.COFLUX_DEVICE_ID || "").trim();
-    if (!value) throw new Error("缺少设备：请加 --device <id>（coflux device list 可以看到）");
+    if (!value) throw cliError("Missing device.", "Pass --device <id>. Run coflux device list to see your devices.");
     return value;
   };
   const print = (value) => console.log(JSON.stringify(value));
@@ -228,15 +248,15 @@ export async function runAccountCommand(positionals, flags, home) {
     // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
     if (!flags.username && !flags["password-stdin"]) {
       const value = await browserLogin(server);
-      if (!value?.token) throw new Error("服务器没有返回会话");
+      if (!value?.token) throw cliError("The server did not return a session.", "Run coflux login again.");
       saveSession(home, sessionPath, { server, token: value.token, accountId: value.accountId });
-      console.log(`已登录为 ${value.login || "当前账号"}`);
+      success(value.login ? `Signed in as ${value.login}` : "Signed in");
       return;
     }
     const username = required("username");
-    if (!flags["password-stdin"]) throw new Error("用 --password-stdin 从标准输入读取密码；密码不进入命令参数或配置文件");
+    if (!flags["password-stdin"]) throw cliError("Missing --password-stdin.", "Pipe the password on stdin and pass --password-stdin.");
     let password = "";
-    for await (const chunk of process.stdin) { password += chunk; if (Buffer.byteLength(password) > 4096) throw new Error("密码过长"); if (password.includes("\n")) break; }
+    for await (const chunk of process.stdin) { password += chunk; if (Buffer.byteLength(password) > 4096) throw cliError("The password is too long.", "Check what is piped to stdin."); if (password.includes("\n")) break; }
     const value = await request(server, "/api/client/login", null, { protocolVersion: 1, username, password: password.split("\n", 1)[0].replace(/\r$/, "") }, 30000);
     saveSession(home, sessionPath, { server, token: value.token, accountId: value.accountId });
     print({ accountId: value.accountId, server });
@@ -248,16 +268,16 @@ export async function runAccountCommand(positionals, flags, home) {
     // `terminal.wait` 与 `device.exec` 都可能在中心侧阻塞到 600 秒；其余账号操作 40 秒足够。
     const timeout = operation.op === "terminal.wait" || operation.op === "device.exec" ? 610000 : 40000;
     if (!session) {
-      if (flags.server) throw new Error("请先登录指定服务器");
+      if (flags.server) throw cliError("You are not signed in to that server.", "Run coflux login --server <url> first.");
       return broker(home, body, timeout);
     }
     const server = origin(session.server);
-    if (flags.server && origin(flags.server) !== server) throw new Error("目标服务器与登录记录不一致，请先登录目标服务器");
-    if (!session.token) throw new Error("请先登录");
+    if (flags.server && origin(flags.server) !== server) throw cliError("You are signed in to a different server.", "Run coflux login --server <url> first.");
+    if (!session.token) throw cliError("You are not signed in.", "Run coflux login.");
     return request(server, "/api/client/command", session.token, body, timeout);
   };
   if (command === "logout") {
-    if (!session) throw new Error("此 CLI 未单独登录；应用账号请在 Coflux 中退出");
+    if (!session) throw cliError("This CLI is not signed in on its own.", "To sign out of the app account, sign out in Coflux.");
     await call({ op: "logout" });
     fs.rmSync(sessionPath);
     print({ loggedOut: true });
@@ -269,21 +289,23 @@ export async function runAccountCommand(positionals, flags, home) {
   // (device offline, capability missing, bad cwd, timeout, bad arguments) all exit 255, so a caller's
   // shell test can tell "the remote command returned 1" from "it never ran".
   if (command === "device" && sub === "exec") {
-    const fail = async (message) => { await writeAll(process.stderr, `✗ ${message}\n`); process.exit(255); };
+    const fail = (message, next = USAGE_NEXT) => { printError(message, next); process.exit(255); };
     let value;
     try {
-      if (!id) throw new Error("缺少设备 ID（coflux device list 可以看到）");
+      if (!id) throw cliError("Missing device id.", "Run coflux device list to see your devices.");
       const cmd = required("cmd");
       const timeout = Number(flags.timeout ?? 60);
-      // 上限在这里就说清楚，别让中心的入参校验回一句「请求失败」。
-      if (!Number.isInteger(timeout)) throw new Error("--timeout 必须是整数秒");
-      if (timeout < 1 || timeout > 600) throw new Error("--timeout 取 1-600 秒；更久、或需要用户看见的长任务请改用 coflux terminal new");
+      // State the limits here rather than let the server's validation answer with a bare failure.
+      if (!Number.isInteger(timeout)) throw cliError("--timeout must be a whole number of seconds.", "Use a value from 1 to 600.");
+      if (timeout < 1 || timeout > 600) {
+        throw cliError("--timeout must be between 1 and 600 seconds.", "For longer work the user should see, open a terminal with coflux terminal new.");
+      }
       value = await call({ op: "device.exec", deviceId: id, command: cmd, cwd: flags.cwd ?? "", timeout });
     } catch (error) {
-      await fail(error.message);
+      fail(error.message, error.next);
     }
     const exitCode = Number(value?.exitCode);
-    if (!Number.isInteger(exitCode)) await fail("设备回执缺少退出码（中心版本过旧？）");
+    if (!Number.isInteger(exitCode)) fail("The device did not report an exit code.", "The server may need an update; try again later.");
     await writeAll(process.stdout, String(value.stdout ?? ""));
     await writeAll(process.stderr, String(value.stderr ?? ""));
     await writeAll(process.stdout, `# exit=${exitCode}\n`);
@@ -307,9 +329,11 @@ export async function runAccountCommand(positionals, flags, home) {
     if (sub === "wait") operation = { op: "terminal.wait", terminalId: target(), timeout: Number(flags.timeout ?? 30) };
     if (["stop", "remove"].includes(sub)) operation = { op: `terminal.${sub}`, terminalId: target() };
   }
-  if (!operation && command !== "whoami" && command !== "ports" && sub !== "list") throw new Error("未知账号命令");
+  if (!operation && command !== "whoami" && command !== "ports" && sub !== "list") throw cliError(`Unknown command: ${positionals.join(" ")}`, "Run coflux --help to see the commands.");
   // `project.import` is addressed by device like `snapshot`, so `--device` is an input to it rather than a filter.
-  if (operation && ((flags.device && operation.op !== "project.import") || (flags.workspace && operation.op !== "terminal.new"))) throw new Error("目标 ID 已确定作用范围，请不要附加设备或工作区筛选参数");
+  if (operation && ((flags.device && operation.op !== "project.import") || (flags.workspace && operation.op !== "terminal.new"))) {
+    throw cliError("--device and --workspace cannot be combined with an id.", "Drop the filter; the id already names the target.");
+  }
   let value = await call(operation || { op: "snapshot" });
   if (command === "whoami") value = { accountId: value.accountId };
   else if (sub === "list" || command === "ports") {

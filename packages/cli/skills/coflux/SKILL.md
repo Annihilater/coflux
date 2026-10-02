@@ -276,7 +276,7 @@ command line is capped at 64 KB. Always write `--cmd=<value>` and `--title=<valu
 never separated by a space: a value that starts with `-` is otherwise taken for another option.
 
 `new` prints the terminal id on its first line whatever happens next; when the command could not
-be typed it says so on the following line (see "Errors").
+be typed it says so in an error on stderr (see "Errors").
 
 The new terminal has the same `COFLUX_*` variables (pointing at its own task/session ids, same
 workspace as you).
@@ -537,7 +537,9 @@ this machine, so they are there whether or not a desktop is open.
 
 ### Errors from local commands
 
-Errors are one readable sentence; do what they say: "not inside a coflux terminal" = you are not
+Errors go to stderr as `✗ Error: <what happened>` followed by an indented line saying what to do
+next; the sentences below come from the daemon and appear after `Error:`. Do what they say: "not
+inside a coflux terminal" = you are not
 in a coflux session; "terminal is not in this workspace or does not exist" = check the id with
 `list`, and if you moved into another workspace that is exactly what a terminal of the other one
 looks like (`coflux workspace` to confirm, `cd` back to reach it); "predates the daemon upgrade" =
@@ -635,8 +637,8 @@ CLI's exit code is the remote command's**, so an ordinary shell test around it w
 failures — device offline (it exists and is not connected), no device of this account with that id
 (`设备 <id> 不存在或不属于当前账号`: a mistyped or bare-prefix id, **not** an outage to investigate),
 that device's daemon too old (`cofluxd update && cofluxd restart` there), `--cwd` missing or not a
-directory, the timeout elapsing — are one readable sentence and exit **255**, so a remote exit 1 is
-never confused with "it never ran".
+directory, the timeout elapsing — are reported as `✗ Error:` with a next step and exit **255**, so a
+remote exit 1 is never confused with "it never ran".
 
 `--cwd` is the only addressing: an absolute path or a `~` prefix, defaulting to the daemon user's
 HOME. To run inside a workspace, pass the `path` from `coflux workspace list --device <deviceId>`.

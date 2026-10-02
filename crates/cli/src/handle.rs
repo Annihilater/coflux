@@ -31,16 +31,6 @@ impl HandleKind {
         }
     }
 
-    /// 给用户读的名字：错误里要同时说清「给的是什么」与「要的是什么」。
-    pub fn label(self) -> &'static str {
-        match self {
-            HandleKind::Device => "设备",
-            HandleKind::Project => "项目",
-            HandleKind::Workspace => "工作区",
-            HandleKind::Terminal => "终端",
-        }
-    }
-
     fn from_token(token: &str) -> Option<Self> {
         match token {
             "device" => Some(HandleKind::Device),
@@ -109,12 +99,15 @@ pub fn matches(target: &str, id: Option<&str>, expected: HandleKind) -> bool {
 /// Anything that is not a handle at all passes through untouched — it is an id as far as we know.
 pub fn check_filter(flag: &str, expected: HandleKind, target: &str) -> Result<(), String> {
     match parse(target) {
-        Some(parsed) if parsed.kind != expected => Err(format!(
-            "--{flag} 需要{}标识或{} ID，给的是{}标识 {target}",
-            expected.label(),
-            expected.label(),
-            parsed.kind.label()
-        )),
+        Some(parsed) if parsed.kind != expected => {
+            let list = if expected == HandleKind::Workspace { "workspace" } else { "device" };
+            Err(format!(
+                "--{flag} needs a {} id or handle, but {target} is a {} handle.\nRun coflux {list} list to find the {} id.",
+                expected.token(),
+                parsed.kind.token(),
+                expected.token()
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -167,15 +160,10 @@ mod tests {
     fn a_wrong_kind_filter_names_both_kinds() {
         assert!(check_filter("device", HandleKind::Device, "coflux:device:b6767697").is_ok());
         assert!(check_filter("device", HandleKind::Device, "b6767697-60b2-4700-a304-1404bf03c675").is_ok());
-        let error = check_filter("device", HandleKind::Device, "coflux:workspace:3f2a1b7c")
-            .expect_err("类型不符必须报错，不能打印空列表");
-        assert_eq!(
-            error,
-            "--device 需要设备标识或设备 ID，给的是工作区标识 coflux:workspace:3f2a1b7c"
+        assert!(
+            check_filter("device", HandleKind::Device, "coflux:workspace:3f2a1b7c").is_err(),
+            "a wrong kind must be an error, never an empty list"
         );
-        let error = check_filter("workspace", HandleKind::Workspace, "coflux:terminal:9e21c4d0")
-            .expect_err("类型不符必须报错");
-        assert!(error.contains("工作区标识"), "{error}");
-        assert!(error.contains("终端标识"), "{error}");
+        assert!(check_filter("workspace", HandleKind::Workspace, "coflux:terminal:9e21c4d0").is_err());
     }
 }

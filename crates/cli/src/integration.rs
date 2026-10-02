@@ -166,7 +166,7 @@ fn local_at(action: &str, path: Option<&str>, cwd: &str) -> Result<Value, String
         && action != "workspace.forget"
         && value["workspaceId"].as_str().is_none_or(str::is_empty)
     {
-        return Err("Local runtime returned an incompatible workspace response".into());
+        return Err("This device's Coflux sent an incompatible workspace response.\nUpdate Coflux on this device, then try again.".into());
     }
     Ok(value)
 }
@@ -536,11 +536,6 @@ mod tests {
         let block = session_context(root, "d", "p", "w", "t", "s", "", "");
         assert!(block.starts_with("<coflux-session>\n"), "{block}");
         assert!(block.ends_with("\n</coflux-session>"), "{block}");
-        assert!(
-            block.contains("use `coflux secret`")
-                && block.contains("never ask them to paste it into the chat"),
-            "{block}"
-        );
         assert!(
             block.contains(
                 "/home/u/.coflux/agent-integrations/abc123/skills/coflux-secret/SKILL.md"

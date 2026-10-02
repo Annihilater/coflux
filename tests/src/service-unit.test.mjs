@@ -16,6 +16,8 @@ import {
   executorRuntime,
   plistXml,
   systemdUnit,
+  WATCHER_ENV_ALLOWLIST,
+  watcherEnv,
 } from "../../packages/cli/service-unit.mjs";
 
 const executor = { node: "/opt/node/bin/node", entry: "/opt/coflux/executor/dist/host.js" };
@@ -43,6 +45,51 @@ test("no executor runtime means no variables, not empty ones", () => {
     assert.ok(!text.includes(EXECUTOR_NODE_ENV), text);
     assert.ok(!text.includes(EXECUTOR_ENTRY_ENV), text);
   }
+});
+
+test("the self-managed service carries the executor runtime and only its own COFLUX_* variables", () => {
+  // `cofluxd up` run inside a Coflux terminal inherits that terminal's service coordinates. Passed on,
+  // they would make the new launcher and runtime bind another service's sockets.
+  const inherited = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/home/u",
+    LANG: "C.UTF-8",
+    COFLUX_HOME: "/home/u/.other",
+    COFLUX_LAUNCHER_SOCK: "/home/u/.other/launcher.sock",
+    COFLUX_LAUNCHER_NONCE: "nonce",
+    COFLUX_TRANSPORT_PAIR: "1",
+    COFLUX_TRANSPORT_REQUIRED: "1",
+    COFLUX_LOCAL_GATEWAY_PORT: "9999",
+    COFLUX_SESSION_ID: "session",
+    COFLUX_RUNTIME_CMD: "/Applications/Coflux.app/runtime",
+    COFLUX_RUNTIME_CONTROL: "1",
+    COFLUX_EXECUTOR_NODE: "/stale/node",
+    COFLUX_WORKER_PUBKEY: "ab".repeat(32),
+    COFLUX_RUNTIME_PROBATION_MS: "500",
+  };
+  const env = watcherEnv(inherited, { home: base.home, executor });
+  assert.equal(env.COFLUX_HOME, base.home);
+  assert.equal(env[EXECUTOR_NODE_ENV], executor.node);
+  assert.equal(env[EXECUTOR_ENTRY_ENV], executor.entry);
+  for (const key of ["COFLUX_LAUNCHER_SOCK", "COFLUX_LAUNCHER_NONCE", "COFLUX_TRANSPORT_PAIR", "COFLUX_TRANSPORT_REQUIRED", "COFLUX_LOCAL_GATEWAY_PORT", "COFLUX_SESSION_ID", "COFLUX_RUNTIME_CMD", "COFLUX_RUNTIME_CONTROL"]) {
+    assert.ok(!(key in env), `${key} must not reach the self-managed service`);
+  }
+  assert.ok(WATCHER_ENV_ALLOWLIST.includes("COFLUX_WORKER_PUBKEY"));
+  assert.equal(env.COFLUX_WORKER_PUBKEY, inherited.COFLUX_WORKER_PUBKEY);
+  assert.equal(env.COFLUX_RUNTIME_PROBATION_MS, "500");
+  for (const key of ["PATH", "HOME", "LANG"]) assert.equal(env[key], inherited[key]);
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("COFLUX_")) {
+      assert.ok(key === "COFLUX_HOME" || key === EXECUTOR_NODE_ENV || key === EXECUTOR_ENTRY_ENV || WATCHER_ENV_ALLOWLIST.includes(key), key);
+    }
+  }
+});
+
+test("no executor runtime leaves no executor variables in the self-managed service", () => {
+  const env = watcherEnv({ COFLUX_EXECUTOR_NODE: "/stale/node", COFLUX_EXECUTOR_ENTRY: "/stale/host.js" }, { home: base.home, executor: null });
+  assert.ok(!(EXECUTOR_NODE_ENV in env));
+  assert.ok(!(EXECUTOR_ENTRY_ENV in env));
+  assert.equal(env.COFLUX_HOME, base.home);
 });
 
 test("a path with XML metacharacters cannot break out of the plist", () => {
