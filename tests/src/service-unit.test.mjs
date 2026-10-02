@@ -19,7 +19,7 @@ import {
 } from "../../packages/cli/service-unit.mjs";
 
 const executor = { node: "/opt/node/bin/node", entry: "/opt/coflux/executor/dist/host.js" };
-const base = { supervisorBin: "/home/u/.coflux/bin/coflux-supervisor", home: "/home/u/.coflux", logFile: "/home/u/.coflux/daemon.log" };
+const base = { launcherBin: "/home/u/.coflux/bin/coflux-launcher", home: "/home/u/.coflux", logFile: "/home/u/.coflux/daemon.log" };
 
 test("launchd plist carries the executor runtime as absolute paths", () => {
   const plist = plistXml({ ...base, executor });
@@ -37,7 +37,7 @@ test("systemd unit carries the executor runtime, one Environment line each", () 
 });
 
 test("no executor runtime means no variables, not empty ones", () => {
-  // An empty value would look configured to the worker, which then fails to spawn a host on every
+  // An empty value would look configured to the runtime, which then fails to spawn a host on every
   // start. Absent is the state that makes it fall back to "this machine does not host one".
   for (const text of [plistXml({ ...base, executor: null }), systemdUnit({ ...base, executor: null })]) {
     assert.ok(!text.includes(EXECUTOR_NODE_ENV), text);

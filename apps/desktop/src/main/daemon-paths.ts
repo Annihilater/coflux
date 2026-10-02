@@ -9,7 +9,7 @@ import { join } from "node:path";
 /** 内置三件在 Contents/Resources 下的子目录名（electron-builder.yml extraResources 的 to） */
 export const DAEMON_RESOURCE_DIR = "daemon";
 /** 内置与落盘的六个二进制文件名 */
-export const DAEMON_BINARIES = ["coflux-supervisor", "coflux-worker", "coflux", "coflux-transport", "coflux-ptyd", "coflux-screen"] as const;
+export const DAEMON_BINARIES = ["coflux-launcher", "coflux-runtime", "coflux", "coflux-transport", "coflux-ptyd", "coflux-screen"] as const;
 export type DaemonBinaryName = (typeof DAEMON_BINARIES)[number];
 /**
  * The remote screen helper (plan 20260929-remote-desktop): a Swift binary built from native/screen,

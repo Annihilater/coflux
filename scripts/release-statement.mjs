@@ -2,7 +2,11 @@
 export {
   WORKER_RELEASE_STATEMENT_DOMAIN as RELEASE_STATEMENT_DOMAIN,
   SUPERVISOR_RELEASE_STATEMENT_DOMAIN,
+  RUNTIME_RELEASE_STATEMENT_DOMAIN,
+  LAUNCHER_RELEASE_STATEMENT_DOMAIN,
   assertReleaseVersion,
+  runtimeReleaseStatement,
+  launcherReleaseStatement,
   supervisorReleaseStatement,
   cliReleaseStatement,
   ptydReleaseStatement,

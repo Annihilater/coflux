@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// 发版签名 + 清单：对目录里的 daemon 产物产生：
-//   1) <name>.sig：对原始二进制的 legacy 签名，供已部署旧 supervisor 滚动兼容；
-//   2) worker/supervisor 各自 domain-separated 的 <name>.release.sig，绑定
-//      component/version/target/sha256/size，供热升级与 cofluxd 安装验真。
-// manifest.json 保留原 worker 字段并新增 supervisor / cli / transport / ptyd；老 server/supervisor 忽略新增字段。
+// Release signing + manifest (schema 3, plan 20261002-runtime-launcher-merge): every daemon
+// artifact in the directory gets a domain-separated <name>.release.sig binding
+// component/version/target/sha256/size. Components: runtime, launcher, cli, transport, ptyd.
+// There is deliberately no `worker` component and no raw-binary `<name>.sig` for anything:
+// the raw worker signature was the back door a pre-plan supervisor still checks, and no such
+// supervisor may ever verify, install or run a runtime artifact. Old cofluxd fails closed on
+// schema 3 (headless machines upgrade the npm package first); the centre parses 2 and 3.
 // Manifest URLs: a stable tag points at the R2 download mirror (dl.coflux.dev), which the release
 // workflow fills before the GitHub Release exists; a prerelease is never mirrored and keeps GitHub
 // URLs. URLs are unsigned download locations, so this choice never touches the trust chain.
@@ -13,11 +15,11 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertReleaseVersion,
-  supervisorReleaseStatement,
   cliReleaseStatement,
+  launcherReleaseStatement,
   ptydReleaseStatement,
+  runtimeReleaseStatement,
   transportReleaseStatement,
-  workerReleaseStatement,
 } from "./release-statement.mjs";
 import { isStableTag, mirrorAssetUrl } from "./release-mirror-layout.mjs";
 
@@ -41,126 +43,60 @@ const assetUrl = (name) => mirrored
   ? mirrorAssetUrl(version, name)
   : `https://github.com/${repo}/releases/download/${version}/${name}`;
 
-const manifest = { schemaVersion: 2, version, worker: {}, supervisor: {} };
+const manifest = { schemaVersion: 3, version, runtime: {}, launcher: {} };
 const sums = [];
-const targetsByComponent = { worker: new Set(), supervisor: new Set() };
-// 只取原始 worker 二进制（coflux-worker-<target>，target 不含点；排除 .sig/.tar.gz）
-for (const name of readdirSync(dir)) {
-  if (!name.startsWith("coflux-worker-") || name.includes(".")) continue;
-  const target = name.slice("coflux-worker-".length);
-  const data = readFileSync(join(dir, name));
-  const sha256 = crypto.createHash("sha256").update(data).digest("hex");
-  const size = data.byteLength;
-  const signature = crypto.sign(null, data, key).toString("hex");
-  const releaseSignature = crypto.sign(
-    null,
-    workerReleaseStatement({ version, target, sha256, size }),
-    key,
-  ).toString("hex");
-  writeFileSync(join(dir, `${name}.sig`), signature);
-  writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
-  sums.push(`${sha256}  ${name}`);
-  manifest.worker[target] = {
-    url: assetUrl(name),
-    target,
-    sha256,
-    size,
-    signature,
-    releaseSignature,
-  };
-  targetsByComponent.worker.add(target);
-}
 
-// cofluxd 首次安装/显式 update 会直接执行 supervisor，因此它必须有独立 domain 的
-// release statement，不能复用 worker 签名（否则合法 worker 可被改名移植）。
-for (const name of readdirSync(dir)) {
-  if (!name.startsWith("coflux-supervisor-") || name.includes(".")) continue;
-  const target = name.slice("coflux-supervisor-".length);
-  const data = readFileSync(join(dir, name));
-  const sha256 = crypto.createHash("sha256").update(data).digest("hex");
-  const size = data.byteLength;
-  const releaseSignature = crypto.sign(
-    null,
-    supervisorReleaseStatement({ version, target, sha256, size }),
-    key,
-  ).toString("hex");
-  writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
-  sums.push(`${sha256}  ${name}`);
-  manifest.supervisor[target] = {
-    url: assetUrl(name),
-    target,
-    sha256,
-    size,
-    releaseSignature,
-  };
-  targetsByComponent.supervisor.add(target);
-}
-
-// The CLI embeds the integration and is independently domain-separated from daemon artifacts.
-const cliNames = readdirSync(dir).filter((name) => name.startsWith("coflux-cli-") && !name.includes("."));
-if (cliNames.length) {
-  manifest.cli = {};
-  for (const name of cliNames) {
-    const target = name.slice("coflux-cli-".length);
+/** Sign every `coflux-<component>-<target>` in the directory under the component's own domain. */
+function signComponent(component, statement) {
+  const prefix = `coflux-${component}-`;
+  const targets = new Set();
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix) || name.includes(".")) continue;
+    const target = name.slice(prefix.length);
     const data = readFileSync(join(dir, name));
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const size = data.byteLength;
-    const releaseSignature = crypto.sign(null, cliReleaseStatement({ version, target, sha256, size }), key).toString("hex");
+    const releaseSignature = crypto.sign(null, statement({ version, target, sha256, size }), key).toString("hex");
     writeFileSync(join(dir, `${name}.release.sig`), releaseSignature);
     sums.push(`${sha256}  ${name}`);
-    manifest.cli[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
+    manifest[component] ??= {};
+    manifest[component][target] = { url: assetUrl(name), target, sha256, size, releaseSignature };
+    targets.add(target);
   }
-  if (Object.keys(manifest.cli).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) {
-    throw new Error("CLI targets must match worker targets");
-  }
+  return [...targets].sort();
 }
 
-// Companion artifacts retain their own signing domain and the exact worker target set.
-const transportNames = readdirSync(dir).filter(name => name.startsWith("coflux-transport-") && !name.includes("."));
-if (!transportNames.length) throw new Error("Release is missing the mandatory native transport component");
-if (transportNames.length) {
-  manifest.transport = {};
-  for (const name of transportNames) {
-    const target = name.slice("coflux-transport-".length), data = readFileSync(join(dir, name));
-    const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
-    const releaseSignature = crypto.sign(null, transportReleaseStatement({ version, target, sha256, size }), key).toString("hex");
-    writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
-    manifest.transport[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
-  }
-  if (Object.keys(manifest.transport).sort().join("\n") !== [...targetsByComponent.worker].sort().join("\n")) throw new Error("Transport targets must match worker targets");
-}
-
-const workerTargets = [...targetsByComponent.worker].sort();
-const supervisorTargets = [...targetsByComponent.supervisor].sort();
-if (
-  workerTargets.length === 0 ||
-  supervisorTargets.length === 0 ||
-  workerTargets.join("\n") !== supervisorTargets.join("\n")
-) {
-  console.error(
-    `worker/supervisor target 集合不完整：worker=${workerTargets.join(",") || "<空>"}；` +
-    `supervisor=${supervisorTargets.join(",") || "<空>"}`,
-  );
+// The runtime is the unit the centre pushes; its target set is the baseline every other
+// component must match exactly.
+const runtimeTargets = signComponent("runtime", runtimeReleaseStatement);
+if (runtimeTargets.length === 0) {
+  console.error("runtime target 集合不完整：runtime=<空>");
   process.exit(1);
 }
-// The PTY custody process (plan 20260918-ptyd-terminal-custody) is mandatory: a release without it
-// installs a supervisor that refuses to start. Its own signing domain, the exact worker target set.
-// The manifest keeps schemaVersion 2 — `ptyd` is one more optional top-level component to an old
-// cofluxd, which ignores unknown top-level fields.
-const ptydNames = readdirSync(dir).filter((name) => name.startsWith("coflux-ptyd-") && !name.includes("."));
-if (!ptydNames.length) throw new Error("Release is missing the mandatory ptyd component");
-manifest.ptyd = {};
-for (const name of ptydNames) {
-  const target = name.slice("coflux-ptyd-".length), data = readFileSync(join(dir, name));
-  const sha256 = crypto.createHash("sha256").update(data).digest("hex"), size = data.byteLength;
-  const releaseSignature = crypto.sign(null, ptydReleaseStatement({ version, target, sha256, size }), key).toString("hex");
-  writeFileSync(join(dir, `${name}.release.sig`), releaseSignature); sums.push(`${sha256}  ${name}`);
-  manifest.ptyd[target] = { target, sha256, size, releaseSignature, url: assetUrl(name) };
+const same = (targets) => targets.join("\n") === runtimeTargets.join("\n");
+// cofluxd executes the launcher directly, so it carries its own domain: a valid runtime can never
+// be renamed into a launcher.
+const launcherTargets = signComponent("launcher", launcherReleaseStatement);
+if (!same(launcherTargets)) {
+  console.error(`runtime/launcher target 集合不完整：runtime=${runtimeTargets.join(",")}；launcher=${launcherTargets.join(",") || "<空>"}`);
+  process.exit(1);
 }
-if (Object.keys(manifest.ptyd).sort().join("\n") !== workerTargets.join("\n")) throw new Error("ptyd targets must match worker targets");
+// The CLI embeds the integration and is independently domain-separated from daemon artifacts.
+const cliTargets = signComponent("cli", cliReleaseStatement);
+if (cliTargets.length && !same(cliTargets)) throw new Error("CLI targets must match runtime targets");
+// Companion artifacts retain their own signing domain and the exact runtime target set.
+const transportTargets = signComponent("transport", transportReleaseStatement);
+if (!transportTargets.length) throw new Error("Release is missing the mandatory native transport component");
+if (!same(transportTargets)) throw new Error("Transport targets must match runtime targets");
+// The PTY custody process (plan 20260918-ptyd-terminal-custody) is mandatory: a release without it
+// installs a runtime that refuses to start.
+const ptydTargets = signComponent("ptyd", ptydReleaseStatement);
+if (!ptydTargets.length) throw new Error("Release is missing the mandatory ptyd component");
+if (!same(ptydTargets)) throw new Error("ptyd targets must match runtime targets");
+if (manifest.worker !== undefined || readdirSync(dir).some((name) => name.endsWith(".sig") && !name.endsWith(".release.sig"))) {
+  throw new Error("schema 3 carries no worker component and no raw-binary signature");
+}
 
 writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 writeFileSync(join(dir, "SHA256SUMS"), sums.join("\n") + "\n");
-console.error(
-  `已签名 ${workerTargets.length} 组 worker/supervisor 产物，写出 manifest.json / SHA256SUMS`,
-);
+console.error(`signed ${runtimeTargets.length} runtime/launcher target(s); wrote manifest.json / SHA256SUMS`);

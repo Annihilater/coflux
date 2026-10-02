@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // cofluxd —— coflux daemon 管理 CLI。
-// daemon 是三个 Rust 进程（ptyd 持 PTY、长生；supervisor 可随时替换；worker 频繁热升级，零 node 运行时）；
+// daemon 是三个 Rust 进程（ptyd 持 PTY、长生；launcher 管版本指针与回滚、很少变；runtime 由中心自动推送更新，零 node 运行时）；
 // 本 CLI 只负责装/起/停/升级（用一下，不常驻）。systemd(Linux user) / launchd(macOS LaunchAgent)，
-// ptyd 与 supervisor 各自一份服务文件：重启 supervisor 不带走 ptyd，终端留在里面。
+// ptyd 与 launcher 各自一份服务文件：重启 launcher 不带走 ptyd，终端留在里面。
 import { parseArgs } from "node:util";
 import { homedir, hostname, platform, arch } from "node:os";
 import { join, dirname } from "node:path";
@@ -51,13 +51,15 @@ const JOIN_KEY = join(HOME, "join-key.json");
 const JOIN_OUTCOME = join(HOME, "join-outcome.json");
 const CONN_STATE = join(HOME, "conn-state.json"); // worker 落盘的连接态快照（plan 033，见 crates/worker/src/conn_state.rs）
 const LOCAL_GATEWAY_STORE = join(HOME, "local-gateway.json"); // gateway key/origin/grant；doctor 只读结构与数量，绝不打印秘密
-const FDA_STATUS = join(HOME, "fda-status"); // supervisor 启动时探测落盘（仅 macOS，见 crates/supervisor/src/fda.rs）
-const SUP_BIN = join(BIN_DIR, "coflux-supervisor");
-const WRK_BIN = join(BIN_DIR, "coflux-worker");
-// PTY 托管进程（plan 20260918-ptyd-terminal-custody）：与 supervisor 平级的独立服务，supervisor 找不到它就拒绝启动。
+const FDA_STATUS = join(HOME, "fda-status"); // runtime 启动时探测落盘（仅 macOS，见 crates/runtime/src/fda.rs）
+// Device process set (plan 20261002-runtime-launcher-merge): the launcher owns the runtime version
+// pointer and is what the service unit starts; the runtime (sessiond + centre connection) is the
+// unit the centre updates by itself; ptyd owns every PTY and runs as its own service.
+const LAUNCHER_BIN = join(BIN_DIR, "coflux-launcher");
+const RUNTIME_BIN = join(BIN_DIR, "coflux-runtime");
 const PTYD_BIN = join(BIN_DIR, "coflux-ptyd");
 const CLI_RELEASE_FLOOR = join(HOME, "cofluxd.release-floor");
-const WORKER_RELEASE_FLOOR = join(HOME, "worker.release-floor");
+const RUNTIME_RELEASE_FLOOR = join(HOME, "runtime.release-floor");
 const IS_MAC = platform() === "darwin";
 const IS_LINUX = platform() === "linux";
 const PLIST = join(homedir(), "Library", "LaunchAgents", "com.coflux.daemon.plist");
@@ -231,7 +233,7 @@ function readReleaseFloor(path, label) {
 function currentReleaseFloor() {
   const floors = [
     readReleaseFloor(CLI_RELEASE_FLOOR, "cofluxd.release-floor"),
-    readReleaseFloor(WORKER_RELEASE_FLOOR, "worker.release-floor"),
+    readReleaseFloor(RUNTIME_RELEASE_FLOOR, "runtime.release-floor"),
   ].filter(Boolean);
   return floors.reduce((highest, candidate) => {
     if (!highest) return candidate;
@@ -286,7 +288,7 @@ async function readMirrorLatestTag() {
 async function ensureBinaries({ version, binDir, skipIfPresent }) {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   if (binDir) {
-    const localArtifacts = ["coflux-supervisor", "coflux-worker", "coflux-ptyd", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : []), ...(fs.existsSync(join(binDir, "coflux-transport")) ? ["coflux-transport"] : [])].map((name) => ({
+    const localArtifacts = ["coflux-launcher", "coflux-runtime", "coflux-ptyd", ...(fs.existsSync(join(binDir, "coflux")) ? ["coflux"] : []), ...(fs.existsSync(join(binDir, "coflux-transport")) ? ["coflux-transport"] : [])].map((name) => ({
       name,
       path: join(binDir, name),
     }));
@@ -324,7 +326,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     console.log(`✓ 用本地二进制（${binDir}）`);
     return;
   }
-  if (skipIfPresent && !version && fs.existsSync(SUP_BIN) && fs.existsSync(WRK_BIN) && fs.existsSync(PTYD_BIN)) {
+  if (skipIfPresent && !version && fs.existsSync(LAUNCHER_BIN) && fs.existsSync(RUNTIME_BIN) && fs.existsSync(PTYD_BIN)) {
     console.log(`✓ 二进制已存在（${BIN_DIR}），跳过下载（用 cofluxd update 升级）`);
     return;
   }
@@ -384,7 +386,7 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
     }
     const publicKey = loadReleasePublicKey();
     const staged = [];
-    for (const component of ["supervisor", "worker", ...(manifest.cli ? ["cli"] : []), ...(manifest.transport ? ["transport"] : []), ...(manifest.ptyd ? ["ptyd"] : [])]) {
+    for (const component of ["launcher", "runtime", ...(manifest.cli ? ["cli"] : []), ...(manifest.transport ? ["transport"] : []), ...(manifest.ptyd ? ["ptyd"] : [])]) {
       const entry = parseReleaseManifestEntry(manifest, component, releaseVersion, target);
       const artifactName = `coflux-${component}-${target}`;
       process.stdout.write(`下载并验签 ${artifactName} … `);
@@ -399,11 +401,11 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
       fs.chmodSync(source, 0o755);
       staged.push({
         source,
-        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "supervisor" ? SUP_BIN : component === "transport" ? join(BIN_DIR, "coflux-transport") : component === "ptyd" ? PTYD_BIN : WRK_BIN,
+        destination: component === "cli" ? join(BIN_DIR, "coflux") : component === "launcher" ? LAUNCHER_BIN : component === "transport" ? join(BIN_DIR, "coflux-transport") : component === "ptyd" ? PTYD_BIN : RUNTIME_BIN,
       });
       console.log("✓");
     }
-    // 两个远端产物均通过同一发布根的验签后，才允许做本地平台变换与替换。
+    // Every remote artifact verified against the same release root before any local transform / replacement.
     resignMacBinaries(staged.map(({ source }) => source));
     if (manifest.transport) {
       const source = join(stageDir, "TRANSPORT-NOTICES.txt");
@@ -452,11 +454,11 @@ function executorUnitRuntime() {
 function serviceFiles(executor = executorRuntime()) {
   return {
     launchd: {
-      supervisor: { path: PLIST, text: plistXml({ supervisorBin: SUP_BIN, home: HOME, logFile: LOG_FILE, executor }) },
+      launcher: { path: PLIST, text: plistXml({ launcherBin: LAUNCHER_BIN, home: HOME, logFile: LOG_FILE, executor }) },
       ptyd: { path: PTYD_PLIST, text: ptydPlistXml({ ptydBin: PTYD_BIN, home: HOME, logFile: LOG_FILE }) },
     },
     systemd: {
-      supervisor: { path: UNIT, text: systemdUnit({ supervisorBin: SUP_BIN, home: HOME, executor }) },
+      launcher: { path: UNIT, text: systemdUnit({ launcherBin: LAUNCHER_BIN, home: HOME, executor }) },
       ptyd: { path: PTYD_UNIT, text: ptydSystemdUnit({ ptydBin: PTYD_BIN, home: HOME }) },
     },
   };
@@ -466,9 +468,9 @@ function installService(start) {
   if (IS_MAC) {
     fs.mkdirSync(dirname(PLIST), { recursive: true });
     fs.writeFileSync(PTYD_PLIST, files.launchd.ptyd.text);
-    fs.writeFileSync(PLIST, files.launchd.supervisor.text);
+    fs.writeFileSync(PLIST, files.launchd.launcher.text);
     if (start) {
-      // ptyd 先起：supervisor 连不上它会退出，KeepAlive 再拉一次也只是浪费。
+      // ptyd 先起：runtime 连不上它会退出，KeepAlive 再拉一次也只是浪费。
       run("launchctl", ["unload", PLIST]);
       run("launchctl", ["unload", PTYD_PLIST]);
       run("launchctl", ["load", PTYD_PLIST]);
@@ -478,7 +480,7 @@ function installService(start) {
   } else if (IS_LINUX) {
     fs.mkdirSync(dirname(UNIT), { recursive: true });
     fs.writeFileSync(PTYD_UNIT, files.systemd.ptyd.text);
-    fs.writeFileSync(UNIT, files.systemd.supervisor.text);
+    fs.writeFileSync(UNIT, files.systemd.launcher.text);
     if (start) {
       run("systemctl", ["--user", "daemon-reload"]);
       run("systemctl", ["--user", "enable", "--now", "coflux-ptyd.service"]);
@@ -487,7 +489,7 @@ function installService(start) {
     console.log(`✓ systemd: ${PTYD_UNIT}\n✓ systemd: ${UNIT}`);
   } else die("仅支持 macOS / Linux");
 }
-/** 只重启 supervisor：终端留在 ptyd 里。ptyd 若还没起（首次升到带 ptyd 的版本）先把它拉起来，已在跑则无事。 */
+/** 只重启 launcher（连同它的 runtime）：终端留在 ptyd 里。ptyd 若还没起先把它拉起来，已在跑则无事。 */
 function restartService() {
   if (IS_MAC) {
     run("launchctl", ["load", PTYD_PLIST]);
@@ -505,7 +507,7 @@ function restartAllServices() {
   if (IS_MAC) { run("launchctl", ["load", PTYD_PLIST]); run("launchctl", ["load", PLIST]); }
   else if (IS_LINUX) { run("systemctl", ["--user", "start", "coflux-ptyd.service"]); run("systemctl", ["--user", "start", "coflux-daemon.service"]); }
 }
-/** 停止本机 daemon = supervisor + ptyd 一起停（终端结束）。 */
+/** 停止本机 daemon = launcher + ptyd 一起停（终端结束）。 */
 function stopService() {
   if (IS_MAC) { run("launchctl", ["unload", PLIST]); run("launchctl", ["unload", PTYD_PLIST]); }
   else if (IS_LINUX) { run("systemctl", ["--user", "stop", "coflux-daemon.service"]); run("systemctl", ["--user", "stop", "coflux-ptyd.service"]); }
@@ -639,29 +641,34 @@ async function cmdUp(v) {
 
 function cmdDown() { stopService(); console.log("✓ 已停止"); }
 
-// 只有 supervisor 真正靠这条命令更新——它不自动升级（持 PTY，重启会杀会话，见 plan 017）。
-// worker 运行中会被 server 自动热升级到最新 stable（无需停服）；这里顺带刷新的是 worker 的
-// "内置兜底二进制"（supervisor 冷启动/热升级缓存皆无时的 fallback），日常可不管。
+// Only the launcher, ptyd and the CLI need this command (plan 20261002-runtime-launcher-merge): the
+// runtime updates itself — the centre pushes every release into it, the launcher observes and
+// rolls back. The runtime binary refreshed here is the builtin fallback the launcher runs when
+// the store holds nothing better.
 //
 // update 与 restart 拆开（2026-07-25 用户拍板）：update 只落盘二进制、绝不重启——替换磁盘
-// 文件对运行中的 supervisor/PTY 零影响；supervisor 内容没变就明说不用重启（大多数发版
-// 都不动 supervisor，旧行为等于白丢一次全部会话）。真正的中断收敛到显式的 `cofluxd restart`。
+// 文件对运行中的进程零影响；launcher / ptyd 内容没变就明说不用重启。真正的中断收敛到显式的
+// `cofluxd restart`（终端留在 ptyd 里）与 `cofluxd restart --ptyd`（结束终端）。
 async function cmdUpdate(v) {
   if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
   const version = v.version || "latest";
-  const before = fileSha256(SUP_BIN);
+  const before = fileSha256(LAUNCHER_BIN);
   const ptydBefore = fileSha256(PTYD_BIN);
+  const cliBefore = fileSha256(join(BIN_DIR, "coflux"));
   await ensureBinaries({ version, binDir: v["bin-dir"] });
-  const supervisorChanged = before !== fileSha256(SUP_BIN);
+  const launcherChanged = before !== fileSha256(LAUNCHER_BIN);
   const ptydChanged = ptydBefore !== fileSha256(PTYD_BIN);
-  if (!supervisorChanged && !ptydChanged) {
-    console.log("✓ 已更新：supervisor / ptyd 无变化——不需要重启，活会话不受影响");
-    console.log("  worker 由 server 自动热升级；本次刷新的只是兜底 worker 二进制。");
+  const cliChanged = cliBefore !== fileSha256(join(BIN_DIR, "coflux"));
+  if (cliChanged) console.log("✓ 新 coflux（操作工具）已就位，立即生效，不影响任何终端");
+  if (!launcherChanged && !ptydChanged) {
+    console.log("✓ 已更新：launcher / ptyd 无变化——不需要重启，活会话不受影响");
+    console.log("  运行组件（runtime）由中心自动推送更新；本次刷新的只是它的内置兜底二进制。");
     return;
   }
-  if (supervisorChanged) {
-    console.log(`✓ 新 supervisor 已就位（${v["bin-dir"] ? "本地产物" : version}），但尚未生效`);
+  if (launcherChanged) {
+    console.log(`✓ 新 launcher 已就位（${v["bin-dir"] ? "本地产物" : version}），但尚未生效`);
     console.log("  运行 `cofluxd restart` 应用——终端留在 ptyd 里，屏幕与回滚原样保留，只有几秒停顿。");
+    console.log("  之后运行组件（runtime）由中心自动推送更新，不再需要 cofluxd update。");
   }
   if (ptydChanged) {
     console.log(`✓ 新 ptyd（终端托管进程）已就位${ptydBefore ? "" : "（首次安装）"}，但尚未生效`);
@@ -669,17 +676,17 @@ async function cmdUpdate(v) {
   }
 }
 
-// 应用已就位的新 supervisor（或单纯重启 supervisor）：终端留在 ptyd 里不动。
+// 应用已就位的新 launcher（或单纯重启 launcher + runtime）：终端留在 ptyd 里不动。
 // `--ptyd`：连 ptyd 一起重启（ptyd 自身更新时才需要）——这才是会结束本机会话的那条命令。
 function cmdRestart(v) {
   if (!fs.existsSync(SETTINGS)) die("尚未安装，先 cofluxd up");
-  // 服务文件与模板同步（首次升到带 ptyd 的版本时 ptyd 的 plist / unit 还不存在）；只写文件，不在这里启动。
+  // 服务文件与模板同步（首次升到 launcher 版本时 unit 还指向旧的 supervisor）；只写文件，不在这里启动。
   installService(false);
   if (v.ptyd) {
-    console.log("⚠ 正在重启 ptyd 与 supervisor：本机所有活会话将结束…");
+    console.log("⚠ 正在重启 ptyd 与 launcher：本机所有活会话将结束…");
     restartAllServices();
   } else {
-    console.log("正在重启 supervisor：本机终端留在 ptyd 里，屏幕与回滚原样保留…");
+    console.log("正在重启 launcher：本机终端留在 ptyd 里，屏幕与回滚原样保留…");
     restartService();
   }
   console.log("✓ 已重启（cofluxd status 查看状态）");
@@ -691,7 +698,7 @@ function cmdServiceFiles() {
 }
 
 // launchd(macOS) / systemd --user(Linux) 服务活跃态查询，status 与 doctor 共用。
-// macOS 必须以 launchctl list 输出里的 PID 为准：label 登记 ≠ 进程存活（supervisor 被
+// macOS 必须以 launchctl list 输出里的 PID 为准：label 登记 ≠ 进程存活（launcher 被
 // OS_REASON_CODESIGNING 杀掉时 label 仍在，旧实现会报假"运行中"，2026-07-25 实测踩过）。
 function serviceRunningInfo() {
   if (IS_MAC) {
@@ -725,7 +732,7 @@ function cmdStatus() {
   const { running, active } = serviceRunningInfo();
   let pid = "";
   if (running) {
-    try { pid = ` (worker pid ${fs.readFileSync(join(HOME, "worker.pid"), "utf8").trim()})`; } catch { /* */ }
+    try { pid = ` (runtime pid ${fs.readFileSync(join(HOME, "runtime.pid"), "utf8").trim()})`; } catch { /* */ }
   }
   console.log(`服务:   ${active}${pid}`);
   // conn-state.json 是 worker 生前写的快照：进程不在时是 stale 数据，忽略——不能让"进程活着"
@@ -983,17 +990,17 @@ function cmdLogs(v) {
 }
 
 // 完全磁盘访问权限（FDA）引导：macOS 不允许程序自动弹出 FDA 授权窗（Apple 刻意设计），
-// 上限就是检测 + 跳转系统设置 + 引导手动添加。授权对象是 supervisor 二进制本身——worker/PTY/agent
+// 上限就是检测 + 跳转系统设置 + 引导手动添加。授权对象是 launcher 二进制本身——runtime/agent
 // 都是它的子进程，TCC 按 launchd 服务的 responsible process 归属，一次授权覆盖全树。
 async function cmdFda() {
   if (!IS_MAC) die("此命令仅 macOS 可用（Linux 无 TCC/FDA 概念，无需授权）");
   console.log("\n  完全磁盘访问权限（FDA）引导\n  ──────────────────────────\n");
   console.log("  macOS 不支持程序自动弹出 FDA 授权窗，需手动在「系统设置」里添加。");
   console.log("  请把下面这个二进制拖进「隐私与安全性 → 完全磁盘访问权限」列表并勾选：\n");
-  console.log(`    ${SUP_BIN}\n`);
+  console.log(`    ${LAUNCHER_BIN}\n`);
   console.log("  即将打开系统设置面板，并在 Finder 中定位该二进制……\n");
   run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
-  run("open", ["-R", SUP_BIN]);
+  run("open", ["-R", LAUNCHER_BIN]);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     await rl.question("  添加并勾选后按回车，重启服务使授权生效… ");
@@ -1021,8 +1028,8 @@ const HELP = `cofluxd —— coflux daemon 管理
   cofluxd up --key <密钥>  用 Coflux 添加设备里生成的一次性密钥直接接入账号（不打印授权链接；已接入则不做改动）
   cofluxd status          服务器/登记（含"等待授权"）/服务/连接状态
   cofluxd doctor          中心网络 + gateway bind/grant/loopback + daemon 状态分层自检
-  cofluxd update          下载新二进制（不重启；supervisor / ptyd 有变化时提示用 restart 应用）
-  cofluxd restart         重启 supervisor 应用新版本（终端留在 ptyd 里，不结束会话）
+  cofluxd update          下载新二进制（不重启；launcher / ptyd 有变化时提示用 restart 应用；运行组件由中心自动更新）
+  cofluxd restart         重启 launcher 应用新版本（终端留在 ptyd 里，不结束会话）
   cofluxd restart --ptyd  连 ptyd 一起重启（⚠ 结束本机所有活会话；仅 ptyd 自身更新时需要）
   cofluxd fda             [仅 macOS] 引导授予完全磁盘访问权限（避免 PTY 因 TCC 弹窗卡住）
   cofluxd logs [-f]       看 daemon 日志

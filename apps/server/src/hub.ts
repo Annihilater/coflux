@@ -90,6 +90,8 @@ import {
 import { PreparedOperationConvergenceService, type OperationEffect } from "./prepared-operation-convergence.service.js";
 import {
   DAEMON_CAPABILITY_DESKTOP_MANAGED,
+  DAEMON_CAPABILITY_RUNTIME_LAUNCHER,
+  daemonLacksLauncher,
   DAEMON_CAPABILITY_DEVICE_EXEC,
   DAEMON_CAPABILITY_EXECUTOR_SETTINGS,
   DAEMON_CAPABILITY_PREPARED_EXECUTE,
@@ -1042,10 +1044,11 @@ export class Hub {
 
   /** 自动更新编排（plan 015）读取在线 daemon 快照用于比对期望版本。`desktopManaged`：桌面应用自己管
    * 它的版本（plan 20261002-runtime-follows-app），编排要跳过。 */
-  listOnlineDaemonsForUpdate(): { daemonId: DaemonId; workerVersion: string; platform: string; arch: string; desktopManaged: boolean }[] {
+  listOnlineDaemonsForUpdate(): { daemonId: DaemonId; workerVersion: string; platform: string; arch: string; desktopManaged: boolean; launcher: boolean }[] {
     return [...this.daemons.values()].map((d) => ({
       daemonId: d.info.daemonId, workerVersion: d.info.workerVersion, platform: d.info.platform, arch: d.arch,
       desktopManaged: d.capabilities.has(DAEMON_CAPABILITY_DESKTOP_MANAGED),
+      launcher: d.capabilities.has(DAEMON_CAPABILITY_RUNTIME_LAUNCHER),
     }));
   }
 
@@ -3230,7 +3233,13 @@ export class Hub {
           log.info("worker upgrade refused: daemon is desktop-managed", { daemonId: value.daemonId, version: value.version });
           return void this.sendClient(client, { case: "error", value: { message: daemonManagedByDesktop(d.info.name) } });
         }
-        if (value.transport && !d.capabilities.has("transport_pair_v1")) return void this.sendClient(client, { case: "error", value: { message: "请先运行 cofluxd update，再显式重启 daemon 以更新 supervisor" } });
+        // Only a launcher can stage, observe and roll back what this pushes (plan
+        // 20261002-runtime-launcher-merge); a pre-launcher daemon receives nothing new.
+        if (!d.capabilities.has(DAEMON_CAPABILITY_RUNTIME_LAUNCHER)) {
+          log.info("worker upgrade refused: daemon has no launcher", { daemonId: value.daemonId, version: value.version });
+          return void this.sendClient(client, { case: "error", value: { message: daemonLacksLauncher(d.info.name) } });
+        }
+        if (value.transport && !d.capabilities.has("transport_pair_v1")) return void this.sendClient(client, { case: "error", value: { message: "请先运行 cofluxd update，再显式重启 daemon 以更新运行组件" } });
         this.sendDaemon(d, {
           case: "workerUpgrade",
           value: {

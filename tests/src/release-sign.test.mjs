@@ -2,19 +2,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
   cliReleaseStatement,
+  launcherReleaseStatement,
   ptydReleaseStatement,
-  transportReleaseStatement,
+  runtimeReleaseStatement,
   supervisorReleaseStatement,
+  transportReleaseStatement,
   workerReleaseStatement,
 } from "../../scripts/release-statement.mjs";
 import {
   MAX_RELEASE_ARTIFACT_BYTES,
+  RELEASE_COMPONENTS,
   compareReleaseVersions,
   createReleasePublicKey,
   installStagedPair,
@@ -23,142 +26,97 @@ import {
 } from "../../packages/cli/release-trust.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
+const COMPONENTS = ["runtime", "launcher", "cli", "transport", "ptyd"];
 
-test("release-sign 为 worker/supervisor 产生相互隔离且绑定元数据的 release statement", () => {
+function signRelease(dir, version) {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, version], {
+    cwd: ROOT,
+    env: { ...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({ format: "pem", type: "pkcs8" }) },
+    stdio: "pipe",
+  });
+  return { publicKey, privateKey, manifest: JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) };
+}
+
+test("release-sign produces a schema 3 manifest: runtime/launcher domains isolated, no worker component, no raw signature", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-sign-"));
   try {
     const target = "aarch64-unknown-linux-musl";
-    const workerName = `coflux-worker-${target}`;
-    const supervisorName = `coflux-supervisor-${target}`;
-    const workerArtifact = Buffer.from("deterministic worker artifact\n", "utf8");
-    const supervisorArtifact = Buffer.from("deterministic supervisor artifact\n", "utf8");
-    writeFileSync(join(dir, workerName), workerArtifact);
-    writeFileSync(join(dir, supervisorName), supervisorArtifact);
-    writeFileSync(join(dir, `coflux-cli-${target}`), workerArtifact);
-    writeFileSync(join(dir, `coflux-transport-${target}`), workerArtifact);
-    writeFileSync(join(dir, `coflux-ptyd-${target}`), workerArtifact);
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-    const pem = privateKey.export({ format: "pem", type: "pkcs8" });
+    const runtimeArtifact = Buffer.from("deterministic runtime artifact\n", "utf8");
+    const launcherArtifact = Buffer.from("deterministic launcher artifact\n", "utf8");
+    writeFileSync(join(dir, `coflux-runtime-${target}`), runtimeArtifact);
+    writeFileSync(join(dir, `coflux-launcher-${target}`), launcherArtifact);
+    writeFileSync(join(dir, `coflux-cli-${target}`), runtimeArtifact);
+    writeFileSync(join(dir, `coflux-transport-${target}`), runtimeArtifact);
+    writeFileSync(join(dir, `coflux-ptyd-${target}`), runtimeArtifact);
+    const { publicKey, manifest } = signRelease(dir, "v2.3.4-rc.1");
 
-    execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.3.4-rc.1"], {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "acme/coflux",
-        WORKER_SIGNING_KEY: pem,
-      },
-      stdio: "pipe",
-    });
-
-    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-    const cliEntry = parseReleaseManifestEntry(manifest, "cli", manifest.version, target);
-    verifyReleaseArtifact({component:"cli",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey});
-    assert.equal(crypto.verify(null, cliReleaseStatement({version:manifest.version,...cliEntry}), publicKey, Buffer.from(cliEntry.releaseSignature,"hex")), true);
-    assert.throws(() => verifyReleaseArtifact({component:"worker",version:manifest.version,entry:cliEntry,data:workerArtifact,publicKey}));
-    const helperEntry = parseReleaseManifestEntry(manifest, "transport", manifest.version, target);
-    verifyReleaseArtifact({component:"transport",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey});
-    assert.equal(crypto.verify(null, transportReleaseStatement({version:manifest.version,...helperEntry}),publicKey,Buffer.from(helperEntry.releaseSignature,"hex")),true);
-    assert.throws(() => verifyReleaseArtifact({component:"cli",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey}));
-    // ptyd（PTY 托管进程）：自己的 domain，同样的字节配 worker/transport 的 statement 都验不过。
-    const ptydEntry = parseReleaseManifestEntry(manifest, "ptyd", manifest.version, target);
-    verifyReleaseArtifact({component:"ptyd",version:manifest.version,entry:ptydEntry,data:workerArtifact,publicKey});
-    assert.equal(crypto.verify(null, ptydReleaseStatement({version:manifest.version,...ptydEntry}),publicKey,Buffer.from(ptydEntry.releaseSignature,"hex")),true);
-    assert.throws(() => verifyReleaseArtifact({component:"transport",version:manifest.version,entry:ptydEntry,data:workerArtifact,publicKey}));
-    assert.throws(() => verifyReleaseArtifact({component:"ptyd",version:manifest.version,entry:helperEntry,data:workerArtifact,publicKey}));
-    assert.equal(readFileSync(join(dir, `coflux-ptyd-${target}.release.sig`), "utf8"), ptydEntry.releaseSignature);
-    const entry = manifest.worker[target];
-    const supervisorEntry = manifest.supervisor[target];
-    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.schemaVersion, 3);
     assert.equal(manifest.version, "v2.3.4-rc.1");
-    assert.equal(entry.target, target);
-    assert.equal(entry.size, workerArtifact.byteLength);
-    assert.equal(entry.sha256, crypto.createHash("sha256").update(workerArtifact).digest("hex"));
-    assert.equal(entry.signature, readFileSync(join(dir, `${workerName}.sig`), "utf8"));
-    assert.equal(entry.releaseSignature, readFileSync(join(dir, `${workerName}.release.sig`), "utf8"));
-    assert.equal(crypto.verify(null, workerArtifact, publicKey, Buffer.from(entry.signature, "hex")), true);
-
-    assert.equal(supervisorEntry.target, target);
-    assert.equal(supervisorEntry.size, supervisorArtifact.byteLength);
-    assert.equal(
-      supervisorEntry.sha256,
-      crypto.createHash("sha256").update(supervisorArtifact).digest("hex"),
-    );
-    assert.equal(
-      supervisorEntry.releaseSignature,
-      readFileSync(join(dir, `${supervisorName}.release.sig`), "utf8"),
-    );
-
-    const statement = workerReleaseStatement({
-      version: manifest.version,
-      target: entry.target,
-      sha256: entry.sha256,
-      size: entry.size,
-    });
-    const releaseSignature = Buffer.from(entry.releaseSignature, "hex");
-    assert.equal(crypto.verify(null, statement, publicKey, releaseSignature), true);
-    const supervisorSignature = Buffer.from(supervisorEntry.releaseSignature, "hex");
-    assert.equal(
-      crypto.verify(
-        null,
-        supervisorReleaseStatement({
-          version: manifest.version,
-          target,
-          sha256: supervisorEntry.sha256,
-          size: supervisorEntry.size,
-        }),
-        publicKey,
-        supervisorSignature,
-      ),
-      true,
-    );
-
-    // component domain 是信任边界：即使把 metadata 调成 worker 的值，也不能把 worker
-    // release signature 横向移植为 supervisor 签名。
-    assert.equal(
-      crypto.verify(
-        null,
-        supervisorReleaseStatement({
-          version: manifest.version,
-          target,
-          sha256: entry.sha256,
-          size: entry.size,
-        }),
-        publicKey,
-        releaseSignature,
-      ),
-      false,
-    );
-
-    for (const mutated of [
-      { version: "v2.3.5", target, sha256: entry.sha256, size: entry.size },
-      { version: manifest.version, target: "x86_64-unknown-linux-musl", sha256: entry.sha256, size: entry.size },
-      { version: manifest.version, target, sha256: "00".repeat(32), size: entry.size },
-      { version: manifest.version, target, sha256: entry.sha256, size: entry.size + 1 },
-    ]) {
-      assert.equal(
-        crypto.verify(null, workerReleaseStatement(mutated), publicKey, releaseSignature),
-        false,
-        `篡改字段应破坏签名: ${JSON.stringify(mutated)}`,
-      );
+    assert.deepEqual(Object.keys(manifest).filter((key) => COMPONENTS.includes(key)).sort(), [...COMPONENTS].sort());
+    assert.equal(manifest.worker, undefined, "schema 3 carries no worker component");
+    assert.equal(manifest.supervisor, undefined, "schema 3 carries no supervisor component");
+    // No raw-binary signature anywhere: that was the back door a pre-plan supervisor still checks.
+    assert.equal(existsSync(join(dir, `coflux-runtime-${target}.sig`)), false, "no raw runtime signature asset");
+    for (const component of COMPONENTS) {
+      assert.equal(manifest[component][target].signature, undefined, `${component} entry carries no raw signature`);
+      assert.equal(readFileSync(join(dir, `coflux-${component}-${target}.release.sig`), "utf8"), manifest[component][target].releaseSignature);
     }
 
+    const runtimeEntry = parseReleaseManifestEntry(manifest, "runtime", manifest.version, target);
+    verifyReleaseArtifact({ component: "runtime", version: manifest.version, entry: runtimeEntry, data: runtimeArtifact, publicKey });
+    assert.equal(runtimeEntry.size, runtimeArtifact.byteLength);
+    assert.equal(runtimeEntry.sha256, crypto.createHash("sha256").update(runtimeArtifact).digest("hex"));
+    const runtimeSignature = Buffer.from(runtimeEntry.releaseSignature, "hex");
+    assert.equal(crypto.verify(null, runtimeReleaseStatement({ version: manifest.version, ...runtimeEntry }), publicKey, runtimeSignature), true);
+    // (b) A runtime releaseSignature must fail against the worker-domain statement built from
+    // identical metadata — and against the supervisor/launcher domains.
+    for (const other of [workerReleaseStatement, supervisorReleaseStatement, launcherReleaseStatement]) {
+      assert.equal(crypto.verify(null, other({ version: manifest.version, target, sha256: runtimeEntry.sha256, size: runtimeEntry.size }), publicKey, runtimeSignature), false);
+    }
+    // (c) Looking up the worker component in a schema 3 manifest throws.
+    assert.throws(() => parseReleaseManifestEntry(manifest, "worker", manifest.version, target), /未知 release component/);
+    assert.throws(() => parseReleaseManifestEntry(manifest, "supervisor", manifest.version, target), /未知 release component/);
+
+    const launcherEntry = parseReleaseManifestEntry(manifest, "launcher", manifest.version, target);
+    verifyReleaseArtifact({ component: "launcher", version: manifest.version, entry: launcherEntry, data: launcherArtifact, publicKey });
+    assert.equal(crypto.verify(null, launcherReleaseStatement({ version: manifest.version, ...launcherEntry }), publicKey, Buffer.from(launcherEntry.releaseSignature, "hex")), true);
+    assert.throws(() => verifyReleaseArtifact({ component: "runtime", version: manifest.version, entry: launcherEntry, data: launcherArtifact, publicKey }));
+
+    const cliEntry = parseReleaseManifestEntry(manifest, "cli", manifest.version, target);
+    verifyReleaseArtifact({ component: "cli", version: manifest.version, entry: cliEntry, data: runtimeArtifact, publicKey });
+    assert.equal(crypto.verify(null, cliReleaseStatement({ version: manifest.version, ...cliEntry }), publicKey, Buffer.from(cliEntry.releaseSignature, "hex")), true);
+    assert.throws(() => verifyReleaseArtifact({ component: "runtime", version: manifest.version, entry: cliEntry, data: runtimeArtifact, publicKey }));
+    const helperEntry = parseReleaseManifestEntry(manifest, "transport", manifest.version, target);
+    verifyReleaseArtifact({ component: "transport", version: manifest.version, entry: helperEntry, data: runtimeArtifact, publicKey });
+    assert.equal(crypto.verify(null, transportReleaseStatement({ version: manifest.version, ...helperEntry }), publicKey, Buffer.from(helperEntry.releaseSignature, "hex")), true);
+    assert.throws(() => verifyReleaseArtifact({ component: "cli", version: manifest.version, entry: helperEntry, data: runtimeArtifact, publicKey }));
+    const ptydEntry = parseReleaseManifestEntry(manifest, "ptyd", manifest.version, target);
+    verifyReleaseArtifact({ component: "ptyd", version: manifest.version, entry: ptydEntry, data: runtimeArtifact, publicKey });
+    assert.equal(crypto.verify(null, ptydReleaseStatement({ version: manifest.version, ...ptydEntry }), publicKey, Buffer.from(ptydEntry.releaseSignature, "hex")), true);
+    assert.throws(() => verifyReleaseArtifact({ component: "transport", version: manifest.version, entry: ptydEntry, data: runtimeArtifact, publicKey }));
+    assert.throws(() => verifyReleaseArtifact({ component: "ptyd", version: manifest.version, entry: helperEntry, data: runtimeArtifact, publicKey }));
+
+    for (const mutated of [
+      { version: "v2.3.5", target, sha256: runtimeEntry.sha256, size: runtimeEntry.size },
+      { version: manifest.version, target: "x86_64-unknown-linux-musl", sha256: runtimeEntry.sha256, size: runtimeEntry.size },
+      { version: manifest.version, target, sha256: "00".repeat(32), size: runtimeEntry.size },
+      { version: manifest.version, target, sha256: runtimeEntry.sha256, size: runtimeEntry.size + 1 },
+    ]) {
+      assert.equal(crypto.verify(null, runtimeReleaseStatement(mutated), publicKey, runtimeSignature), false, `a changed field breaks the signature: ${JSON.stringify(mutated)}`);
+    }
     assert.throws(
-      () => workerReleaseStatement({ version: "v2.3.4-01", target, sha256: entry.sha256, size: entry.size }),
+      () => runtimeReleaseStatement({ version: "v2.3.4-01", target, sha256: runtimeEntry.sha256, size: runtimeEntry.size }),
       /前导 0/,
-      "数字 prerelease 标识符必须与 Rust strict SemVer 一致",
+      "numeric prerelease identifiers follow Rust strict SemVer",
     );
 
     // A prerelease is never uploaded to the R2 mirror: every entry keeps its GitHub Release URL.
-    assert.deepEqual(manifestUrls(manifest), expectedUrls(
-      target,
-      (name) => `https://github.com/acme/coflux/releases/download/v2.3.4-rc.1/${name}`,
-    ));
+    assert.deepEqual(manifestUrls(manifest), expectedUrls(target, (name) => `https://github.com/acme/coflux/releases/download/v2.3.4-rc.1/${name}`));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-const COMPONENTS = ["worker", "supervisor", "cli", "transport", "ptyd"];
 
 function manifestUrls(manifest) {
   return Object.fromEntries(COMPONENTS.flatMap((component) =>
@@ -175,18 +133,10 @@ test("release-sign points every component of a stable tag at the R2 mirror, with
     const target = "x86_64-unknown-linux-musl";
     const artifact = Buffer.from("stable artifact\n", "utf8");
     for (const component of COMPONENTS) writeFileSync(join(dir, `coflux-${component}-${target}`), artifact);
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-    execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.3.4"], {
-      cwd: ROOT,
-      env: { ...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({ format: "pem", type: "pkcs8" }) },
-      stdio: "pipe",
-    });
-    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-    assert.deepEqual(manifestUrls(manifest), expectedUrls(
-      target,
-      (name) => `https://dl.coflux.dev/releases/v2.3.4/${name}`,
-    ));
+    const { publicKey, manifest } = signRelease(dir, "v2.3.4");
+    assert.deepEqual(manifestUrls(manifest), expectedUrls(target, (name) => `https://dl.coflux.dev/releases/v2.3.4/${name}`));
     assert.doesNotMatch(JSON.stringify(manifest), /github\.com/);
+    assert.deepEqual([...RELEASE_COMPONENTS].sort(), [...COMPONENTS].sort(), "cofluxd installs exactly the signed component set");
     // The trust chain is unchanged: the release statement binds version/target/sha256/size, never the URL.
     for (const component of COMPONENTS) {
       const entry = parseReleaseManifestEntry(manifest, component, manifest.version, target);
@@ -197,195 +147,146 @@ test("release-sign points every component of a stable tag at the R2 mirror, with
   }
 });
 
-test("release-sign 缺少同 target supervisor 时 fail closed", () => {
+function expectSignFailure(dir, version, pattern) {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  assert.throws(
+    () => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, version], {
+      cwd: ROOT,
+      env: { ...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({ format: "pem", type: "pkcs8" }) },
+      stdio: "pipe",
+    }),
+    (error) => error?.status === 1 && pattern.test(error?.stderr?.toString() ?? ""),
+  );
+}
+
+test("release-sign fails closed without a launcher for the runtime's target", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-sign-incomplete-"));
   try {
-    writeFileSync(join(dir, "coflux-worker-x86_64-unknown-linux-musl"), "worker");
+    writeFileSync(join(dir, "coflux-runtime-x86_64-unknown-linux-musl"), "runtime");
     writeFileSync(join(dir, "coflux-transport-x86_64-unknown-linux-musl"), "helper");
-    const { privateKey } = crypto.generateKeyPairSync("ed25519");
-    assert.throws(
-      () => execFileSync(
-        process.execPath,
-        [join(ROOT, "scripts/release-sign.mjs"), dir, "v1.0.0"],
-        {
-          cwd: ROOT,
-          env: {
-            ...process.env,
-            GITHUB_REPOSITORY: "acme/coflux",
-            WORKER_SIGNING_KEY: privateKey.export({ format: "pem", type: "pkcs8" }),
-          },
-          stdio: "pipe",
-        },
-      ),
-      (error) => error?.status === 1 && /target 集合不完整/.test(error?.stderr?.toString() ?? ""),
-    );
+    writeFileSync(join(dir, "coflux-ptyd-x86_64-unknown-linux-musl"), "ptyd");
+    expectSignFailure(dir, "v1.0.0", /target 集合不完整/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("cofluxd 内置发布公钥与 supervisor 编译期公钥一致", () => {
-  const supervisorKey = readFileSync(join(ROOT, "crates/supervisor/release-pubkey.hex"), "utf8").trim();
+test("release-sign refuses a directory without a runtime, even with a pre-plan worker present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "coflux-release-sign-worker-only-"));
+  try {
+    for (const component of ["worker", "supervisor", "cli", "transport", "ptyd"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    expectSignFailure(dir, "v1.0.0", /runtime target 集合不完整/);
+    assert.equal(existsSync(join(dir, "manifest.json")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cofluxd's built-in release public key matches the runtime's compiled-in key", () => {
+  const runtimeKey = readFileSync(join(ROOT, "crates/runtime/release-pubkey.hex"), "utf8").trim();
   const cliKey = readFileSync(join(ROOT, "packages/cli/release-pubkey.hex"), "utf8").trim();
-  assert.equal(cliKey, supervisorKey);
+  assert.equal(cliKey, runtimeKey);
   assert.match(cliKey, /^[0-9a-f]{64}$/);
 });
 
-test("cofluxd verifier 直接拒绝 bytes/hash/size/version/target/缺字段与跨 component 移植", () => {
+test("cofluxd verifier rejects bytes/hash/size/version/target/missing fields, cross-component transplants and schema 2", () => {
   const version = "v3.4.5";
   const target = "x86_64-unknown-linux-musl";
-  const data = Buffer.from("verified worker bytes", "utf8");
+  const data = Buffer.from("verified runtime bytes", "utf8");
   const sha256 = crypto.createHash("sha256").update(data).digest("hex");
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const publicKeyHex = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
   const verifierKey = createReleasePublicKey(publicKeyHex);
   const metadata = { version, target, sha256, size: data.byteLength };
-  const workerEntry = {
+  const runtimeEntry = {
     target,
     sha256,
     size: data.byteLength,
-    signature: crypto.sign(null, data, privateKey).toString("hex"),
-    releaseSignature: crypto.sign(null, workerReleaseStatement(metadata), privateKey).toString("hex"),
+    releaseSignature: crypto.sign(null, runtimeReleaseStatement(metadata), privateKey).toString("hex"),
   };
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     version,
-    worker: { [target]: workerEntry },
-    supervisor: {
+    runtime: { [target]: runtimeEntry },
+    launcher: {
       [target]: {
         target,
         sha256,
         size: data.byteLength,
-        releaseSignature: crypto.sign(
-          null,
-          supervisorReleaseStatement(metadata),
-          privateKey,
-        ).toString("hex"),
+        releaseSignature: crypto.sign(null, launcherReleaseStatement(metadata), privateKey).toString("hex"),
       },
     },
   };
 
-  const parsed = parseReleaseManifestEntry(manifest, "worker", version, target);
-  assert.doesNotThrow(() => verifyReleaseArtifact({
-    component: "worker",
-    version,
-    entry: parsed,
-    data,
-    publicKey: verifierKey,
-  }));
+  const parsed = parseReleaseManifestEntry(manifest, "runtime", version, target);
+  assert.doesNotThrow(() => verifyReleaseArtifact({ component: "runtime", version, entry: parsed, data, publicKey: verifierKey }));
 
   const tampered = Buffer.from(data);
   tampered[0] ^= 1;
-  assert.throws(
-    () => verifyReleaseArtifact({ component: "worker", version, entry: parsed, data: tampered, publicKey: verifierKey }),
-    /sha256 不匹配/,
-  );
-  assert.throws(
-    () => verifyReleaseArtifact({
-      component: "worker",
-      version,
-      entry: { ...parsed, size: parsed.size + 1 },
-      data,
-      publicKey: verifierKey,
-    }),
-    /大小不匹配/,
-  );
-  assert.throws(
-    () => verifyReleaseArtifact({
-      component: "worker",
-      version,
-      entry: { ...parsed, sha256: "00".repeat(32) },
-      data,
-      publicKey: verifierKey,
-    }),
-    /sha256 不匹配/,
-  );
-  assert.throws(() => parseReleaseManifestEntry({ ...manifest, version: "v3.4.4" }, "worker", version, target), /schema\/version/);
-  assert.throws(
-    () => parseReleaseManifestEntry({
-      ...manifest,
-      worker: { [target]: { ...workerEntry, target: "aarch64-unknown-linux-musl" } },
-    }, "worker", version, target),
-    /缺少匹配/,
-  );
-  for (const field of ["sha256", "size", "signature", "releaseSignature"]) {
-    const incomplete = { ...workerEntry };
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: parsed, data: tampered, publicKey: verifierKey }), /sha256 不匹配/);
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, size: parsed.size + 1 }, data, publicKey: verifierKey }), /大小不匹配/);
+  assert.throws(() => verifyReleaseArtifact({ component: "runtime", version, entry: { ...parsed, sha256: "00".repeat(32) }, data, publicKey: verifierKey }), /sha256 不匹配/);
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, version: "v3.4.4" }, "runtime", version, target), /schema\/version/);
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, schemaVersion: 2 }, "runtime", version, target), /schema\/version/, "schema 2 is refused by the new cofluxd");
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, target: "aarch64-unknown-linux-musl" } } }, "runtime", version, target), /缺少匹配/);
+  for (const field of ["sha256", "size", "releaseSignature"]) {
+    const incomplete = { ...runtimeEntry };
     delete incomplete[field];
-    assert.throws(
-      () => parseReleaseManifestEntry({ ...manifest, worker: { [target]: incomplete } }, "worker", version, target),
-      /元数据非法|缺少 legacy/,
-      `缺少 ${field} 必须拒绝`,
-    );
+    assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: incomplete } }, "runtime", version, target), /元数据非法/, `missing ${field} must be refused`);
   }
-  assert.throws(
-    () => parseReleaseManifestEntry({
-      ...manifest,
-      worker: { [target]: { ...workerEntry, size: MAX_RELEASE_ARTIFACT_BYTES + 1 } },
-    }, "worker", version, target),
-    /元数据非法/,
-  );
+  assert.throws(() => parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, size: MAX_RELEASE_ARTIFACT_BYTES + 1 } } }, "runtime", version, target), /元数据非法/);
+  // A stray raw signature on a runtime entry is ignored, never required and never trusted.
+  const withRaw = parseReleaseManifestEntry({ ...manifest, runtime: { [target]: { ...runtimeEntry, signature: "00".repeat(64) } } }, "runtime", version, target);
+  assert.equal(withRaw.signature, undefined);
 
-  const transplantedSupervisor = {
-    target,
-    sha256,
-    size: data.byteLength,
-    releaseSignature: crypto.sign(null, workerReleaseStatement(metadata), privateKey).toString("hex"),
-  };
-  assert.throws(
-    () => verifyReleaseArtifact({
-      component: "supervisor",
-      version,
-      entry: transplantedSupervisor,
-      data,
-      publicKey: verifierKey,
-    }),
-    /release Ed25519 签名无效/,
-  );
+  // A worker-domain statement over identical metadata is not a runtime release, nor a launcher one.
+  const transplanted = { target, sha256, size: data.byteLength, releaseSignature: crypto.sign(null, workerReleaseStatement(metadata), privateKey).toString("hex") };
+  for (const component of ["runtime", "launcher"]) {
+    assert.throws(() => verifyReleaseArtifact({ component, version, entry: transplanted, data, publicKey: verifierKey }), /release Ed25519 签名无效/);
+  }
+  assert.throws(() => verifyReleaseArtifact({ component: "launcher", version, entry: parsed, data, publicKey: verifierKey }), /release Ed25519 签名无效/);
 });
 
-test("release SemVer floor 比较拒绝降级与同 precedence 的另一 build 身份", () => {
+test("release SemVer floor comparison rejects downgrades and another build of equal precedence", () => {
   assert.equal(compareReleaseVersions("v2.0.0", "v1.9.9"), 1);
   assert.equal(compareReleaseVersions("v2.0.0-rc.2", "v2.0.0-rc.10"), -1);
   assert.equal(compareReleaseVersions("v2.0.0", "v2.0.0-rc.10"), 1);
   assert.equal(compareReleaseVersions("v2.0.0+build.2", "v2.0.0+build.1"), 0);
 });
 
-test("staged pair 第二项替换失败时恢复第一项旧版本", () => {
+test("a staged pair whose second replacement fails restores the first's previous version", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-install-rollback-"));
   try {
-    const oldSupervisor = join(dir, "coflux-supervisor");
-    const oldWorker = join(dir, "coflux-worker");
-    const stagedSupervisor = join(dir, "new-supervisor");
-    const missingWorker = join(dir, "missing-worker");
-    writeFileSync(oldSupervisor, "old supervisor");
-    writeFileSync(oldWorker, "old worker");
-    writeFileSync(stagedSupervisor, "new supervisor");
+    const oldLauncher = join(dir, "coflux-launcher");
+    const oldRuntime = join(dir, "coflux-runtime");
+    const stagedLauncher = join(dir, "new-launcher");
+    const missingRuntime = join(dir, "missing-runtime");
+    writeFileSync(oldLauncher, "old launcher");
+    writeFileSync(oldRuntime, "old runtime");
+    writeFileSync(stagedLauncher, "new launcher");
     assert.throws(() => installStagedPair([
-      { source: stagedSupervisor, destination: oldSupervisor },
-      { source: missingWorker, destination: oldWorker },
+      { source: stagedLauncher, destination: oldLauncher },
+      { source: missingRuntime, destination: oldRuntime },
     ]));
-    assert.equal(readFileSync(oldSupervisor, "utf8"), "old supervisor");
-    assert.equal(readFileSync(oldWorker, "utf8"), "old worker");
+    assert.equal(readFileSync(oldLauncher, "utf8"), "old launcher");
+    assert.equal(readFileSync(oldRuntime, "utf8"), "old runtime");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-
 test("release-sign refuses an entire missing ptyd component", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-no-ptyd-"));
   try {
-    for (const component of ["worker", "supervisor", "cli", "transport"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
-    const { privateKey } = crypto.generateKeyPairSync("ed25519");
-    assert.throws(() => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.0.0"], {env: {...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({format:"pem",type:"pkcs8"})},stdio:"pipe"}),error => error.status === 1 && /mandatory ptyd/.test(error.stderr.toString()));
-  } finally { rmSync(dir,{recursive:true,force:true}); }
+    for (const component of ["runtime", "launcher", "cli", "transport"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    expectSignFailure(dir, "v2.0.0", /mandatory ptyd/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("release-sign refuses an entire missing transport component", () => {
   const dir = mkdtempSync(join(tmpdir(), "coflux-release-no-helper-"));
   try {
-    for (const component of ["worker", "supervisor", "cli", "ptyd"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
-    const { privateKey } = crypto.generateKeyPairSync("ed25519");
-    assert.throws(() => execFileSync(process.execPath, [join(ROOT, "scripts/release-sign.mjs"), dir, "v2.0.0"], {env: {...process.env, GITHUB_REPOSITORY: "acme/coflux", WORKER_SIGNING_KEY: privateKey.export({format:"pem",type:"pkcs8"})},stdio:"pipe"}),error => error.status === 1 && /mandatory native transport/.test(error.stderr.toString()));
-  } finally { rmSync(dir,{recursive:true,force:true}); }
+    for (const component of ["runtime", "launcher", "cli", "ptyd"]) writeFileSync(join(dir, `coflux-${component}-x86_64-unknown-linux-musl`), component);
+    expectSignFailure(dir, "v2.0.0", /mandatory native transport/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

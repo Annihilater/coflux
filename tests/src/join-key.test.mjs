@@ -173,12 +173,12 @@ test("a real daemon with a spent key records the rejection and keeps running", a
   assert.ok(readJson(outcomePath).reason, "the outcome carries the server's reason");
   assert.ok(!existsSync(join(home, "join-key.json")), "the key file is deleted on rejection");
   assert.ok(!existsSync(join(home, "credentials.json")), "no credentials from a spent key");
-  const workerPid = readFileSync(join(home, "worker.pid"), "utf8").trim();
+  const runtimePid = readFileSync(join(home, "runtime.pid"), "utf8").trim();
 
   // The worker does not exit: its next connection enrolls without a key, i.e. falls back to a link.
   await waitUntil(() => existsSync(join(home, "pending-auth.json")), "the keyless re-enroll");
   assert.doesNotThrow(() => process.kill(-daemon.pid, 0), "the daemon process group is still alive");
-  assert.equal(readFileSync(join(home, "worker.pid"), "utf8").trim(), workerPid, "the same worker kept running");
+  assert.equal(readFileSync(join(home, "runtime.pid"), "utf8").trim(), runtimePid, "the same runtime kept running");
   assert.ok(!existsSync(join(home, "join-key.json")), "the key is never presented again");
 });
 

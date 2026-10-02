@@ -10,9 +10,10 @@ import { promisify } from "node:util";
 
 import {
   cliReleaseStatement,
+  launcherReleaseStatement,
   ptydReleaseStatement,
+  runtimeReleaseStatement,
   transportReleaseStatement,
-  supervisorReleaseStatement,
   workerReleaseStatement,
 } from "../../scripts/release-statement.mjs";
 
@@ -37,26 +38,25 @@ function releaseFixture(withCli = false, withTransport = false) {
   // macOS 正向路径会在验签后执行真实 ad-hoc codesign；用一个可签名/可执行的本机 Mach-O
   // fixture（Linux 上同样是小型 ELF），避免测试靠跳过安全步骤获得假绿灯。
   const executable = readFileSync("/usr/bin/true");
-  // ptyd（PTY 托管进程）是每个 release 的必备件：fixture 一律带上，cofluxd 见到 manifest.ptyd 就下载验签。
-  const artifacts = { supervisor: executable, worker: executable, cli: executable, transport: executable, ptyd: executable };
-  const manifest = { schemaVersion: 2, version: VERSION, worker: {}, supervisor: {} };
-  for (const component of ["supervisor", "worker", "ptyd", ...(withCli ? ["cli"] : []), ...(withTransport ? ["transport"] : [])]) {
+  // Schema 3 (plan 20261002-runtime-launcher-merge): launcher + runtime, no worker, no raw signature.
+  // ptyd is mandatory in every release: the fixture always carries it.
+  const artifacts = { launcher: executable, runtime: executable, cli: executable, transport: executable, ptyd: executable };
+  const manifest = { schemaVersion: 3, version: VERSION, runtime: {}, launcher: {} };
+  const statements = {
+    runtime: runtimeReleaseStatement, launcher: launcherReleaseStatement, cli: cliReleaseStatement,
+    transport: transportReleaseStatement, ptyd: ptydReleaseStatement,
+  };
+  for (const component of ["launcher", "runtime", "ptyd", ...(withCli ? ["cli"] : []), ...(withTransport ? ["transport"] : [])]) {
     manifest[component] ??= {};
     const data = artifacts[component];
     const sha256 = crypto.createHash("sha256").update(data).digest("hex");
     const metadata = { version: VERSION, target, sha256, size: data.byteLength };
-    const releaseStatement = component === "worker"
-      ? workerReleaseStatement(metadata)
-      : component === "cli" ? cliReleaseStatement(metadata) : component === "transport" ? transportReleaseStatement(metadata) : component === "ptyd" ? ptydReleaseStatement(metadata) : supervisorReleaseStatement(metadata);
     manifest[component][target] = {
       url: `https://example.invalid/${component}`,
       target,
       sha256,
       size: data.byteLength,
-      releaseSignature: crypto.sign(null, releaseStatement, privateKey).toString("hex"),
-      ...(component === "worker"
-        ? { signature: crypto.sign(null, data, privateKey).toString("hex") }
-        : {}),
+      releaseSignature: crypto.sign(null, statements[component](metadata), privateKey).toString("hex"),
     };
   }
   return { target, publicKey, privateKey, artifacts, manifest };
@@ -70,8 +70,8 @@ async function serveRelease(fixture, { pointer = VERSION } = {}) {
   const requests = [];
   const releaseRoutes = (prefix) => [
     [`${prefix}/manifest.json`, Buffer.from(JSON.stringify(fixture.manifest))],
-    [`${prefix}/coflux-supervisor-${fixture.target}`, fixture.artifacts.supervisor],
-    [`${prefix}/coflux-worker-${fixture.target}`, fixture.artifacts.worker],
+    [`${prefix}/coflux-launcher-${fixture.target}`, fixture.artifacts.launcher],
+    [`${prefix}/coflux-runtime-${fixture.target}`, fixture.artifacts.runtime],
     [`${prefix}/coflux-cli-${fixture.target}`, fixture.artifacts.cli],
     [`${prefix}/coflux-transport-${fixture.target}`, fixture.artifacts.transport],
     [`${prefix}/coflux-ptyd-${fixture.target}`, fixture.artifacts.ptyd],
@@ -120,8 +120,8 @@ function makeInstallHome() {
   const bin = join(home, "bin");
   mkdirSync(bin);
   writeFileSync(join(home, "settings.json"), "{}\n");
-  writeFileSync(join(bin, "coflux-supervisor"), "old supervisor\n");
-  writeFileSync(join(bin, "coflux-worker"), "old worker\n");
+  writeFileSync(join(bin, "coflux-launcher"), "old launcher\n");
+  writeFileSync(join(bin, "coflux-runtime"), "old runtime\n");
   return home;
 }
 
@@ -134,7 +134,7 @@ async function runUpdate(home, fixture, endpoint, { latest = false, env = {} } =
       COFLUX_HOME: home,
       COFLUX_RELEASE_DOWNLOAD_BASE: endpoint.mirror,
       COFLUX_RELEASE_ARCHIVE_BASE: endpoint.archive,
-      // 与 supervisor 的测试/自带密钥部署入口一致；默认生产路径仍只读 npm 包内置公钥。
+      // Same override as the runtime's test / self-keyed entry; production reads the npm package's key.
       COFLUX_WORKER_PUBKEY: rawPublicKeyHex(fixture.publicKey),
       ...env,
     },
@@ -149,12 +149,12 @@ test("cofluxd：两个远端二进制全部验签后才替换", async () => {
   const home = makeInstallHome();
   try {
     await runUpdate(home, fixture, endpoint);
-    for (const name of ["coflux-supervisor", "coflux-worker"]) {
+    for (const name of ["coflux-launcher", "coflux-runtime"]) {
       const installed = join(home, "bin", name);
       assert.notEqual(readFileSync(installed, "utf8"), `old ${name.slice("coflux-".length)}\n`);
       assert.equal(spawnSync(installed).status, 0, `${name} 应保持可执行`);
     }
-    // ptyd 随同一次安装落盘：没有它 supervisor 会拒绝启动（组件表就是它加入安装路径的地方）。
+    // ptyd 随同一次安装落盘：没有它 runtime 会拒绝启动（组件表就是它加入安装路径的地方）。
     assert.equal(spawnSync(join(home, "bin", "coflux-ptyd")).status, 0, "coflux-ptyd 应已安装且可执行");
     assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION);
   } finally {
@@ -164,15 +164,15 @@ test("cofluxd：两个远端二进制全部验签后才替换", async () => {
 });
 
 test("cofluxd：任一产物被篡改时不留下半套新二进制", async () => {
-  for (const component of ["supervisor", "worker"]) {
+  for (const component of ["launcher", "runtime"]) {
     const fixture = releaseFixture();
     fixture.artifacts[component] = Buffer.from(`tampered ${component}\n`);
     const endpoint = await serveRelease(fixture);
     const home = makeInstallHome();
     try {
       await assert.rejects(runUpdate(home, fixture, endpoint));
-      assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-      assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
     } finally {
       await endpoint.close();
       rmSync(home, { recursive: true, force: true });
@@ -183,10 +183,13 @@ test("cofluxd：任一产物被篡改时不留下半套新二进制", async () =
 test("cofluxd：version/target/size/sha/signature 元数据错配均 fail closed", async () => {
   const mutations = [
     (fixture) => { fixture.manifest.version = "v9.8.6"; },
-    (fixture) => { fixture.manifest.supervisor[fixture.target].target = "x86_64-unknown-linux-musl-wrong"; },
-    (fixture) => { fixture.manifest.supervisor[fixture.target].size += 1; },
-    (fixture) => { fixture.manifest.supervisor[fixture.target].sha256 = "00".repeat(32); },
-    (fixture) => { fixture.manifest.supervisor[fixture.target].releaseSignature = "00".repeat(64); },
+    (fixture) => { fixture.manifest.launcher[fixture.target].target = "x86_64-unknown-linux-musl-wrong"; },
+    (fixture) => { fixture.manifest.launcher[fixture.target].size += 1; },
+    (fixture) => { fixture.manifest.launcher[fixture.target].sha256 = "00".repeat(32); },
+    (fixture) => { fixture.manifest.launcher[fixture.target].releaseSignature = "00".repeat(64); },
+    (fixture) => { fixture.manifest.runtime[fixture.target].releaseSignature = "00".repeat(64); },
+    // A schema 2 manifest (worker + supervisor) is refused outright: this cofluxd installs a launcher.
+    (fixture) => { fixture.manifest.schemaVersion = 2; },
   ];
   for (const mutate of mutations) {
     const fixture = releaseFixture();
@@ -195,8 +198,8 @@ test("cofluxd：version/target/size/sha/signature 元数据错配均 fail closed
     const home = makeInstallHome();
     try {
       await assert.rejects(runUpdate(home, fixture, endpoint));
-      assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-      assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
     } finally {
       await endpoint.close();
       rmSync(home, { recursive: true, force: true });
@@ -204,28 +207,29 @@ test("cofluxd：version/target/size/sha/signature 元数据错配均 fail closed
   }
 });
 
-test("cofluxd：worker domain 的合法签名不能移植给 supervisor", async () => {
-  const fixture = releaseFixture();
-  const entry = fixture.manifest.supervisor[fixture.target];
-  entry.releaseSignature = crypto.sign(
-    null,
-    workerReleaseStatement({
-      version: VERSION,
-      target: fixture.target,
-      sha256: entry.sha256,
-      size: entry.size,
-    }),
-    fixture.privateKey,
-  ).toString("hex");
-  const endpoint = await serveRelease(fixture);
-  const home = makeInstallHome();
-  try {
-    await assert.rejects(runUpdate(home, fixture, endpoint));
-    assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-    assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
-  } finally {
-    await endpoint.close();
-    rmSync(home, { recursive: true, force: true });
+test("cofluxd：worker domain 的合法签名不能移植给 runtime 或 launcher", async () => {
+  // Cross-component invariant: a statement under `coflux-worker-release-v1` over identical
+  // metadata verifies neither a runtime nor a launcher entry.
+  for (const component of ["runtime", "launcher"]) {
+    const fixture = releaseFixture();
+    const entry = fixture.manifest[component][fixture.target];
+    entry.releaseSignature = crypto.sign(
+      null,
+      workerReleaseStatement({ version: VERSION, target: fixture.target, sha256: entry.sha256, size: entry.size }),
+      fixture.privateKey,
+    ).toString("hex");
+    // Even with the legacy raw-binary signature a worker release would carry.
+    entry.signature = crypto.sign(null, fixture.artifacts[component], fixture.privateKey).toString("hex");
+    const endpoint = await serveRelease(fixture);
+    const home = makeInstallHome();
+    try {
+      await assert.rejects(runUpdate(home, fixture, endpoint));
+      assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
+    } finally {
+      await endpoint.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
 
@@ -234,17 +238,17 @@ test("cofluxd：latest 指向旧的合法签名 release 时仍受本机双 floor
   const endpoint = await serveRelease(fixture);
   const home = makeInstallHome();
   try {
-    // CLI 自己的 floor 较低，worker 热升级持久 floor 较高；必须取两者较大值。
+    // The CLI's own floor is lower, the launcher's persisted runtime floor higher; the greater wins.
     writeFileSync(join(home, "cofluxd.release-floor"), "v9.8.6\n", { mode: 0o600 });
-    writeFileSync(join(home, "worker.release-floor"), "v9.8.8\n", { mode: 0o600 });
+    writeFileSync(join(home, "runtime.release-floor"), "v9.8.8\n", { mode: 0o600 });
     await assert.rejects(
       runUpdate(home, fixture, endpoint, { latest: true }),
       /低于本机可信身份|拒绝降级\/重放/,
     );
-    assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-    assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
     assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8"), "v9.8.6\n");
-    assert.equal(readFileSync(join(home, "worker.release-floor"), "utf8"), "v9.8.8\n");
+    assert.equal(readFileSync(join(home, "runtime.release-floor"), "utf8"), "v9.8.8\n");
   } finally {
     await endpoint.close();
     rmSync(home, { recursive: true, force: true });
@@ -258,8 +262,8 @@ test("cofluxd：损坏的本机 release floor 不会降级成放行", async () =
   try {
     writeFileSync(join(home, "cofluxd.release-floor"), "not-semver\n", { mode: 0o600 });
     await assert.rejects(runUpdate(home, fixture, endpoint), /floor 已损坏/);
-    assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-    assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
   } finally {
     await endpoint.close();
     rmSync(home, { recursive: true, force: true });
@@ -279,8 +283,8 @@ test("cofluxd：macOS ad-hoc 重签失败时保留旧 pair", { skip: platform() 
     await assert.rejects(runUpdate(home, fixture, endpoint, {
       env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
     }));
-    assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-    assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+    assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
     assert.equal(existsSync(join(home, "cofluxd.release-floor")), false, "重签失败发生在 floor/pair 提交之前");
   } finally {
     await endpoint.close();
@@ -300,11 +304,11 @@ test("cofluxd：新版交付三份可执行文件，CLI 验签失败保留完整
       if (damaged) {
         await assert.rejects(runUpdate(home, fixture, endpoint));
         assert.equal(readFileSync(join(home, "bin/coflux"), "utf8"), "old cli");
-        assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
-        assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
+        assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
+        assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
       } else {
         await runUpdate(home, fixture, endpoint);
-        for (const name of ["coflux", "coflux-worker", "coflux-supervisor"]) {
+        for (const name of ["coflux", "coflux-runtime", "coflux-launcher"]) {
           assert.equal(spawnSync(join(home, "bin", name)).status, 0);
         }
       }
@@ -325,7 +329,7 @@ test("cofluxd installs four signed components and notices, rejecting a damaged c
     try {
       if (damaged) {
         await assert.rejects(runUpdate(home, fixture, endpoint));
-        assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+        assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
         assert.equal(readFileSync(join(home, "bin/coflux-transport"), "utf8"), "old helper");
       } else {
         await runUpdate(home, fixture, endpoint);
@@ -346,10 +350,10 @@ test("cofluxd routing: the pointer's tag installs from the mirror, with or witho
     try {
       await runUpdate(home, fixture, endpoint, { latest });
       assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION);
-      assert.equal(spawnSync(join(home, "bin", "coflux-supervisor")).status, 0);
+      assert.equal(spawnSync(join(home, "bin", "coflux-launcher")).status, 0);
       assert.ok(endpoint.requests.includes("/mirror/latest.json"));
       assert.ok(endpoint.requests.includes(`/mirror/${VERSION}/manifest.json`));
-      assert.ok(endpoint.requests.includes(`/mirror/${VERSION}/coflux-supervisor-${fixture.target}`));
+      assert.ok(endpoint.requests.includes(`/mirror/${VERSION}/coflux-launcher-${fixture.target}`));
       assert.deepEqual(endpoint.requests.filter((path) => path.startsWith("/archive/")), [], "the archive is never touched");
     } finally {
       await endpoint.close();
@@ -368,7 +372,7 @@ test("cofluxd routing: an explicit version the pointer does not name installs fr
       await runUpdate(home, fixture, endpoint);
       assert.equal(readFileSync(join(home, "cofluxd.release-floor"), "utf8").trim(), VERSION, pointer);
       assert.ok(endpoint.requests.includes(`/archive/${VERSION}/manifest.json`), pointer);
-      assert.ok(endpoint.requests.includes(`/archive/${VERSION}/coflux-worker-${fixture.target}`), pointer);
+      assert.ok(endpoint.requests.includes(`/archive/${VERSION}/coflux-runtime-${fixture.target}`), pointer);
       assert.deepEqual(
         endpoint.requests.filter((path) => path.startsWith(`/mirror/${VERSION}/`)),
         [],
@@ -388,8 +392,8 @@ test("cofluxd routing: without --version an unreadable pointer fails with the --
     const home = makeInstallHome();
     try {
       await assert.rejects(runUpdate(home, fixture, endpoint, { latest: true }), /--version vX\.Y\.Z/);
-      assert.equal(readFileSync(join(home, "bin/coflux-supervisor"), "utf8"), "old supervisor\n");
-      assert.equal(readFileSync(join(home, "bin/coflux-worker"), "utf8"), "old worker\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-launcher"), "utf8"), "old launcher\n");
+      assert.equal(readFileSync(join(home, "bin/coflux-runtime"), "utf8"), "old runtime\n");
       assert.equal(existsSync(join(home, "cofluxd.release-floor")), false);
       assert.deepEqual(endpoint.requests, ["/mirror/latest.json"], `no silent fallback to any download (pointer: ${pointer})`);
     } finally {
