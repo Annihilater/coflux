@@ -15,7 +15,7 @@ const repoRoot = resolve(import.meta.dirname, "../../..");
 // own source, and the protocol package's copy from its own, so a rename on any side fails here
 // instead of silently disabling every executor run.
 test("executor host 能力名与 daemon、protocol 两侧常量逐字一致", () => {
-  const daemon = readFileSync(join(repoRoot, "crates/worker/src/agent_ctl/executor.rs"), "utf8");
+  const daemon = readFileSync(join(repoRoot, "crates/runtime/src/agent_ctl/executor.rs"), "utf8");
   const declared = daemon.match(/pub const CAPABILITY_EXECUTOR_HOST: &str = "([^"]+)";/);
   assert.ok(declared, "daemon 侧常量没找到（改名了？）");
   assert.equal(EXECUTOR_HOST_CAPABILITY, declared[1]);

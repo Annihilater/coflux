@@ -4,7 +4,7 @@
  * 标记本来就在 PTY 字节流里流到渲染层——supervisor 用 `OscCapture::with_secret` 读它但不从流里
  * 摘掉（摘掉就要重写输出流，会动到 gap/resume 依赖的字节偏移）。这里只是终于给它注册了一个 handler。
  *
- * 形状（crates/supervisor/src/shell/{zshrc.zsh,init.bash,coflux.fish}）：
+ * 形状（crates/runtime/src/shell/{zshrc.zsh,init.bash,coflux.fish}）：
  *   OSC 133 ; A ; coflux=<secret> BEL          提示符开始
  *   OSC 133 ; C ; coflux=<secret> BEL          命令开始
  *   OSC 133 ; D ; <status> ; coflux=<secret>   命令结束

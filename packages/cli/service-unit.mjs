@@ -7,8 +7,8 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** The two variables the worker reads; kept identical to `packages/executor/src/env.ts` and
- * `crates/worker/src/executor_host.rs`. */
+/** The two variables the runtime reads; kept identical to `packages/executor/src/env.ts` and
+ * `crates/runtime/src/executor_host.rs`. */
 export const EXECUTOR_NODE_ENV = "COFLUX_EXECUTOR_NODE";
 export const EXECUTOR_ENTRY_ENV = "COFLUX_EXECUTOR_ENTRY";
 
@@ -52,7 +52,7 @@ function oneLine(value) {
   return !/[\n\r]/.test(String(value));
 }
 
-export function plistXml({ supervisorBin, home, logFile, executor }) {
+export function plistXml({ launcherBin, home, logFile, executor }) {
   const variables = [["COFLUX_HOME", home]];
   if (executor) {
     variables.push([EXECUTOR_NODE_ENV, executor.node], [EXECUTOR_ENTRY_ENV, executor.entry]);
@@ -66,7 +66,7 @@ export function plistXml({ supervisorBin, home, logFile, executor }) {
 <dict>
   <key>Label</key><string>com.coflux.daemon</string>
   <key>ProgramArguments</key>
-  <array><string>${xml(supervisorBin)}</string></array>
+  <array><string>${xml(launcherBin)}</string></array>
   <key>EnvironmentVariables</key>
   <dict>
 ${entries}
@@ -81,9 +81,9 @@ ${entries}
 }
 
 /**
- * ptyd (plan 20260918-ptyd-terminal-custody) runs under its own label: the supervisor's SIGTERM
- * leaves sessions in ptyd, so `launchctl unload/load com.coflux.daemon` touches only the supervisor,
- * and KeepAlive brings ptyd back on its own if it crashes.
+ * ptyd (plan 20260918-ptyd-terminal-custody) runs under its own label: the launcher's SIGTERM
+ * leaves sessions in ptyd, so `launchctl unload/load com.coflux.daemon` touches only the launcher
+ * and its runtime, and KeepAlive brings ptyd back on its own if it crashes.
  */
 export function ptydPlistXml({ ptydBin, home, logFile }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -107,9 +107,9 @@ export function ptydPlistXml({ ptydBin, home, logFile }) {
 }
 
 /**
- * systemd: ptyd has its own unit and the supervisor's unit Requires/After it. `systemctl restart
- * coflux-daemon` restarts only the supervisor's cgroup; ptyd's is not part of it, so terminals are
- * untouched. Stopping ptyd (down) also stops the supervisor (Requires).
+ * systemd: ptyd has its own unit and the launcher's unit Requires/After it. `systemctl restart
+ * coflux-daemon` restarts only the launcher's cgroup (runtime included); ptyd's is not part of it,
+ * so terminals are untouched. Stopping ptyd (down) also stops the launcher (Requires).
  */
 export function ptydSystemdUnit({ ptydBin, home }) {
   const environment = oneLine(home) ? `Environment=COFLUX_HOME=${home}\n` : "";
@@ -127,7 +127,7 @@ WantedBy=default.target
 `;
 }
 
-export function systemdUnit({ supervisorBin, home, executor }) {
+export function systemdUnit({ launcherBin, home, executor }) {
   const variables = [["COFLUX_HOME", home]];
   if (executor) {
     variables.push([EXECUTOR_NODE_ENV, executor.node], [EXECUTOR_ENTRY_ENV, executor.entry]);
@@ -137,14 +137,14 @@ export function systemdUnit({ supervisorBin, home, executor }) {
     .map(([key, value]) => `Environment=${key}=${value}`)
     .join("\n");
   return `[Unit]
-Description=coflux daemon (supervisor)
+Description=coflux daemon (launcher + runtime)
 After=network-online.target coflux-ptyd.service
 Wants=network-online.target
 Requires=coflux-ptyd.service
 
 [Service]
 ${environment}
-ExecStart=${supervisorBin}
+ExecStart=${launcherBin}
 Restart=always
 RestartSec=2
 

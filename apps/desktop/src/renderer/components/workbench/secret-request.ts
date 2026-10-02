@@ -6,7 +6,7 @@ import type { SecretAnswer, SecretAnswerResult, SecretRequestState } from "@cofl
  * request reads once the request is over.
  *
  * The worker raises one inbox entry per request whose message starts with this prefix followed by
- * the NAME. It must match `NOTIFY_PREFIX` in `crates/worker/src/secret/socket.rs`.
+ * the NAME. It must match `NOTIFY_PREFIX` in `crates/runtime/src/secret/socket.rs`.
  */
 export const SECRET_REQUEST_NOTIFY_PREFIX = "Secret requested: ";
 

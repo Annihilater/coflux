@@ -32,13 +32,13 @@ pnpm -C apps/desktop build
 Build the native components first:
 
 ```sh
-cargo build -p coflux-supervisor -p coflux-worker -p coflux-cli
+cargo build -p coflux-launcher -p coflux-runtime -p coflux-cli -p coflux-ptyd
 COFLUX_DESKTOP_DAEMON_DIR=../../target/debug pnpm -C apps/desktop run pack
 ```
 
 Use **`run pack`**, not pnpm's package-archive `pack` command. The result is `dist/mac-arm64/Coflux.app`; available local signing identities determine its development signature. A local build is not a notarized release.
 
-`stage-daemon.mjs` requires an explicit source directory containing `coflux-supervisor`, `coflux-worker`, and `coflux`. It copies them to `build/daemon`, along with the `VERSION` sidecar and the repository's Claude Code plugin. Missing components fail the build.
+`stage-daemon.mjs` requires an explicit source directory containing `coflux-launcher`, `coflux-runtime`, `coflux-ptyd`, `coflux-transport`, `coflux-screen` and `coflux`. The app starts ptyd and the launcher; the launcher runs the runtime from the same directory and the app asks it to switch after an update (plan 20261002-runtime-launcher-merge). It copies them to `build/daemon`, along with the `VERSION` sidecar and the repository's Claude Code plugin. Missing components fail the build.
 
 The version comes from the source directory's `VERSION`, then `COFLUX_DESKTOP_DAEMON_VERSION`, otherwise `dev`. Release builds compile and stage the same `vX.Y.Z` product version. The runtime and plugin are placed outside the ASAR under `Contents/Resources/daemon`.
 

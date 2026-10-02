@@ -6,8 +6,8 @@ import { deriveDaemonState, type DaemonFacts } from "./daemon-state";
 const BASE: DaemonFacts = {
   bundle: { version: "v0.0.0-desktop.0.1.7" },
   installationExists: true,
-  supervisorExists: true,
-  workerExists: true,
+  launcherExists: true,
+  runtimeExists: true,
   registered: true,
   daemonId: "d-1",
   pendingAuth: null,
@@ -20,9 +20,9 @@ const BASE: DaemonFacts = {
 test("已接入 = plist 与两个二进制都在，缺任一即未接入（不分 npm / app 来源）", () => {
   assert.equal(deriveDaemonState(BASE).status, "running");
   assert.equal(deriveDaemonState({ ...BASE, installationExists: false }).status, "not-installed");
-  assert.equal(deriveDaemonState({ ...BASE, supervisorExists: false }).status, "not-installed");
-  assert.equal(deriveDaemonState({ ...BASE, workerExists: false }).status, "not-installed");
-  assert.equal(deriveDaemonState({ ...BASE, workerExists: false }).installed, false);
+  assert.equal(deriveDaemonState({ ...BASE, launcherExists: false }).status, "not-installed");
+  assert.equal(deriveDaemonState({ ...BASE, runtimeExists: false }).status, "not-installed");
+  assert.equal(deriveDaemonState({ ...BASE, runtimeExists: false }).installed, false);
   // 未接入但进程还在（残留）也只报未接入；已接入不在跑 = 已停止
   assert.equal(deriveDaemonState({ ...BASE, running: false }).status, "stopped");
 });

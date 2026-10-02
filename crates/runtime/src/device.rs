@@ -16,10 +16,12 @@ use coflux_protocol::wire::{
     PreparedDeviceOperationInstalled, SessionCheckpoint,
 };
 use coflux_protocol::{
-    decode_device_envelope, encode_device_envelope, encode_frame, write_record, CommandStateInfo,
-    DataFrame, WorkerToSupervisor, DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES,
-    MAX_FRAME_ID_BYTES, MAX_SESSION_CHECKPOINT_BYTES, SCREEN_CHANNEL_RECORD_BUDGET,
+    decode_device_envelope, encode_device_envelope, write_record, CommandStateInfo,
+    DEVICE_PROTOCOL_VERSION, MAX_DEVICE_FRAME_BYTES, MAX_FRAME_ID_BYTES,
+    MAX_SESSION_CHECKPOINT_BYTES, SCREEN_CHANNEL_RECORD_BUDGET,
 };
+
+use crate::sessiond_ipc::{encode_frame, DataFrame, SessiondCommand};
 use prost::Message as _;
 use rand_core::{OsRng, RngCore};
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -1632,7 +1634,7 @@ impl DeviceRuntime {
     /// control message the center's sessionClose is forwarded as. The exit itself arrives through
     /// the ordinary SessionExit path and lands in the ledger.
     pub fn close_session(&self, session_id: &str) -> bool {
-        serde_json::to_vec(&WorkerToSupervisor::SessionClose {
+        serde_json::to_vec(&SessiondCommand::SessionClose {
             session_id: session_id.to_string(),
         })
         .ok()
@@ -5098,7 +5100,6 @@ mod tests {
             home: home.clone(),
             cred_path: format!("{home}/credentials.json"),
             worktrees_dir: format!("{home}/worktrees"),
-            sock_path: format!("{home}/supervisor.sock"),
             reconnect_base_ms: 1,
             reconnect_cap_ms: 1,
             idle_ping_ms: 1_000,
@@ -5115,7 +5116,6 @@ mod tests {
             sup_synced: true,
             snapshot_owner_id: "owner-1".into(),
             snapshot_epoch: 1,
-            sup_resync_nonce: None,
             daemon_id: Some("daemon-1".into()),
             gateway_port: Some(8788),
             alive: HashMap::new(),
@@ -5283,7 +5283,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 1);
         let Some(DataFrame::Device { channel_id, data }) =
-            coflux_protocol::decode_frame(&records[0])
+            crate::sessiond_ipc::decode_frame(&records[0])
         else {
             panic!("catalog 请求应使用 Device frame");
         };
@@ -5308,7 +5308,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 1);
         let Some(DataFrame::Device { channel_id, data }) =
-            coflux_protocol::decode_frame(&records[0])
+            crate::sessiond_ipc::decode_frame(&records[0])
         else {
             panic!("agent 请求应使用 Device frame");
         };
@@ -6684,7 +6684,7 @@ mod tests {
             .push(&record, |record| records.push(record.to_vec()))
             .unwrap();
         assert!(matches!(
-            coflux_protocol::decode_frame(&records[0]),
+            crate::sessiond_ipc::decode_frame(&records[0]),
             Some(DataFrame::Device { ref channel_id, .. }) if channel_id == &fixture.local_id
         ));
 

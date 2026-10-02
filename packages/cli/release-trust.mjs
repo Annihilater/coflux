@@ -14,6 +14,18 @@ export const SUPERVISOR_RELEASE_STATEMENT_DOMAIN = Buffer.from(
 
 export const CLI_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-cli-release-v1\0", "utf8");
 
+/**
+ * The runtime and the launcher (plan 20261002-runtime-launcher-merge) each have their own domain,
+ * distinct from `coflux-worker-release-v1` / `coflux-supervisor-release-v1`: a runtime statement
+ * never verifies against the worker transcript built from identical metadata, so no pre-plan
+ * supervisor can accept a runtime artifact as a worker. Runtime artifacts carry no legacy raw
+ * signature at all.
+ */
+export const RUNTIME_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-runtime-release-v1\0", "utf8");
+export const LAUNCHER_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-launcher-release-v1\0", "utf8");
+export function runtimeReleaseStatement(metadata) { return artifactReleaseStatement(RUNTIME_RELEASE_STATEMENT_DOMAIN, metadata); }
+export function launcherReleaseStatement(metadata) { return artifactReleaseStatement(LAUNCHER_RELEASE_STATEMENT_DOMAIN, metadata); }
+
 export const TRANSPORT_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-transport-release-v1\0", "utf8");
 export function transportReleaseStatement(metadata) { return artifactReleaseStatement(TRANSPORT_RELEASE_STATEMENT_DOMAIN, metadata); }
 
@@ -21,15 +33,20 @@ export function transportReleaseStatement(metadata) { return artifactReleaseStat
 export const PTYD_RELEASE_STATEMENT_DOMAIN = Buffer.from("coflux-ptyd-release-v1\0", "utf8");
 export function ptydReleaseStatement(metadata) { return artifactReleaseStatement(PTYD_RELEASE_STATEMENT_DOMAIN, metadata); }
 
-const RELEASE_COMPONENTS = ["worker", "supervisor", "cli", "transport", "ptyd"];
+/** Components of a schema 3 manifest. `worker` / `supervisor` are schema 2 only. */
+export const RELEASE_COMPONENTS = ["runtime", "launcher", "cli", "transport", "ptyd"];
+export const RELEASE_MANIFEST_SCHEMA_VERSION = 3;
 
 function releaseStatementFor(component, metadata) {
   switch (component) {
+    case "runtime": return runtimeReleaseStatement(metadata);
+    case "launcher": return launcherReleaseStatement(metadata);
     case "worker": return workerReleaseStatement(metadata);
+    case "supervisor": return supervisorReleaseStatement(metadata);
     case "cli": return cliReleaseStatement(metadata);
     case "transport": return transportReleaseStatement(metadata);
     case "ptyd": return ptydReleaseStatement(metadata);
-    default: return supervisorReleaseStatement(metadata);
+    default: throw new Error(`未知 release component: ${JSON.stringify(component)}`);
   }
 }
 
@@ -157,15 +174,17 @@ function isRecord(value) {
 }
 
 /**
- * 从 schema 2 manifest 取指定 component/target。额外顶层字段允许滚动扩展；
+ * 从 schema 3 manifest 取指定 component/target。额外顶层字段允许滚动扩展；
  * 但参与信任裁决的 version/target/size/hash/signature 全部严格校验。
+ * A schema 2 manifest (worker/supervisor) is refused outright: this cofluxd installs a launcher
+ * and a runtime, and a `worker` lookup in a schema 3 manifest throws.
  */
 export function parseReleaseManifestEntry(manifest, component, version, target) {
   assertReleaseVersion(version);
   if (!RELEASE_COMPONENTS.includes(component)) {
     throw new Error(`未知 release component: ${JSON.stringify(component)}`);
   }
-  if (!isRecord(manifest) || manifest.schemaVersion !== 2 || manifest.version !== version) {
+  if (!isRecord(manifest) || manifest.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.version !== version) {
     throw new Error("release manifest schema/version 与请求不一致");
   }
   const entries = manifest[component];
@@ -184,22 +203,17 @@ export function parseReleaseManifestEntry(manifest, component, version, target) 
   ) {
     throw new Error(`release manifest 的 ${component}/${target} 元数据非法`);
   }
-  if (
-    component === "worker" &&
-    (typeof entry.signature !== "string" || !ED25519_SIGNATURE_HEX.test(entry.signature))
-  ) {
-    throw new Error(`release manifest 的 worker/${target} 缺少 legacy 签名`);
-  }
+  // No component of schema 3 carries a legacy raw-binary signature (the worker's was the back
+  // door old supervisors still check); a stray `signature` field is ignored, never trusted.
   return {
     target,
     sha256: entry.sha256.toLowerCase(),
     size: entry.size,
-    signature: component === "worker" ? entry.signature.toLowerCase() : undefined,
     releaseSignature: entry.releaseSignature.toLowerCase(),
   };
 }
 
-/** 校验实际 bytes 与 manifest 元数据、raw worker 签名及 component-separated release 签名。 */
+/** 校验实际 bytes 与 manifest 元数据及 component-separated release 签名。 */
 export function verifyReleaseArtifact({ component, version, entry, data, publicKey }) {
   if (!Buffer.isBuffer(data)) throw new Error("release 产物必须是 Buffer");
   if (data.byteLength !== entry.size) {
@@ -208,12 +222,6 @@ export function verifyReleaseArtifact({ component, version, entry, data, publicK
   const sha256 = crypto.createHash("sha256").update(data).digest("hex");
   if (sha256 !== entry.sha256) {
     throw new Error(`${component} 产物 sha256 不匹配`);
-  }
-  if (
-    component === "worker" &&
-    !crypto.verify(null, data, publicKey, Buffer.from(entry.signature, "hex"))
-  ) {
-    throw new Error("worker 产物 legacy Ed25519 签名无效");
   }
   const metadata = { version, target: entry.target, sha256, size: data.byteLength };
   const statement = releaseStatementFor(component, metadata);
@@ -263,10 +271,10 @@ export function installStagedPair(staged) {
   }
 }
 
-/** Publish a complete native runtime before changing any executable entry point.
- * A worker reached through a bin symlink resolves current_exe into its immutable
+/** Publish a complete native release before changing any executable entry point.
+ * A runtime reached through a bin symlink resolves current_exe into its immutable
  * release directory, so interruption between entry-point updates cannot pair
- * that worker with a helper from another release. */
+ * that runtime with a helper from another release. */
 export function installNativeRelease(staged) {
   if (!staged.some(({ destination }) => path.basename(destination) === "coflux-transport")) return installStagedPair(staged);
   const binDir = path.dirname(staged[0].destination);

@@ -4,12 +4,12 @@
 //! **The daemon does exactly three things on this path**: recognize the machine's single executor
 //! host, push assignments to it, and store the states and terminal outcomes it reports for the CLI
 //! to poll. Scheduling, the write lock, transcripts and model calls all live in the host — worker
-//! memory is lost on hot upgrade (see the command-log index comment in `crates/worker/src/main.rs`),
+//! memory is lost on hot upgrade (see the command-log index comment in `crates/runtime/src/main.rs`),
 //! so putting the job table here would put what most needs to survive in the place most likely to
 //! vanish.
 //!
 //! There are two kinds of host and one implementation of them (`@coflux/executor`): a child process
-//! this daemon starts itself when it has a JS runtime (`crates/worker/src/executor_host.rs`), and
+//! this daemon starts itself when it has a JS runtime (`crates/runtime/src/executor_host.rs`), and
 //! Coflux.app arriving over a loopback device channel. [`HostAuthority`] is where the choice between
 //! them is made, and the daemon's own host wins.
 //!

@@ -46,7 +46,7 @@ function localGatewayPort() {
 // only then is COFLUX_LOCAL_GATEWAY_PORT read. A reply from the socket, refusals included, is final
 // and never retried over TCP; a connect refused for any other reason (a sandbox's EPERM/EACCES)
 // fails hard and names the socket. Mirrors `local_post` in crates/cli/src/gateway.rs.
-// The path mirrors `SOCKET_FILE` in crates/worker/src/agent_socket.rs.
+// The path mirrors `SOCKET_FILE` in crates/runtime/src/agent_socket.rs.
 const AGENT_SOCKET = join(HOME, "ipc", "agent.sock");
 /** The worker never binds a longer socket path (sun_path limits), so a longer one is absent. */
 const MAX_SOCKET_PATH_BYTES = 100;

@@ -16,7 +16,7 @@ import type { NativeTransportBridge } from "./native-transport";
  * - stopped：已接入但 launchd 里没有活进程
  * - pending-auth：在跑、还没有 credentials.json（authToken 有值时可用当前登录态兑现）
  * - running：在跑、已登记
- * - update-ready：在跑、已登记、内置 supervisor 比在跑的新（只提示，点「重启」才换二进制）
+ * - update-ready：在跑、已登记、内置运行组件与在跑的不是同一个；怎么换见 `runtimeUpdate`
  * 完全磁盘访问单独用 fda 表达，与上面任一状态可叠加。
  */
 export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" | "running" | "update-ready";
@@ -26,26 +26,42 @@ export type DesktopDaemonStatus = "not-installed" | "stopped" | "pending-auth" |
  * `connect` is the account check that runs before an enrollment. It is its own action rather than
  * part of `start` because it fails for its own reasons — no network, another account owns this Mac —
  * while the local runtime may be running perfectly; borrowing `start`'s label would misname the cause.
+ * `update` is a restart that moves the runtime onto the bundled version (automatic or 「重试」);
+ * its failure line must read as an update that did not apply, not as a restart that failed.
  */
-export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "stop" | "remove";
+export type DesktopDaemonBusy = "connect" | "install" | "start" | "restart" | "update" | "stop" | "remove";
+
+/**
+ * How a stale local runtime (status `update-ready`) gets onto the bundled version
+ * (plan 20261002-runtime-follows-app):
+ * - automatic: the terminals live in ptyd, so the main process asks the launcher to switch (or
+ *   replaces the launcher) by itself, at most once per app launch per bundled runtime; nothing to click
+ * - failed: that attempt did not come up and the previous version was restored; the panel offers
+ *   「重试」, which runs the same replacement again
+ * - manual: the running supervisor predates ptyd (or ptyd is not there), replacing it ends the
+ *   terminals; the panel keeps 「更新」 and the main process asks for confirmation
+ */
+export type DesktopRuntimeUpdate = "automatic" | "failed" | "manual";
 
 export type DesktopDaemonFda = "granted" | "denied" | "unknown";
 
 export type DesktopDaemonState = {
-  /** 本机正在运行的终端数：来自 ptyd（supervisor 缺席时也准确），否则来自 supervisor */
+  /** 本机正在运行的终端数：来自 ptyd（launcher 缺席时也准确），否则来自 runtime.sock */
   runningTerminals?: number;
   legacyInstallation?: boolean;
   /**
    * 内置的 coflux-ptyd 与在跑的不是同一个二进制（plan 20260918-ptyd-terminal-custody）。这是单独的动作
-   * 「更新终端组件」：它会结束本机终端，所以要确认；普通的 supervisor 更新不受它影响、也不清它。
+   * 「更新终端组件」：它会结束本机终端，所以要确认；普通的运行组件更新不受它影响、也不清它。
    */
   ptydUpdateReady?: boolean;
+  /** Present exactly when the running runtime is not the bundled one (status `update-ready`). */
+  runtimeUpdate?: DesktopRuntimeUpdate;
   status: DesktopDaemonStatus;
   /** 本构建是否自带三件；false（未打包 dev 实例没跑 stage 脚本）时「接入」「重启换新」都不可用，只能看状态 */
   bundled: boolean;
-  /** 内置 supervisor 的版本戳原文（VERSION sidecar；解析不了如 dev 时永不提示升级） */
+  /** 内置运行组件的版本戳原文（VERSION sidecar；解析不了如 dev 时永不提示升级） */
   bundledVersion?: string;
-  /** 在跑的 supervisor 写的 ~/.coflux/supervisor-version 原文；缺失 = 112 之前的老版本 */
+  /** 在跑的 runtime 写的 ~/.coflux/runtime-version 原文；缺失 = 老版本 */
   runningVersion?: string;
   installed: boolean;
   running: boolean;
@@ -402,8 +418,8 @@ export type DesktopBridge = {
   /** 接入这台 Mac：落盘三件 + settings.json + LaunchAgent，然后 launchctl load */
   daemonEnroll(): void;
   /**
-   * 重启 / 更新 supervisor（plan 20260918-ptyd-terminal-custody）：PTY 在 ptyd 里，本机终端、屏幕与
-   * 回滚都原样保留，不再确认；新版起不来自动回滚到上一版并在状态里报告。只有在跑的 supervisor
+   * 重启 / 更新运行组件（plan 20261002-runtime-launcher-merge）：PTY 在 ptyd 里，本机终端、屏幕与
+   * 回滚都原样保留，不再确认；launcher 观察新版本、起不来自动回滚到上一版并在状态里报告。只有在跑的 supervisor
    * 早于 ptyd 时这一次才会结束终端（那时主进程照旧弹确认）。
    */
   daemonRestart(): void;
@@ -412,7 +428,7 @@ export type DesktopBridge = {
   daemonStop(): void;
   /** 移除接入：unload 并删 plist 与三个二进制，保留凭证 / 配置 / 日志（cofluxd uninstall 无 --purge 语义） */
   daemonRemove(): void;
-  /** 打开系统设置的完全磁盘访问面板并在 Finder 定位 supervisor 二进制 */
+  /** 打开系统设置的完全磁盘访问面板并在 Finder 定位应用 */
   daemonOpenFdaGuide(): void;
   daemonDismissError(): void;
   /**

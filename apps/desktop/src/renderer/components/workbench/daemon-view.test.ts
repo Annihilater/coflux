@@ -61,6 +61,37 @@ test("supervisor 的重启与更新不再确认（终端留在 ptyd 里）；停
   assert.match(daemonStatusLine({ ...RUNNING, status: "update-ready", bundledVersion: "v2.2.0" }).detail, /保留本机终端/);
 });
 
+test("运行组件跟随应用：留在 ptyd 里的旧运行组件自动更新、没有「更新」；失败后给「重试」；旧 supervisor 保留「更新」", () => {
+  const stale: DesktopDaemonState = { ...RUNNING, status: "update-ready", bundledVersion: "v2.16.0", runningVersion: "v2.15.0" };
+
+  // 主进程正自己换：面板上没有任何更新动作，状态行说明会自动更新并保留终端。
+  const automatic = resolveDaemonActions({ ...stale, runtimeUpdate: "automatic" }, 3);
+  assert.equal(automatic.find((action) => action.id === "update"), undefined, "自动更新不需要点击");
+  assert.ok(automatic.find((action) => action.id === "stop")?.confirm, "停止仍在、仍确认");
+  assert.match(daemonStatusLine({ ...stale, runtimeUpdate: "automatic" }).detail, /自动更新.*保留本机终端/);
+
+  // 自动更新起不来、已回滚：「重试」是主动作、不确认；错误行被清掉后状态行仍说明没应用。
+  const failed = resolveDaemonActions({ ...stale, runtimeUpdate: "failed" }, 3);
+  const retry = failed.find((action) => action.id === "update");
+  assert.equal(retry?.label, "重试");
+  assert.equal(retry?.kind, "primary");
+  assert.equal(retry?.confirm, undefined, "重试同样不结束终端，不确认");
+  assert.match(daemonStatusLine({ ...stale, runtimeUpdate: "failed" }).detail, /更新未能应用/);
+  const failedLine = daemonStatusLine({ ...stale, runtimeUpdate: "failed", error: { action: "update", message: "更新未能应用，已恢复上一版本，终端未受影响：新版启动超时" } });
+  assert.equal(failedLine.detail, "更新服务失败：更新未能应用，已恢复上一版本，终端未受影响：新版启动超时");
+  assert.equal(failedLine.tone, "error");
+  assert.equal(daemonStatusLine({ ...stale, busy: "update" }).label, "正在更新服务…");
+
+  // 早于 ptyd 的 supervisor：没有 leave，只能由用户点「更新」（主进程在原生对话框里确认结束终端）。
+  const manual = resolveDaemonActions({ ...stale, runtimeUpdate: "manual" }, 3);
+  assert.equal(manual.find((action) => action.id === "update")?.label, "更新");
+  assert.equal(manual[0]?.id, "update", "「更新」仍是第一个动作");
+  // 「更新终端组件」在三种情况下都单独保留。
+  for (const runtimeUpdate of ["automatic", "failed", "manual"] as const) {
+    assert.ok(resolveDaemonActions({ ...stale, runtimeUpdate, ptydUpdateReady: true }, 1).find((action) => action.id === "update-ptyd")?.confirm);
+  }
+});
+
 test("自动弹引导：只在中心已连上的 authed + 未接入 + 带 daemon + 没点过暂不 + 本次登录未弹过", () => {
   const base = { authState: "authed" as const, connection: "connected" as const, state: NOT_INSTALLED, dismissed: false, alreadyOffered: false };
   assert.equal(shouldOfferOnboarding(base), true);

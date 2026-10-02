@@ -27,7 +27,7 @@ jobs:
 
   # 内置组件与桌面使用同一提交和正式产品版本，签名由打包步骤统一完成。
   daemon:
-    name: 构建内置 daemon（supervisor / worker / coflux）
+    name: 构建内置 daemon（launcher / runtime / coflux）
     needs: metadata
     runs-on: macos-latest
     timeout-minutes: 45
@@ -50,7 +50,7 @@ jobs:
         env:
           COFLUX_RELEASE_VERSION: v${{ needs.metadata.outputs.version }}
           RUSTFLAGS: -D warnings
-        run: cargo build --release --target aarch64-apple-darwin -p coflux-supervisor -p coflux-worker -p coflux-cli -p coflux-ptyd
+        run: cargo build --release --target aarch64-apple-darwin -p coflux-launcher -p coflux-runtime -p coflux-cli -p coflux-ptyd
       # The remote screen helper (plan 20260929-remote-desktop): Swift, macOS only, ships with the
       # desktop app and never with the daemon tarballs. Its unit tests run here too.
       - name: Build coflux-screen (Swift remote screen helper)
@@ -64,12 +64,12 @@ jobs:
           set -euo pipefail
           bin="target/aarch64-apple-darwin/release"
           mkdir -p daemon-bundle
-          for name in coflux-supervisor coflux-worker coflux coflux-transport coflux-ptyd coflux-screen; do
+          for name in coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd coflux-screen; do
             test -x "$bin/$name"
             cp "$bin/$name" "daemon-bundle/$name"
           done
           cp "$bin/TRANSPORT-NOTICES.txt" daemon-bundle/TRANSPORT-NOTICES.txt
-          # VERSION 与编译期 COFLUX_RELEASE_VERSION 同值：主进程拿它与 ~/.coflux/supervisor-version 比较
+          # VERSION 与编译期 COFLUX_RELEASE_VERSION 同值：主进程拿它与 ~/.coflux/runtime-version 比较
           printf '%s\n' "$COFLUX_RELEASE_VERSION" > daemon-bundle/VERSION
           ls -la daemon-bundle
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -200,7 +200,7 @@ jobs:
           spctl --assess --type execute --verbose=4 "$app"
           # 内置 daemon 三件（plan 113）：存在、可执行、各自带 Developer ID 签名（mac.binaries 让它们进签名与公证）
           daemon="$app/Contents/Resources/daemon"
-          for name in coflux-supervisor coflux-worker coflux coflux-transport coflux-ptyd coflux-screen; do
+          for name in coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd coflux-screen; do
             test -x "$daemon/$name"
             codesign --verify --strict --verbose=2 "$daemon/$name"
             codesign -dv --verbose=2 "$daemon/$name" 2>&1 | grep -q 'Authority=Developer ID Application'

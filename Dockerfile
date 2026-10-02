@@ -20,7 +20,7 @@ RUN corepack enable && corepack prepare pnpm@11.6.0 --activate
 WORKDIR /work
 COPY . .
 RUN pnpm install --frozen-lockfile \
-    && cargo build -p coflux-supervisor -p coflux-worker \
+    && cargo build -p coflux-launcher -p coflux-runtime \
     && (cd transport/tailcat && go test ./...) \
     && node scripts/build-test-transports.mjs \
     && chmod +x scripts/docker-test-entrypoint.sh

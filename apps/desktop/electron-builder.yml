@@ -53,9 +53,9 @@ mac:
   # Developer ID + hardened runtime 签名并进公证。相对路径按 .app 根解析（electron-builder 26 的
   # MacTargetHelper.buildSignOptions）。主进程复制到稳定运行目录后保留原签名，见 daemon-manager.ts。
   binaries:
-    - Contents/Resources/daemon/coflux-supervisor
+    - Contents/Resources/daemon/coflux-launcher
     - Contents/Resources/daemon/coflux-transport
-    - Contents/Resources/daemon/coflux-worker
+    - Contents/Resources/daemon/coflux-runtime
     - Contents/Resources/daemon/coflux
     - Contents/Resources/daemon/coflux-ptyd
     - Contents/Resources/daemon/coflux-screen

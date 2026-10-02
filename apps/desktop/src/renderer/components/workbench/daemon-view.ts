@@ -26,6 +26,7 @@ export const DAEMON_BUSY_LABEL: Record<DesktopDaemonBusy, string> = {
   install: "安装组件",
   start: "启动服务",
   restart: "重启服务",
+  update: "更新服务",
   stop: "停止服务",
   remove: "移除接入",
 };
@@ -53,7 +54,7 @@ export function daemonStatusLine(state: DesktopDaemonState): DaemonStatusLine {
     case "update-ready":
       return {
         label: "有更新",
-        detail: failure || `内置 ${state.bundledVersion ?? ""}，在跑 ${state.runningVersion ?? "未知版本"}；更新会保留本机终端`,
+        detail: failure || `内置 ${state.bundledVersion ?? ""}，在跑 ${state.runningVersion ?? "未知版本"}；${runtimeUpdateDetail(state)}`,
         tone: failure ? "error" : "warning",
         pulsing: false,
       };
@@ -61,6 +62,21 @@ export function daemonStatusLine(state: DesktopDaemonState): DaemonStatusLine {
       if (failure) return { label: "运行中", detail: failure, tone: "error", pulsing: false };
       if (state.fda !== "granted") return { label: "运行中", detail: "未授予完全磁盘访问", tone: "warning", pulsing: false };
       return { label: "运行中", detail: "", tone: "success", pulsing: false };
+  }
+}
+
+/**
+ * 「有更新」后半句（plan 20261002-runtime-follows-app）：留在 ptyd 里的终端让更新自动应用；自动应用
+ * 失败后即使错误行被清掉，这里仍要说清楚它没应用、可重试；早于 ptyd 的 supervisor 只能靠用户点「更新」。
+ */
+function runtimeUpdateDetail(state: DesktopDaemonState): string {
+  switch (state.runtimeUpdate) {
+    case "automatic":
+      return "将自动更新，保留本机终端";
+    case "failed":
+      return "更新未能应用，已恢复上一版本，终端未受影响";
+    default:
+      return "更新会保留本机终端";
   }
 }
 
@@ -84,6 +100,23 @@ const REMOVE_CONFIRM = {
   description: "会停止本机终端并暂停接入，项目文件不受影响。",
   confirmLabel: "移除接入",
 };
+
+/**
+ * The actions a stale runtime offers (plan 20261002-runtime-follows-app). A leave-capable runtime
+ * is replaced by the main process on its own, so there is no 「更新」 for it; after that attempt
+ * rolled back, 「重试」 runs the same replacement again (no confirmation either). 「更新」 remains
+ * only for a supervisor that predates ptyd, where the main process asks before ending terminals.
+ */
+function runtimeUpdateActions(state: DesktopDaemonState): DaemonAction[] {
+  switch (state.runtimeUpdate) {
+    case "automatic":
+      return [];
+    case "failed":
+      return [{ id: "update", label: "重试", kind: "primary" }];
+    default:
+      return [{ id: "update", label: "更新", kind: "primary" }];
+  }
+}
 
 /**
  * 面板里的可见动作。busy 期间无动作；FDA 引导只在运行且未授予时出现。
@@ -125,7 +158,7 @@ export function resolveDaemonActions(state: DesktopDaemonState, runningTerminals
     case "running":
       return [...fda, { id: "restart", label: "重启", kind: "secondary" }, ...updatePtyd, stop, remove];
     case "update-ready":
-      return [{ id: "update", label: "更新", kind: "primary" }, ...fda, ...updatePtyd, stop, remove];
+      return [...runtimeUpdateActions(state), ...fda, ...updatePtyd, stop, remove];
   }
 }
 

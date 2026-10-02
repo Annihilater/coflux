@@ -116,10 +116,10 @@ lock" and would take a live instance's lock away.
   no route to itself: direct connections to this machine fail and the sidebar paints this device
   with a red dot — a device online at the center with no route home. It looks like a networking or
   release defect and is neither. Check with `lsof -nP -iTCP:8788 -sTCP:LISTEN`: the listener should
-  be a worker under `~/.coflux/desktop-runtimes/`, not `target/debug/coflux-worker`. The app's
-  worker reclaims the port within seconds of the squatter exiting and logs
+  be a `coflux-runtime` under `~/.coflux/desktop-runtimes/`, not `target/debug/coflux-runtime`. The app's
+  runtime reclaims the port within seconds of the squatter exiting and logs
   `local gateway listening port=8788`.
-- **Never kill `/Applications/Coflux.app`, its supervisor or its worker.** Those hold the owner's
+- **Never kill `/Applications/Coflux.app`, its ptyd, its launcher or its runtime.** Those hold the owner's
   real terminals. Stop only the preview you started.
 
 ## Housekeeping
@@ -136,7 +136,7 @@ usually extracts rather than downloads. Never point one worktree at another's `d
 versions can differ and the mismatch fails silently.
 
 Profiles are never garbage-collected, and each one adds a local browser grant on the production
-account for this machine's daemon. The ceilings are generous but finite (1024 in the worker, 256 per
+account for this machine's daemon. The ceilings are generous but finite (1024 in the runtime, 256 per
 daemon on the server), so do not accumulate profiles indefinitely: when a worktree is gone for good,
 remove its `~/Library/Application Support/Coflux-dev-<slug>` directory.
 

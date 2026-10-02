@@ -237,7 +237,7 @@ if (!app.requestSingleInstanceLock()) {
     const daemonBundle = locateDaemonBundle(daemonBundleDir);
     log.info("内置 daemon", daemonBundle ? { dir: daemonBundle.dir, version: daemonBundle.version } : { dir: daemonBundleDir, bundled: false });
     // 内置 coflux 插件（plan 115）：与三件同在资源目录下，经子进程环境 COFLUX_CLAUDE_PLUGIN_DIR 注入给
-    // supervisor，coflux 终端里的 claude 由 supervisor 的 shell 集成翻成 --plugin-dir 自动带上；不带就什么都不注入。
+    // launcher（透传给 runtime），coflux 终端里的 claude 由 runtime 的 shell 集成翻成 --plugin-dir 自动带上；不带就什么都不注入。
     const claudePluginDir = locateClaudePluginDir(daemonBundleDir);
     log.info("内置 coflux 插件", claudePluginDir ? { dir: claudePluginDir } : { bundled: false });
     const localPaths = daemonHomePaths(app.isPackaged && !process.env.COFLUX_HOME ? homedir() : app.getPath("userData"), app.isPackaged ? process.env : { ...process.env, COFLUX_HOME: join(app.getPath("userData"), "runtime") });

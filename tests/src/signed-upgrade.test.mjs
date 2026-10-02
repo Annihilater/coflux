@@ -9,14 +9,17 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 import { openNativeDevice, utf8 } from "./device-harness.mjs";
-import { workerReleaseStatement, transportReleaseStatement } from "../../scripts/release-statement.mjs";
+import { runtimeReleaseStatement, transportReleaseStatement, workerReleaseStatement } from "../../scripts/release-statement.mjs";
 
-// 远程下载 + ed25519 验签的验收。头等用例是负向：被篡改 / 签名不符的产物必须被拒、保持当前版本。
-// 隔离：临时 127.0.0.1 HTTP server 服务产物（零外网）；临时 ed25519，公钥经 env 注入 supervisor；
-// 下载产物落临时 COFLUX_HOME；不跑 launcher。
+// Remote download + ed25519 verification of a runtime release (plan 20261002-runtime-launcher-merge):
+// the runtime downloads and verifies, installs into <home>/runtimes/<version>/, and asks the launcher
+// to switch; the launcher owns runtime.active and the release floor. The first-class cases are
+// negative: tampered or mis-signed artifacts are refused and the current version stays. Isolation:
+// a temporary 127.0.0.1 HTTP server serves the artifacts (no network), a temporary ed25519 key whose
+// public half reaches the runtime through the environment, and a temporary COFLUX_HOME.
 const PORT = 8829;
 const ROOT = resolve(import.meta.dirname, "..", "..");
-const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target", "debug", "coflux-worker");
+const RUNTIME_BIN = process.env.COFLUX_RUNTIME_BIN || join(ROOT, "target", "debug", "coflux-runtime");
 
 function hostTarget() {
   const p = platform(), a = arch();
@@ -27,30 +30,30 @@ function hostTarget() {
 const TARGET = hostTarget();
 const CROSS_TARGET = TARGET === "aarch64-apple-darwin" ? "x86_64-apple-darwin" : "aarch64-apple-darwin";
 
-// 临时 ed25519：公钥(hex)注入 supervisor，私钥签产物
+// Temporary ed25519: the public key (hex) is injected into the runtime, the private key signs.
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const PUBKEY_HEX = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
 const sign = (buf) => crypto.sign(null, buf, privateKey).toString("hex");
 const sha256hex = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
+// A runtime release carries no raw-binary signature: the statement is the only one.
 function signedRelease(version, artifact = ARTIFACT, target = TARGET) {
   const sha256 = sha256hex(artifact);
   const size = artifact.byteLength;
   return {
     version,
     sha256,
-    signature: sign(artifact), // legacy raw signature：供旧 supervisor 兼容
     target,
     artifactSize: BigInt(size),
-    releaseSignature: sign(workerReleaseStatement({ version, target, sha256, size })),
+    releaseSignature: sign(runtimeReleaseStatement({ version, target, sha256, size })),
     transport: { url: `${baseUrl}/helper`, sha256: sha256hex(HELPER), size: BigInt(HELPER.length),
       releaseSignature: sign(transportReleaseStatement({ version, target, sha256: sha256hex(HELPER), size: HELPER.length })) },
   };
 }
 
-// pretest 关闭 debug info：Linux 的 DWARF 会让调试二进制超过生产下载 128 MiB 硬上限，
-// 这里仍使用可执行的真 worker 验收升级链，不能为了 fixture 放宽生产上限。
-const ARTIFACT = readFileSync(WORKER_BIN); // 用真 worker 二进制当"新版本产物"
+// pretest builds without debug info: Linux DWARF would push the debug binary past the production
+// 128 MiB download cap; the real runtime binary still plays the "new release" artifact.
+const ARTIFACT = readFileSync(RUNTIME_BIN);
 const HELPER = readFileSync(process.env.COFLUX_TRANSPORT_BIN || join(ROOT, "target/debug/coflux-transport"));
 const TAMPERED = Buffer.from(ARTIFACT);
 TAMPERED[0] ^= 0xff; // 改一个字节
@@ -80,7 +83,7 @@ before(async () => {
   });
   await new Promise((r) => httpServer.listen(0, "127.0.0.1", r));
   baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  stack = await startStack({ port: PORT, daemonEnv: { COFLUX_WORKER_PUBKEY: PUBKEY_HEX, COFLUX_WORKER_PROBATION_MS: "1500" } });
+  stack = await startStack({ port: PORT, daemonEnv: { COFLUX_WORKER_PUBKEY: PUBKEY_HEX, COFLUX_RUNTIME_PROBATION_MS: "1500" } });
   // Reuse the session for upgrade polling instead of exhausting password-login limits.
   const client = stack.makeClient();
   try {
@@ -99,10 +102,10 @@ after(async () => {
 });
 
 function readActive() {
-  return readFileSync(join(stack.home, "worker.active"), "utf8").trim();
+  return readFileSync(join(stack.home, "runtime.active"), "utf8").trim();
 }
-function readWorkerPid() {
-  return Number(readFileSync(join(stack.home, "worker.pid"), "utf8").trim());
+function readRuntimePid() {
+  return Number(readFileSync(join(stack.home, "runtime.pid"), "utf8").trim());
 }
 async function isOnline() {
   const p = stack.makeClient();
@@ -115,11 +118,11 @@ async function isOnline() {
     p.close();
   }
 }
-async function waitNewWorker(prevPid) {
+async function waitNewRuntime(prevPid) {
   for (let i = 0; i < 120; i++) {
     await sleep(250);
     let pid;
-    try { pid = readWorkerPid(); } catch { continue; }
+    try { pid = readRuntimePid(); } catch { continue; }
     if (pid !== prevPid && (await isOnline())) return pid;
   }
   return 0;
@@ -167,7 +170,7 @@ async function runTaskWithMarker(marker) {
 test("远程下载 + 验签：合法签名产物升级成功、会话存活", async () => {
   assert.equal(readActive(), "builtin");
   const { device, sessionId, holderEpoch } = await runTaskWithMarker("SIGNED_OK");
-  const pid1 = readWorkerPid();
+  const pid1 = readRuntimePid();
 
   const c = device.control;
   c.send({
@@ -177,17 +180,18 @@ test("远程下载 + 验签：合法签名产物升级成功、会话存活", as
     ...signedRelease("v1.0.0"),
   });
 
-  assert.ok(await waitNewWorker(pid1), "下载验签通过后新 worker 起来且在线");
+  assert.ok(await waitNewRuntime(pid1), "the verified release starts and comes online");
   let committed = false;
   for (let i = 0; i < 80 && !committed; i++) {
     await sleep(250);
-    try { committed = readActive() === "v1.0.0"; } catch { /* 文件瞬时缺失 */ }
+    try { committed = readActive() === "v1.0.0"; } catch { /* marker being replaced */ }
   }
-  assert.ok(committed, "验签产物升级提交，worker.active=v1.0.0");
+  assert.ok(committed, "the verified release commits: runtime.active=v1.0.0");
+  assert.equal(existsSync(join(stack.home, "runtimes", "v1.0.0", "coflux-runtime")), true, "installed into the launcher's store");
 
   await device.openNative();
   const restored = await device.attach(sessionId);
-  assert.equal(restored.holderEpoch, holderEpoch);
+  void holderEpoch; // holders are reclaimed on reattach by design (every runtime update resets them)
   assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("SIGNED_OK"), "升级后 snapshot 保留历史");
   const from = device.mark();
   await device.input(sessionId, "echo AFTER_SIGNED\r");
@@ -195,12 +199,12 @@ test("远程下载 + 验签：合法签名产物升级成功、会话存活", as
   device.close();
 });
 
-test("supervisor 重启：从 worker.active + 下载目录恢复已提交 worker", async () => {
-  const pidBefore = readWorkerPid();
+test("launcher restart: recovers the committed runtime from runtime.active + the store", async () => {
+  const pidBefore = readRuntimePid();
   await stack.restartDaemon();
 
-  assert.ok(await waitDaemonVersion("v1.0.0"), "重启后运行下载目录中的 v1.0.0，而非退回 builtin");
-  assert.notEqual(readWorkerPid(), pidBefore, "worker 是 supervisor 重启后重新拉起的进程");
+  assert.ok(await waitDaemonVersion("v1.0.0"), "after the restart the stored v1.0.0 runs, not the builtin");
+  assert.notEqual(readRuntimePid(), pidBefore, "the runtime is a fresh process started by the new launcher");
   await sleep(2000); // 跨过 1500ms 观察期，确认不是短暂启动后回退。
   assert.ok(await waitDaemonVersion("v1.0.0"), "恢复候选通过 UDS/resync 复检后继续运行");
   assert.equal(readActive(), "v1.0.0", "恢复复检后仍提交为 v1.0.0");
@@ -227,20 +231,20 @@ test("并发远程升级：新请求优先，旧慢下载后到不得覆盖", as
   assert.ok(await waitActive("v1.2.0"), "新请求先完成并提交");
   await sleep(2200); // 旧响应此时必已返回并完成验签；generation 应将其丢弃。
   assert.equal(readActive(), "v1.2.0", "旧下载晚到没有反向切回");
-  assert.equal(existsSync(join(stack.home, "workers", "v1.1.0", "coflux-worker")), false, "过期下载没有晋升到正式路径");
+  assert.equal(existsSync(join(stack.home, "runtimes", "v1.1.0", "coflux-runtime")), false, "过期下载没有晋升到正式路径");
   assert.ok(await isOnline(), "最终 daemon 仍在线");
   c.close();
 });
 
 test("anti-rollback 持久化：重启后降级与同版本重放均在下载前拒绝", async () => {
-  const pidBeforeRestart = readWorkerPid();
+  const pidBeforeRestart = readRuntimePid();
   await stack.restartDaemon();
   assert.ok(await waitDaemonVersion("v1.2.0"), "重启后恢复已提交 release");
-  assert.notEqual(readWorkerPid(), pidBeforeRestart);
+  assert.notEqual(readRuntimePid(), pidBeforeRestart);
   await sleep(2000);
-  assert.equal(readFileSync(join(stack.home, "worker.release-floor"), "utf8").trim(), "v1.2.0");
+  assert.equal(readFileSync(join(stack.home, "runtime.release-floor"), "utf8").trim(), "v1.2.0");
 
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
   const hitsBefore = requestHits.get("/good") ?? 0;
   const c = stack.makeClient();
   await c.authTokenSubscribe(clientToken);
@@ -257,15 +261,15 @@ test("anti-rollback 持久化：重启后降级与同版本重放均在下载前
     ...signedRelease("v1.2.0"),
   });
   await sleep(750);
-  assert.equal(requestHits.get("/good") ?? 0, hitsBefore, "降级与重放均不发起网络下载");
+  assert.equal(requestHits.get("/good") ?? 0, hitsBefore, "a downgrade and a replay never reach the network");
   assert.equal(readActive(), "v1.2.0");
-  assert.equal(readWorkerPid(), pidBefore, "被拒请求不重启 worker");
+  assert.equal(readRuntimePid(), pidBefore, "a refused request never restarts the runtime");
   c.close();
 });
 
-test("发布元数据篡改被拒：legacy raw 签名正确也不能伪造 version", async () => {
+test("tampered release metadata is refused: a statement over another version never verifies", async () => {
   const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
   const signed = signedRelease("v1.3.0");
   const c = stack.makeClient();
   await c.authTokenSubscribe(clientToken);
@@ -274,17 +278,17 @@ test("发布元数据篡改被拒：legacy raw 签名正确也不能伪造 versi
     daemonId: stack.daemonId,
     url: `${baseUrl}/good`,
     ...signed,
-    version: "v1.3.1", // raw 签名仍合法，release statement 必须因 version 不同而失败
+    version: "v1.3.1", // the statement was signed for v1.3.0 and must fail for v1.3.1
   });
   await sleep(1500);
   assert.equal(readActive(), activeBefore);
-  assert.equal(readWorkerPid(), pidBefore);
+  assert.equal(readRuntimePid(), pidBefore);
   c.close();
 });
 
 test("跨 target 发布被拒：合法签名的其他架构也不下载/执行", async () => {
   const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
   const hitsBefore = requestHits.get("/good") ?? 0;
   const c = stack.makeClient();
   await c.authTokenSubscribe(clientToken);
@@ -297,14 +301,14 @@ test("跨 target 发布被拒：合法签名的其他架构也不下载/执行",
   await sleep(750);
   assert.equal(requestHits.get("/good") ?? 0, hitsBefore, "target 不匹配在网络前 fail closed");
   assert.equal(readActive(), activeBefore);
-  assert.equal(readWorkerPid(), pidBefore);
+  assert.equal(readRuntimePid(), pidBefore);
   c.close();
 });
 
 test("篡改产物被拒：sha256 不符 → 不切换、保持当前版本、会话不受影响", async () => {
   const activeBefore = readActive();
   const { device, sessionId } = await runTaskWithMarker("TAMPER_MARK");
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
 
   const c = device.control;
   // 下发被篡改的 url，但 sha256/signature 仍是原始产物的 → 校验必失败
@@ -316,8 +320,8 @@ test("篡改产物被拒：sha256 不符 → 不切换、保持当前版本、�
   });
 
   await sleep(1500); // 给下载+验签线程足够时间（localhost 很快），它应当拒绝
-  assert.equal(readActive(), activeBefore, "被拒后 worker.active 未变");
-  assert.equal(readWorkerPid(), pidBefore, "worker 未重启（验签在切换前就失败）");
+  assert.equal(readActive(), activeBefore, "refused: runtime.active unchanged");
+  assert.equal(readRuntimePid(), pidBefore, "the runtime was not restarted (verification fails before any switch)");
   assert.ok(await isOnline(), "daemon 仍在线");
 
   const restored = await device.attach(sessionId);
@@ -328,31 +332,57 @@ test("篡改产物被拒：sha256 不符 → 不切换、保持当前版本、�
   device.close();
 });
 
-test("签名不符被拒：产物合法但签名是别的数据 → 验签失败、保持当前版本", async () => {
+test("a mismatched statement signature is refused: valid bytes, signature over other data", async () => {
   const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
 
   const c = stack.makeClient();
   await c.authTokenSubscribe(clientToken);
-  // url=合法产物、sha256 正确，但 signature 是对别的字节签的 → 仅签名这关就挡住
   c.send({
     case: "clientUpgradeDaemon",
     daemonId: stack.daemonId,
     url: `${baseUrl}/good`,
     ...signedRelease("v1.5.0"),
-    signature: sign(Buffer.from("not the artifact")),
+    releaseSignature: sign(Buffer.from("not the statement")),
   });
 
   await sleep(1500);
-  assert.equal(readActive(), activeBefore, "签名不符被拒，worker.active 未变");
-  assert.equal(readWorkerPid(), pidBefore, "worker 未重启");
-  assert.ok(await isOnline(), "daemon 仍在线");
+  assert.equal(readActive(), activeBefore, "refused: runtime.active unchanged");
+  assert.equal(readRuntimePid(), pidBefore, "the runtime was not restarted");
+  assert.ok(await isOnline(), "daemon still online");
+  c.close();
+});
+
+test("cross-component: a worker-domain statement over identical metadata never verifies a runtime", async () => {
+  // The invariant that keeps a pre-plan supervisor and a runtime apart: same version, target,
+  // sha256 and size, signed under `coflux-worker-release-v1`, is not a runtime release.
+  const activeBefore = readActive();
+  const pidBefore = readRuntimePid();
+  const version = "v1.5.1";
+  const sha256 = sha256hex(ARTIFACT);
+  const size = ARTIFACT.byteLength;
+  const c = stack.makeClient();
+  await c.authTokenSubscribe(clientToken);
+  c.send({
+    case: "clientUpgradeDaemon",
+    daemonId: stack.daemonId,
+    url: `${baseUrl}/good`,
+    ...signedRelease(version),
+    releaseSignature: sign(workerReleaseStatement({ version, target: TARGET, sha256, size })),
+    // Even with the legacy raw-binary signature a worker release would carry.
+    signature: sign(ARTIFACT),
+  });
+  await sleep(1500);
+  assert.equal(readActive(), activeBefore, "a worker-domain statement is refused for a runtime");
+  assert.equal(readRuntimePid(), pidBefore, "the runtime was not restarted");
+  assert.equal(existsSync(join(stack.home, "runtimes", version, "coflux-runtime")), false, "nothing was installed");
+  assert.ok(await isOnline(), "daemon still online");
   c.close();
 });
 
 test("超大下载被拒：仅凭 Content-Length 即在读取前失败，不重启 worker", async () => {
   const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
+  const pidBefore = readRuntimePid();
   const c = stack.makeClient();
   await c.authTokenSubscribe(clientToken);
   c.send({
@@ -363,7 +393,7 @@ test("超大下载被拒：仅凭 Content-Length 即在读取前失败，不重�
   });
   await sleep(750);
   assert.equal(readActive(), activeBefore, "超过 128 MiB 硬上限的声明未改变 active");
-  assert.equal(readWorkerPid(), pidBefore, "拒绝发生在切换前，worker 未重启");
-  assert.equal(existsSync(join(stack.home, "workers", "v1.6.0", "coflux-worker")), false, "未写入正式产物");
+  assert.equal(readRuntimePid(), pidBefore, "refused before any switch, the runtime was not restarted");
+  assert.equal(existsSync(join(stack.home, "runtimes", "v1.6.0", "coflux-runtime")), false, "未写入正式产物");
   c.close();
 });

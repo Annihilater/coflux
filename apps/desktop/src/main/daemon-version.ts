@@ -1,7 +1,7 @@
 /**
- * 内置 supervisor 与在跑 supervisor 的版本比较（plan 113）。纯函数，无 Electron 依赖。
+ * 内置 runtime 与在跑 runtime 的版本比较（plan 113）。纯函数，无 Electron 依赖。
  *
- * 版本原文形如 `v0.32.0` / `v0.0.0-desktop.0.1.7` / `dev`，与 crates/supervisor/src/upgrade.rs 的
+ * 版本原文形如 `v0.32.0` / `v0.0.0-desktop.0.1.7` / `dev`，与 crates/protocol/src/release.rs 的
  * ReleaseVersion::parse 同一套接受域：`v` 前缀 + 严格 SemVer（允许 prerelease 与 build metadata），
  * 比较按 SemVer 11 的 precedence（build metadata 不参与）。
  */
@@ -64,10 +64,10 @@ export function compareReleaseVersions(left: ReleaseVersion, right: ReleaseVersi
 /**
  * 「有更新待重启」的判定（plan 113 决策）：
  * - 两者都能解析且内置严格更新 → true
- * - 在跑的解析不了（dev）或缺失（112 之前的老 supervisor 没写文件）→ 视为比内置旧 → true
+ * - 在跑的解析不了（dev）或缺失（112 之前的老版本没写文件）→ 视为比内置旧 → true
  * - 内置解析不了（本机 pack 落 dev）→ 永不提示 → false
  */
-export function bundledSupervisorIsNewer(bundledRaw: string | null | undefined, runningRaw: string | null | undefined): boolean {
+export function bundledRuntimeIsNewer(bundledRaw: string | null | undefined, runningRaw: string | null | undefined): boolean {
   const bundled = parseReleaseVersion(bundledRaw);
   if (!bundled) return false;
   const running = parseReleaseVersion(runningRaw);

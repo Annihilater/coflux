@@ -20,13 +20,14 @@ coflux runs a **daemon** on any node. The daemon hosts local PTYs, drives agents
 - `packages/{protocol,core,client}` (TS): shared wire-protocol types, logging, and the protocol client/store. The client package has no React or Electron dependency and is the sole TS client source of truth. The `"web"` value in `ClientKind` remains part of the server contract for the frozen web client.
 - `integrations/claude-plugin`: the Claude Code plugin **delivery directory** (hooks, skills, and manifest). The `myWsq/plugins` marketplace (maintained in `myWsq/plugins-builder`) publishes the entire directory pinned by commit SHA. After changes, bump `.claude-plugin/plugin.json` and update the SHA in the builder. The skills' sole source is the `packages/cli/skills/` tree (`coflux`, `coflux-secret`); mirror it here with `node scripts/sync-claude-plugin.mjs`. CI verifies that the plugin's `skills/` tree matches it file for file.
 - `packages/cli` and `crates/cli`: the unified CLI entry point for agents. Account login and operations across workspaces/devices use `/api/client/*`. The desktop-bundled CLI can reuse the app account through the local broker. MCP and its dedicated OAuth entry points have been removed.
-- `crates/{protocol,supervisor,worker}` (Rust): the **Rust daemon core, with no Node runtime**.
-  - `supervisor`: owns PTYs (portable-pty), scrollback, and backpressure; serves UDS; starts, manages, and restarts the worker; switches versions and rolls back during the observation period. Upgraded rarely.
-  - `worker` (tokio): server WS connection, authentication and reconnection, git/exec/fs, and two-level resync. Upgraded frequently; hot upgrades replace the worker and its paired transport helper, leaving PTYs alive in the supervisor.
+- `crates/{protocol,ptyd,launcher,runtime}` (Rust): the **Rust daemon core, with no Node runtime** (plan 20261002-runtime-launcher-merge).
+  - `ptyd`: owns every PTY (openpty, read loop into a per-session ring, input, resize, waitpid) behind a v1 UDS protocol with a capability handshake. Near-zero change rate; a change to it is the one update that ends terminals.
+  - `launcher`: a small, rarely changing process that owns the runtime version pointer and the remote release floor, spawns the runtime, decides probation/commit from its own checks (nonce echo, ptyd's session list, gateway connect), rolls back a crash-looping or pseudo-healthy candidate, falls back to the builtin runtime and serves `runtime.sock` / `runtime.lock`. Started by the desktop app or the `cofluxd`-generated service; nothing else changes versions.
+  - `runtime` (tokio): sessiond (VT/history/holder/sequence authority, PTY environment, shell integration), the server WS connection, authentication and reconnection, git/exec/fs, local gateway, native channels, executor host, and release download/verification. The unit that gets updated: the centre pushes every release into launcher daemons; a swap rebuilds sessiond from ptyd with a brief pause.
   - See [docs/architecture.md](docs/architecture.md), [docs/hot-upgrade-design.md](docs/hot-upgrade-design.md), and [docs/ROADMAP.md](docs/ROADMAP.md).
   - Before changing desktop UI, read [docs/design-guidelines.md](docs/design-guidelines.md), including the requirement to use the Tooltip component instead of native `title` tooltips.
 
-- `transport/tailcat` (Go): the pinned Tailcat/Tailscale networking helper, built as `coflux-transport` with Go 1.27.1 and `CGO_ENABLED=0`. It is included with the worker in release artifacts, CLI installation, and Desktop bundles; end users need no Go toolchain. It owns no PTYs or business authority and communicates with its Rust worker or Electron-main owner through private inherited stdio. Tailcat is the default supported remote transport; configure self-hosted stock DERP regions on the server. The custom relay/WebRTC implementation is retired. CONTROL_PROTOCOL_VERSION is 2 while DEVICE_PROTOCOL_VERSION remains 1; obsolete remote peers require an upgrade. Swift/iOS keeps its loopback provider boundary and additionally reaches remote devices through the same client protocol: `cmd/coflux-transport-ios` builds `internal/backend` with `CGO_ENABLED=1` as an iOS c-archive (`node scripts/build-ios-transport.mjs`, artifact gitignored, not covered by CI). See [docs/tailcat-transport.md](docs/tailcat-transport.md).
+- `transport/tailcat` (Go): the pinned Tailcat/Tailscale networking helper, built as `coflux-transport` with Go 1.27.1 and `CGO_ENABLED=0`. It is included with the runtime in release artifacts, CLI installation, and Desktop bundles; end users need no Go toolchain. It owns no PTYs or business authority and communicates with its Rust runtime or Electron-main owner through private inherited stdio. Tailcat is the default supported remote transport; configure self-hosted stock DERP regions on the server. The custom relay/WebRTC implementation is retired. CONTROL_PROTOCOL_VERSION is 2 while DEVICE_PROTOCOL_VERSION remains 1; obsolete remote peers require an upgrade. Swift/iOS keeps its loopback provider boundary and additionally reaches remote devices through the same client protocol: `cmd/coflux-transport-ios` builds `internal/backend` with `CGO_ENABLED=1` as an iOS c-archive (`node scripts/build-ios-transport.mjs`, artifact gitignored, not covered by CI). See [docs/tailcat-transport.md](docs/tailcat-transport.md).
 
 `cofluxd` is the headless device-host entry point, responsible only for installation, connectivity, and daemon lifecycle. `coflux` provides account and local/remote business operations. The npm `cofluxd` package ships both entry points. Desktop bundles the Rust `coflux` binary and adds it to terminal PATH. Neither entry point forwards legacy commands.
 
@@ -44,7 +45,7 @@ pnpm -C apps/desktop dev / pack                     # Develop against local port
 pnpm dev:pg                                         # Dedicated local Postgres: compose, 127.0.0.1:5432
 pnpm dev:server / dev:desktop / dev:daemon          # Start each component; pnpm dev runs server and desktop concurrently
 node packages/cli/cofluxd.mjs up --server ... --bin-dir target/release   # Install/start the daemon; users run npm i -g cofluxd && cofluxd up
-git tag v1.2.3 && git push origin v1.2.3            # Release: cross-compile, sign worker, publish GitHub Release; see docs/RELEASING.md
+git tag v1.2.3 && git push origin v1.2.3            # Release: cross-compile, sign every component, publish GitHub Release; see docs/RELEASING.md
 ```
 
 ### Local development pitfalls
@@ -54,7 +55,7 @@ git tag v1.2.3 && git push origin v1.2.3            # Release: cross-compile, si
 - **Running the desktop dev client is the [desktop-preview skill](.agents/skills/desktop-preview/SKILL.md).** It is the single source of truth for starting a preview, running several branch previews side by side (one per worktree, each with its own profile, HMR port and instance label), identifying and stopping them, and what must never be touched — the installed app's runtime, port 8788, a daemon staged into a dev build.
 - **Do not start the local stack merely to look at the desktop app.** For human acceptance of a UI change, run `pnpm dev:desktop:prod`: the real account already has the workspaces and live terminals the reviewer needs, and no server, daemon or enrollment is involved. The local stack is for protocol work and for states production cannot produce. [docs/desktop-acceptance.md](docs/desktop-acceptance.md) is the acceptance handover: which setup, what it cannot reach, and what to tell the reviewer.
 
-CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publishes desktop and daemon components together for `v*` tags, then publishes npm packages at the same version; `desktop-release.yml` is called only by the unified workflow and handles signed, notarized desktop builds. Worker artifacts use ed25519 signatures verified by the supervisor. Key configuration is documented in [docs/RELEASING.md](docs/RELEASING.md).
+CI/releases: `.github/workflows/ci.yml` gates pushes and PRs; `release.yml` publishes desktop and daemon components together for `v*` tags, then publishes npm packages at the same version; `desktop-release.yml` is called only by the unified workflow and handles signed, notarized desktop builds. Runtime artifacts use ed25519 release statements verified by the runtime before it asks the launcher to switch. Key configuration is documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 For production infrastructure (three machines, domain routing, deployment and rollback commands, and known pitfalls), see [docs/deployment.md](docs/deployment.md). **Read it before touching production.** Domains under coflux.dev mix proxied and DNS-only Cloudflare records, and Caddy on two machines also serves other projects.
 
@@ -76,7 +77,7 @@ What is still automated, and why:
 | --- | --- |
 | `contract.test.mjs` | the exec/fs wire contract between the Rust daemon and the TS server: drift is silent until something misbehaves much later |
 | `signed-upgrade.test.mjs`, `release-sign.test.mjs`, `cli-release-trust.test.mjs` | ed25519 artifact verification and the npm trust chain: the negative cases (tampered artifact, wrong signature, cross-target, anti-rollback) cannot be exercised by using the product |
-| `worker-upgrade.test.mjs` | hot-upgrade probation and rollback, including the pseudo-healthy cases that must never commit: a broken rollback bricks a remote daemon |
+| `worker-upgrade.test.mjs` | the launcher's probation and rollback, including the pseudo-healthy cases that must never commit (silent, wrong nonce, sessions not taken over, gateway not listening): a broken rollback bricks a remote daemon |
 
 Plus the cheap compile-level gates that stay in CI: protocol lint/breaking/generated-artifact consistency, `tsc --noEmit`, desktop typecheck/build, Rust unit tests and a zero-warning build.
 
@@ -88,28 +89,28 @@ The retained files are **deliberately black-box**: they drive real processes ove
 
 - Location: `tests/src/` (`harness.mjs`, `device-harness.mjs`, `derp-harness.mjs`, `tailcat-harness.mjs`, and five `*.test.mjs` files). `node --test` runs **files** concurrently (four by default; `COFLUX_TEST_CONCURRENCY=1` enables serial troubleshooting; CI uses two). Tests within each file run sequentially; the whole suite is about a minute. Run one file with `node --import tsx --test tests/src/<x>.test.mjs`. Each file owns an exclusive port — check the existing ones with `grep -h "PORT = " tests/src/*.test.mjs | sort`. Ports are hardcoded, so **two suites cannot run on one machine at the same time**: a second run steals the ports and fails as a timeout that looks like a code bug.
 - **Black-box**: tests drive **real processes through the WebSocket wire protocol**, never application internals, so they survive refactoring and language rewrites. The PTY frame codec in `harness.mjs` is **intentionally inline pure JS**, importing no application code, to remain independent of the system under test.
-- `startStack()` launches an independent **TS server (tsx) and Rust supervisor daemon**, which spawns the Rust worker. It waits for the daemon to come online before returning control handles. `Client` is a test WS client with `waitFor`; `mkRepo()` creates temporary Git repositories.
-- Default daemon binaries: `target/debug/coflux-{supervisor,worker}` (built by `pretest`). Override them with `COFLUX_SUPERVISOR_BIN` / `COFLUX_WORKER_BIN`.
+- `startStack()` launches an independent **TS server (tsx), Rust ptyd and Rust launcher**, which spawns the Rust runtime. It waits for the daemon to come online before returning control handles. `Client` is a test WS client with `waitFor`; `mkRepo()` creates temporary Git repositories.
+- Default daemon binaries: `target/debug/coflux-{ptyd,launcher,runtime}` (built by `pretest`). Override them with `COFLUX_PTYD_BIN` / `COFLUX_LAUNCHER_BIN` / `COFLUX_RUNTIME_BIN`.
 
 ### Isolation: keep the local environment clean
 
 Each stack supplies its own isolation and cleans up afterward, **without touching the real environment**:
 
-- **Temporary HOME**: `COFLUX_HOME` points to an `mkdtemp` directory. Device credentials, `worker.pid`, downloads, and other files stay there, never in the real `~/.coflux`.
+- **Temporary HOME**: `COFLUX_HOME` points to an `mkdtemp` directory. Device credentials, `runtime.pid`, downloads, and other files stay there, never in the real `~/.coflux`.
 - **Temporary database and ports**: each stack creates a dedicated temporary database in local test Postgres, forcibly disconnects clients, and drops it on shutdown. Each test file also owns an exclusive port (`const PORT` near the top of each `*.test.mjs`); choose an unused port for new tests.
-- **Spawn binaries directly; never run the installer**: the harness starts the supervisor directly and **never runs `cofluxd` or installs services**. It writes no system directories, registers no systemd/launchd jobs, and leaves real services untouched.
-- **Process-group cleanup**: the daemon starts with `detached` in its own process group. `stop()` uses `kill(-pid)` to terminate the entire group (supervisor, worker, and PTY children), then deletes temporary directories.
+- **Spawn binaries directly; never run the installer**: the harness starts ptyd and the launcher directly and **never runs `cofluxd` or installs services**. It writes no system directories, registers no systemd/launchd jobs, and leaves real services untouched.
+- **Process-group cleanup**: the daemon starts with `detached` in its own process group. `stop()` uses `kill(-pid)` to terminate the launcher's group (launcher and runtime) and ptyd's group (ptyd and PTY children), then deletes temporary directories.
 - Debugging: `COFLUX_TEST_DEBUG=1` forwards server/daemon stdio to the terminal.
 
 ### Signature and remote-download acceptance tests
 
-Implemented in `tests/src/signed-upgrade.test.mjs`. For hot upgrades involving remote downloads and ed25519 verification, **negative cases are first-class**: tampered artifacts (signature or SHA-256 mismatch) must be rejected while the supervisor retains the current version. Local isolation works as follows:
+Implemented in `tests/src/signed-upgrade.test.mjs`. For hot upgrades involving remote downloads and ed25519 verification, **negative cases are first-class**: tampered artifacts (statement signature or SHA-256 mismatch, a worker-domain statement over identical metadata) must be rejected while the launcher retains the current version. Local isolation works as follows:
 
 - **Network**: tests start a temporary HTTP server on `127.0.0.1` (Node `http`, random port) to serve artifacts. `worker.upgrade.url` points to it. No external network is used.
-- **Keys**: each test generates a temporary ed25519 key pair with Node `crypto`, held in memory/temporary storage. The supervisor receives the public key **through an environment variable**, `COFLUX_WORKER_PUBKEY`, overriding the production placeholder key baked into the binary.
-  - *Why environment injection does not weaken artifact validation*: signing separates permission to publish worker binaries from the download source and central server. A remote party cannot set the local environment; the test override represents a local administrator choosing a different trust root. This does not turn a compromised central server into an attacker without RCE: the center can already orchestrate existing exec/session capabilities.
+- **Keys**: each test generates a temporary ed25519 key pair with Node `crypto`, held in memory/temporary storage. The runtime receives the public key **through an environment variable**, `COFLUX_WORKER_PUBKEY`, overriding the production placeholder key baked into the binary.
+  - *Why environment injection does not weaken artifact validation*: signing separates permission to publish runtime binaries from the download source and central server. A remote party cannot set the local environment; the test override represents a local administrator choosing a different trust root. This does not turn a compromised central server into an attacker without RCE: the center can already orchestrate existing exec/session capabilities.
   - Cross-language interoperability: ed25519 and SHA-256 are standards. Node `crypto` (raw 32-byte public key and 64-byte signature) interoperates with Rust `ed25519-dalek` / `sha2`.
-- **Filesystem/services**: downloads stay under temporary `COFLUX_HOME/workers/`. No launcher runs, so the system remains untouched.
+- **Filesystem/services**: downloads stay under temporary `COFLUX_HOME/runtimes/`. No service manager is involved, so the system remains untouched.
 
 ## Docker: stronger isolation and reproducibility
 

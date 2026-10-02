@@ -144,7 +144,7 @@ test("desktop-release.yml：并行 daemon job 同 SHA cargo build 三件、统�
   const cargo = daemon.steps.find((step) => step.run?.includes("cargo build"));
   assert.ok(cargo?.run, "缺少 cargo build 步骤");
   assert.match(cargo.run, /--release --target aarch64-apple-darwin/);
-  for (const pkg of ["coflux-supervisor", "coflux-worker", "coflux-cli", "coflux-ptyd"]) assert.match(cargo.run, new RegExp(`-p ${pkg}\\b`));
+  for (const pkg of ["coflux-launcher", "coflux-runtime", "coflux-cli", "coflux-ptyd"]) assert.match(cargo.run, new RegExp(`-p ${pkg}\\b`));
   assert.equal(cargo.env?.RUSTFLAGS, "-D warnings");
   // 桌面编译期版本与统一产品 tag 一致。
   assert.equal(cargo.env?.COFLUX_RELEASE_VERSION, "v${{ needs.metadata.outputs.version }}");
@@ -336,7 +336,7 @@ test("coflux-screen: desktop-bundled helper, built from native/screen, absent fr
   assert.match(runtime, /\[SCREEN_HELPER_ENV\]: join\(directory, SCREEN_HELPER_BINARY\)/);
   assert.match(runtime, /\[SCREEN_HELPER_VERSION_ENV\]/);
   assert.equal(SCREEN_HELPER_ENV, "COFLUX_SCREEN_HELPER");
-  // Same spelling as the worker (crates/worker/src/screen.rs HELPER_ENV).
-  const worker = readFileSync(resolve(repoRoot, "crates/worker/src/screen.rs"), "utf8");
+  // Same spelling as the worker (crates/runtime/src/screen.rs HELPER_ENV).
+  const worker = readFileSync(resolve(repoRoot, "crates/runtime/src/screen.rs"), "utf8");
   assert.match(worker, new RegExp(`HELPER_ENV: &str = "${SCREEN_HELPER_ENV}"`));
 });

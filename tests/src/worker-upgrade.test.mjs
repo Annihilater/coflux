@@ -7,45 +7,77 @@ import { TaskStatus } from "@coflux/protocol";
 import { startStack, mkRepo } from "./harness.mjs";
 import { openNativeDevice, utf8 } from "./device-harness.mjs";
 
-// 热升级：升级投递（client.upgradeDaemon → server → worker.upgrade → supervisor）
-// + 切换 + 观察期/回滚。会话全程在 supervisor 存活。不接下载/验签（按安全约束，仅在
-// supervisor 自有注册表的"已知版本"间切换）。
+// Runtime switch through the launcher (plan 20261002-runtime-launcher-merge): the centre pushes
+// `workerUpgrade` → runtime → private launcher channel → launcher switches, runs probation and
+// commits or rolls back. Sessions live in ptyd throughout. No downloads here (the signed path is
+// signed-upgrade.test.mjs): switches move between versions registered with the launcher.
+//
+// The health gate is checked by the launcher itself: the candidate must echo the per-spawn nonce,
+// report every live session ptyd holds, and report a gateway port that accepts a connection. Each
+// stub below defeats exactly one of those and must never commit.
 const PORT = 8828;
 const ROOT = resolve(import.meta.dirname, "..", "..");
-const WORKER_BIN = process.env.COFLUX_WORKER_BIN || join(ROOT, "target", "debug", "coflux-worker");
-const REQUEST_ONLY_WORKER = `
-const net = require("node:net");
-const socket = net.connect(process.env.COFLUX_SUPERVISOR_SOCK, () => {
-  const payload = Buffer.from(JSON.stringify({ type: "resync.request" }));
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length);
-  socket.write(Buffer.concat([header, payload]));
-});
-socket.on("data", () => {});
-setInterval(() => {}, 1000);
-`;
-const BLIND_ACK_WORKER = `
-const net = require("node:net");
-const socket = net.connect(process.env.COFLUX_SUPERVISOR_SOCK, () => {
-  const payload = Buffer.from(JSON.stringify({ type: "resync.applied", nonce: "00000000000000000000000000000000" }));
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length);
-  socket.write(Buffer.concat([header, payload]));
-});
-socket.on("data", () => {});
-setInterval(() => {}, 1000);
-`;
+const RUNTIME_BIN = process.env.COFLUX_RUNTIME_BIN || join(ROOT, "target", "debug", "coflux-runtime");
 
-// 注入两个测试版本：good2 = 真 worker 的副本（应升级成功并提交）；bad2 = 立即崩溃（应回滚）
+/** A stub that connects to the launcher channel and sends one JSON line (or nothing). */
+function stub(body) {
+  return `
+const net = require("node:net");
+${body}
+setInterval(() => {}, 1000);
+`;
+}
+const CONNECT_ONLY = stub(`
+const socket = net.connect(process.env.COFLUX_LAUNCHER_SOCK);
+socket.on("data", () => {});
+socket.on("error", () => {});
+`);
+const WRONG_NONCE = stub(`
+const socket = net.connect(process.env.COFLUX_LAUNCHER_SOCK, () => {
+  socket.write(JSON.stringify({ type: "ready", nonce: "00000000000000000000000000000000", sessions: [], gatewayPort: 1 }) + "\\n");
+});
+socket.on("data", () => {});
+socket.on("error", () => {});
+`);
+// Right nonce, a listening gateway, but claims to serve no session at all: with a live terminal
+// in ptyd the launcher must see the one it did not take over.
+const NO_SESSIONS = stub(`
+const server = net.createServer(() => {}).listen(0, "127.0.0.1", () => {
+  const socket = net.connect(process.env.COFLUX_LAUNCHER_SOCK, () => {
+    socket.write(JSON.stringify({ type: "ready", nonce: process.env.COFLUX_LAUNCHER_NONCE, sessions: [], gatewayPort: server.address().port }) + "\\n");
+  });
+  socket.on("data", () => {});
+  socket.on("error", () => {});
+});
+`);
+// Right nonce, no live session to take over (the test runs it with none), but a gateway port
+// nothing listens on.
+const NO_GATEWAY = stub(`
+const probe = net.createServer(() => {}).listen(0, "127.0.0.1", () => {
+  const port = probe.address().port;
+  probe.close(() => {
+    const socket = net.connect(process.env.COFLUX_LAUNCHER_SOCK, () => {
+      socket.write(JSON.stringify({ type: "ready", nonce: process.env.COFLUX_LAUNCHER_NONCE, sessions: [], gatewayPort: port }) + "\\n");
+    });
+    socket.on("data", () => {});
+    socket.on("error", () => {});
+  });
+});
+`);
+
 const SPECS = {
-  good2: { cmd: WORKER_BIN, args: [] },
+  // The real runtime under another name: must pass probation and commit.
+  good2: { cmd: RUNTIME_BIN, args: [] },
+  // Exits at once: crash-loops and rolls back.
   bad2: { cmd: process.execPath, args: ["-e", "process.exit(1)"] },
-  // 进程一直活着但从不连接 supervisor UDS；只看存活的旧观察期会错误提交它。
-  noresync: { cmd: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
-  // 会接管 UDS、请求并读取 resync.list，但从不回 resync.applied；“成功入队”仍不等于恢复。
-  requestOnly: { cmd: process.execPath, args: ["-e", REQUEST_ONLY_WORKER] },
-  // 不读取 challenge 就盲回 ACK；固定 nonce 不得碰巧通过候选健康检查。
-  blindAck: { cmd: process.execPath, args: ["-e", BLIND_ACK_WORKER] },
+  // Alive but never reports: an observation period judging only liveness would commit it.
+  silent: { cmd: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
+  // Connects to the channel, never sends ready.
+  connectOnly: { cmd: process.execPath, args: ["-e", CONNECT_ONLY] },
+  // Blind ready with a fixed nonce: must not pass by chance.
+  wrongNonce: { cmd: process.execPath, args: ["-e", WRONG_NONCE] },
+  noSessions: { cmd: process.execPath, args: ["-e", NO_SESSIONS] },
+  noGateway: { cmd: process.execPath, args: ["-e", NO_GATEWAY] },
 };
 
 let stack;
@@ -54,16 +86,16 @@ const repos = [];
 before(async () => {
   stack = await startStack({
     port: PORT,
-    daemonEnv: { COFLUX_WORKER_SPECS: JSON.stringify(SPECS), COFLUX_WORKER_PROBATION_MS: "1500" },
+    daemonEnv: { COFLUX_RUNTIME_SPECS: JSON.stringify(SPECS), COFLUX_RUNTIME_PROBATION_MS: "1500" },
   });
 });
 after(async () => { await stack?.stop(); repos.forEach((r) => r.cleanup()); });
 
 function readActive() {
-  return readFileSync(join(stack.home, "worker.active"), "utf8").trim();
+  return readFileSync(join(stack.home, "runtime.active"), "utf8").trim();
 }
-function readWorkerPid() {
-  return Number(readFileSync(join(stack.home, "worker.pid"), "utf8").trim());
+function readRuntimePid() {
+  return Number(readFileSync(join(stack.home, "runtime.pid"), "utf8").trim());
 }
 async function readDaemonState() {
   const p = stack.makeClient();
@@ -78,14 +110,12 @@ async function readDaemonState() {
 }
 
 /**
- * 证明一次 worker 切换真正收敛：
- * 1) 升级前建立独立 observer，只接收本次触发后的 daemonUpdated；
- * 2) 必须先看到旧 daemon 离线，再看到目标 workerVersion 的新连接上线；
- * 3) worker.pid 必须变化，最后用新鲜 snapshot 再确认当前映射仍是目标版本。
- *
- * 单纯“PID 变化 + snapshot.online”不够：PID 可能已更新，而 snapshot 仍来自尚未清掉的旧 WS。
+ * Prove a runtime switch really converged:
+ * 1) an observer opened before the trigger sees only daemonUpdated events after it;
+ * 2) the old daemon must go offline before a connection with the target workerVersion comes online;
+ * 3) runtime.pid must change, and a fresh snapshot must still map to the target version.
  */
-async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
+async function waitRuntimeReconnect(prevPid, expectedVersion, trigger, label) {
   const observer = stack.makeClient();
   await observer.authSubscribe();
   let sawOffline = false;
@@ -106,7 +136,7 @@ async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
     });
     timer = setTimeout(() => {
       unsubscribe();
-      rejectTransition(new Error(label + ": 未观察到 offline → online:" + expectedVersion + "，事件=" + (trail.join(",") || "无")));
+      rejectTransition(new Error(label + ": no offline → online:" + expectedVersion + " observed, events=" + (trail.join(",") || "none")));
     }, 30000);
   });
 
@@ -119,9 +149,9 @@ async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
     let pid = prevPid;
     for (let i = 0; i < 40 && pid === prevPid; i++) {
       await sleep(50);
-      try { pid = readWorkerPid(); } catch { /* worker.pid 正在原子更新 */ }
+      try { pid = readRuntimePid(); } catch { /* runtime.pid being written */ }
     }
-    assert.notEqual(pid, prevPid, label + ": 目标连接必须来自新 worker 进程");
+    assert.notEqual(pid, prevPid, label + ": the target connection must come from a new runtime process");
 
     let converged;
     for (let i = 0; i < 40; i++) {
@@ -129,8 +159,8 @@ async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
       if (converged?.online && converged.workerVersion === expectedVersion) break;
       await sleep(100);
     }
-    assert.equal(converged?.online, true, label + ": 新鲜 snapshot 应在线");
-    assert.equal(converged?.workerVersion, expectedVersion, label + ": 新鲜 snapshot 应收敛到目标版本");
+    assert.equal(converged?.online, true, label + ": fresh snapshot online");
+    assert.equal(converged?.workerVersion, expectedVersion, label + ": fresh snapshot on the target version");
     return pid;
   } finally {
     clearTimeout(timer);
@@ -138,7 +168,7 @@ async function waitWorkerReconnect(prevPid, expectedVersion, trigger, label) {
   }
 }
 
-// 起一个运行中的任务并打个 marker，返回 {taskId, sessionId}
+/** Start a running task, type a marker, return its coordinates. */
 async function runTaskWithMarker(marker) {
   const repo = mkRepo();
   repos.push(repo);
@@ -159,124 +189,127 @@ async function runTaskWithMarker(marker) {
   return { device, taskId, sessionId, holderEpoch: attached.holderEpoch };
 }
 
-test("热升级成功：切到 good2、观察期通过提交，会话存活", async () => {
-  assert.equal(readActive(), "builtin", "初始版本 builtin");
-  const { device, sessionId, holderEpoch } = await runTaskWithMarker("UP_OK_MARK");
-  const pid1 = readWorkerPid();
+/** Switch to a stub that must never commit; the launcher rolls back to `activeBefore`. */
+async function expectRollback(version, label) {
+  const activeBefore = readActive();
+  const pidBefore = readRuntimePid();
+  const c = stack.makeClient();
+  await c.authSubscribe();
+  const rollbackPid = await waitRuntimeReconnect(
+    pidBefore,
+    activeBefore,
+    () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version }),
+    label,
+  );
+  assert.ok(rollbackPid, label + ": a healthy runtime is back online after the rollback");
+  assert.equal(readActive(), activeBefore, label + ": the candidate never reached runtime.active");
+  c.close();
+}
+
+test("switch succeeds: good2 passes probation, commits, sessions survive", async () => {
+  assert.equal(readActive(), "builtin", "initial version is builtin");
+  const { device, sessionId, holderEpoch: _holderEpoch } = await runTaskWithMarker("UP_OK_MARK");
+  const pid1 = readRuntimePid();
 
   const c = device.control;
-  const pid2 = await waitWorkerReconnect(
+  const pid2 = await waitRuntimeReconnect(
     pid1,
     "good2",
     () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "good2" }),
-    "升级 good2",
+    "switch good2",
   );
-  assert.ok(pid2, "升级后新 worker 起来且在线");
-  // 等观察期通过、提交为 good2（PROBATION_MS=1500）
+  assert.ok(pid2, "the new runtime is up and online");
   let committed = false;
   for (let i = 0; i < 40 && !committed; i++) {
     await sleep(250);
-    try { committed = readActive() === "good2"; } catch { /* 文件可能瞬时缺失 */ }
+    try { committed = readActive() === "good2"; } catch { /* marker being replaced */ }
   }
-  assert.ok(committed, "升级提交后 worker.active=good2");
+  assert.ok(committed, "after probation runtime.active=good2");
 
-  // 会话存活：新 worker 上建立更高 generation relay，sessiond holder 与 snapshot 均保留。
+  // Sessions survive the swap: the shell stayed in ptyd, the new runtime rebuilt it. Holders are
+  // reclaimed on reattach (accepted: every runtime update resets them).
   await device.openNative();
   const restored = await device.attach(sessionId);
-  assert.equal(restored.holderEpoch, holderEpoch);
-  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("UP_OK_MARK"), "升级后 snapshot 保留历史");
+  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("UP_OK_MARK"), "history kept across the switch");
   const from = device.mark();
   await device.input(sessionId, "echo AFTER_UPGRADE\r");
-  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_UPGRADE"), "升级后交互恢复", 10000, from);
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_UPGRADE"), "input works after the switch", 10000, from);
   device.close();
 });
 
-test("坏版本回滚：切到 bad2 崩溃循环 → 自动回滚，会话存活", async () => {
-  const activeBefore = readActive(); // 上一个测试后应为 good2
-  const { device, sessionId, holderEpoch } = await runTaskWithMarker("ROLLBACK_MARK");
-  const pidBefore = readWorkerPid();
+test("crash-loop rollback: bad2 exits at once → automatic rollback, sessions survive", async () => {
+  const activeBefore = readActive(); // good2 after the previous test
+  const { device, sessionId } = await runTaskWithMarker("ROLLBACK_MARK");
+  const pidBefore = readRuntimePid();
 
   const c = device.control;
-  // bad2 立即崩溃 → 达阈值回滚到 activeBefore → 新 good worker 起来（bad2 不写 pid，故 pid 变化=回滚后的好版本）
-  const rollbackPid = await waitWorkerReconnect(
+  const rollbackPid = await waitRuntimeReconnect(
     pidBefore,
     activeBefore,
     () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "bad2" }),
-    "bad2 回滚",
+    "bad2 rollback",
   );
-  assert.ok(rollbackPid, "回滚后新 worker 起来且在线");
-  // active 未变（bad2 从未通过观察期提交）
-  assert.equal(readActive(), activeBefore, "回滚后 worker.active 仍是升级前版本");
+  assert.ok(rollbackPid, "a healthy runtime is back after the rollback");
+  assert.equal(readActive(), activeBefore, "runtime.active unchanged: bad2 never committed");
 
   await device.openNative();
   const restored = await device.attach(sessionId);
-  assert.equal(restored.holderEpoch, holderEpoch);
-  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("ROLLBACK_MARK"), "回滚后 snapshot 保留历史");
+  assert.ok(utf8(restored.ansiSnapshot ?? new Uint8Array()).includes("ROLLBACK_MARK"), "history kept across the rollback");
   const from = device.mark();
   await device.input(sessionId, "echo AFTER_ROLLBACK\r");
-  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_ROLLBACK"), "回滚后交互恢复", 10000, from);
+  await device.waitFor((m) => m.case === "ptyOutput" && utf8(m.data).includes("AFTER_ROLLBACK"), "input works after the rollback", 10000, from);
   device.close();
 });
 
-test("伪健康版本回滚：进程存活但未接管 UDS/resync，绝不提交", async () => {
-  const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
-  const c = stack.makeClient();
-  await c.authSubscribe();
-  // 两轮观察期都没有 resync 健康信号，supervisor 主动终止候选并回滚到已提交版本。
-  const rollbackPid = await waitWorkerReconnect(
-    pidBefore,
-    activeBefore,
-    () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "noresync" }),
-    "noresync 回滚",
-  );
-  assert.ok(rollbackPid, "未接管 UDS 的存活进程被回滚，健康 worker 恢复在线");
-  assert.equal(readActive(), activeBefore, "只存活不 resync 的候选从未写入 worker.active");
-  c.close();
+test("pseudo-healthy rollback: alive but silent never commits", async () => {
+  await expectRollback("silent", "silent rollback");
 });
 
-test("伪健康版本回滚：只请求/读取 resync 但未应用回执，绝不提交", async () => {
-  const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
-  const c = stack.makeClient();
-  await c.authSubscribe();
-  const rollbackPid = await waitWorkerReconnect(
-    pidBefore,
-    activeBefore,
-    () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "requestOnly" }),
-    "requestOnly 回滚",
-  );
-  assert.ok(rollbackPid, "未确认应用 resync 的候选被回滚，健康 worker 恢复在线");
-  assert.equal(readActive(), activeBefore, "只把 resync.list 排入队列从未写入 worker.active");
-  c.close();
+test("pseudo-healthy rollback: connects to the channel but never reports ready, never commits", async () => {
+  await expectRollback("connectOnly", "connectOnly rollback");
 });
 
-test("伪健康版本回滚：盲回错误 nonce，绝不提交", async () => {
-  const activeBefore = readActive();
-  const pidBefore = readWorkerPid();
-  const c = stack.makeClient();
-  await c.authSubscribe();
-  const rollbackPid = await waitWorkerReconnect(
-    pidBefore,
-    activeBefore,
-    () => c.send({ case: "clientUpgradeDaemon", daemonId: stack.daemonId, version: "blindAck" }),
-    "blindAck 回滚",
-  );
-  assert.ok(rollbackPid, "未取得 challenge 的候选被回滚，健康 worker 恢复在线");
-  assert.equal(readActive(), activeBefore, "错误 nonce 从未写入 worker.active");
-  c.close();
+test("pseudo-healthy rollback: a blind ready with the wrong nonce never commits", async () => {
+  await expectRollback("wrongNonce", "wrongNonce rollback");
 });
 
-test("重启恢复安全回退：worker.active 指向伪健康版本时最终启用 builtin", async () => {
-  const pidBefore = readWorkerPid();
-  // 模拟 supervisor 在 marker 已更新后异常退出，而候选实际无法接管 UDS。
-  writeFileSync(join(stack.home, "worker.active"), "noresync");
-  const fallbackPid = await waitWorkerReconnect(
+test("pseudo-healthy rollback: the right nonce but a live ptyd session not taken over never commits", async () => {
+  // At least one terminal is live in ptyd from the earlier tests; make sure of it.
+  const { device } = await runTaskWithMarker("TAKEOVER_MARK");
+  device.close();
+  await expectRollback("noSessions", "noSessions rollback");
+});
+
+test("pseudo-healthy rollback: the right nonce but a gateway port nothing listens on never commits", async () => {
+  // Stop every terminal first so the session check passes with an empty report and only the
+  // gateway check can fail. A stop goes through the holder, so attach first; any failure to
+  // stop must surface here, not be swallowed into a misleading assertion later.
+  const device = await openNativeDevice(stack);
+  const catalog = await device.catalog();
+  for (const session of catalog.sessions) {
+    await device.attach(session.sessionId);
+    const ack = await device.stopSession(session.sessionId);
+    assert.equal(ack.ok, true, `stop of ${session.sessionId} must be acknowledged`);
+  }
+  for (let i = 0; i < 100; i += 1) {
+    if ((await device.catalog()).sessions.length === 0) break;
+    await sleep(100);
+  }
+  assert.equal((await device.catalog()).sessions.length, 0, "no live session remains");
+  device.close();
+  await expectRollback("noGateway", "noGateway rollback");
+});
+
+test("restart recovery: runtime.active pointing at a pseudo-healthy version ends on builtin", async () => {
+  const pidBefore = readRuntimePid();
+  // The launcher died after the marker was updated while the candidate can never pass the checks.
+  writeFileSync(join(stack.home, "runtime.active"), "silent");
+  const fallbackPid = await waitRuntimeReconnect(
     pidBefore,
     "builtin",
     () => stack.restartDaemon(),
-    "重启恢复回退",
+    "restart recovery fallback",
   );
-  assert.ok(fallbackPid, "恢复候选两轮健康复检失败后 builtin 重新在线");
-  assert.equal(readActive(), "builtin", "不可用持久化 active 已原子回退 builtin");
+  assert.ok(fallbackPid, "builtin is back online after the recovered candidate failed twice");
+  assert.equal(readActive(), "builtin", "the unusable persisted active was atomically reset to builtin");
 });

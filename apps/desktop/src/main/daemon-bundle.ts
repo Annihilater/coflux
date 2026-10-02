@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseSupervisorVersion } from "./daemon-files";
+import { parseRuntimeVersion } from "./daemon-files";
 import { CLAUDE_PLUGIN_MANIFEST, CLAUDE_PLUGIN_RESOURCE_DIR, DAEMON_BINARIES, DAEMON_RESOURCE_DIR, DAEMON_VERSION_FILE } from "./daemon-paths";
 
 /**
@@ -43,7 +43,7 @@ export function locateDaemonBundle(dir: string): DaemonBundle | null {
   if (!DAEMON_BINARIES.every((name) => isNonEmptyFile(join(dir, name)))) return null;
   let version: string | null = null;
   try {
-    version = parseSupervisorVersion(readFileSync(join(dir, DAEMON_VERSION_FILE), "utf8"));
+    version = parseRuntimeVersion(readFileSync(join(dir, DAEMON_VERSION_FILE), "utf8"));
   } catch {
     version = null;
   }

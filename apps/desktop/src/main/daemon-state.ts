@@ -1,6 +1,6 @@
 import type { DesktopDaemonBusy, DesktopDaemonFda, DesktopDaemonState, DesktopDaemonStatus } from "../shared/desktop-bridge";
 import type { PendingAuth } from "./daemon-files";
-import { bundledSupervisorIsNewer } from "./daemon-version";
+import { bundledRuntimeIsNewer } from "./daemon-version";
 
 /**
  * 本机 daemon 状态派生（plan 113）：把 ~/.coflux / LaunchAgent / launchctl 的事实合成渲染层消费的一个对象。
@@ -13,23 +13,23 @@ export type DaemonFacts = {
   bundle: { version: string | null } | null;
   installationExists: boolean;
   updateReadyOverride?: boolean;
-  supervisorExists: boolean;
-  workerExists: boolean;
+  launcherExists: boolean;
+  runtimeExists: boolean;
   /** credentials.json 存在 */
   registered: boolean;
   daemonId: string | null;
   pendingAuth: PendingAuth | null;
   running: boolean;
   fda: DesktopDaemonFda;
-  /** ~/.coflux/supervisor-version 原文；缺失 null */
+  /** ~/.coflux/runtime-version 原文；缺失 null */
   runningVersion: string | null;
   binDir: string;
   busy?: DesktopDaemonBusy;
   error?: { action: DesktopDaemonBusy; message: string };
 };
 
-export function deriveDaemonStatus(facts: Pick<DaemonFacts, "installationExists" | "supervisorExists" | "workerExists" | "registered" | "running"> & { updateReady: boolean }): DesktopDaemonStatus {
-  const installed = facts.installationExists && facts.supervisorExists && facts.workerExists;
+export function deriveDaemonStatus(facts: Pick<DaemonFacts, "installationExists" | "launcherExists" | "runtimeExists" | "registered" | "running"> & { updateReady: boolean }): DesktopDaemonStatus {
+  const installed = facts.installationExists && facts.launcherExists && facts.runtimeExists;
   if (!installed) return "not-installed";
   if (!facts.running) return "stopped";
   if (!facts.registered) return "pending-auth";
@@ -37,8 +37,8 @@ export function deriveDaemonStatus(facts: Pick<DaemonFacts, "installationExists"
 }
 
 export function deriveDaemonState(facts: DaemonFacts): DesktopDaemonState {
-  const installed = facts.installationExists && facts.supervisorExists && facts.workerExists;
-  const updateReady = facts.updateReadyOverride ?? (facts.bundle !== null && bundledSupervisorIsNewer(facts.bundle.version, facts.runningVersion));
+  const installed = facts.installationExists && facts.launcherExists && facts.runtimeExists;
+  const updateReady = facts.updateReadyOverride ?? (facts.bundle !== null && bundledRuntimeIsNewer(facts.bundle.version, facts.runningVersion));
   const state: DesktopDaemonState = {
     status: deriveDaemonStatus({ ...facts, updateReady }),
     bundled: facts.bundle !== null,

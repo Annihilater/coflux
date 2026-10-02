@@ -1,20 +1,19 @@
 # coflux architecture
 
-> Status: local-first architecture is implemented. Native remote networking now uses the pinned Go Tailcat/Tailscale companion with self-hosted stock DERP; custom relay and WebRTC are retired. `coflux-ptyd` owns the PTYs; supervisor/sessiond remains the sole authority for VT, history, holders, and sequences and rebuilds it from ptyd when replaced. The center owns accounts, devices, orchestration, native rendezvous, and bounded checkpoints. This describes the source architecture, not a claim of production deployment.
+> Status: local-first architecture is implemented. Native remote networking now uses the pinned Go Tailcat/Tailscale companion with self-hosted stock DERP; custom relay and WebRTC are retired. `coflux-ptyd` owns the PTYs; sessiond inside `coflux-runtime` remains the sole authority for VT, history, holders, and sequences and rebuilds it from ptyd when the runtime is replaced; `coflux-launcher` owns the runtime version and its probation (plan 20261002-runtime-launcher-merge). The center owns accounts, devices, orchestration, native rendezvous, and bounded checkpoints. This describes the source architecture, not a claim of production deployment.
 
 ## 1. Product model
 
 coflux runs daemons on users' nodes and drives terminal programs such as Claude Code, Codex CLI, and Vim in local PTYs. The Electron desktop client, `apps/desktop`, reaches remote daemons through the center or connects directly when client and daemon share a machine:
 
 ```text
-Desktop main ── control WS ── Server ── control WS ── Worker
-  │                           │                       │
-  │                       Postgres                    │ UDS
-  │                                                   ▼
+Desktop main ── control WS ── Server ── control WS ── Runtime (sessiond + core)
+  │                           │                          │ ptyd protocol
+  │                       Postgres                       ▼
+  │                                                   coflux-ptyd (PTYs)
   ├─ native helper ── Tailcat direct / stock DERP ── serving helper
-  │                                                   │
-  └─ same-machine loopback gateway ──────────────── Worker ── Supervisor
-                                                               └─ PTY + VT + history
+  │                                                      │
+  └─ same-machine loopback gateway ──────────────── Runtime ◄── Launcher (versions, probation)
 ```
 
 Daemons connect outbound to central control. Tailcat handles native peer
@@ -32,15 +31,15 @@ Device-host entry points                  Unified operations tool
               | start/stop/update                      | local channel / account API
               v                                        v
 +---------------------------------------------------------------------+
-| Runtime: Worker (network/business) <-> Supervisor (owns PTYs)         |
+| ptyd (owns PTYs) <- runtime (sessiond + network/business) <- launcher |
 +---------------------------------------------------------------------+
 ```
 
-`cofluxd` manages only headless device hosting; it no longer accepts login, terminal, or workspace operations. `coflux` is the unified business entry point, including the command injected into desktop terminals. Cross-device capabilities use the same account permissions as desktop. The npm `cofluxd` package ships both entry points; desktop bundles Rust `coflux` without Node dependencies. Desktop, npm packages, and bundled components share one product version and `vX.Y.Z` tag. Updating the operations tool leaves running terminals intact. Updating the supervisor can be deferred and, once applied, keeps running terminals: PTYs live in `coflux-ptyd`, and the replacement supervisor rebuilds its screens and sequences from there. Only an update of ptyd itself ends terminals.
+`cofluxd` manages only headless device hosting; it no longer accepts login, terminal, or workspace operations. `coflux` is the unified business entry point, including the command injected into desktop terminals. Cross-device capabilities use the same account permissions as desktop. The npm `cofluxd` package ships both entry points; desktop bundles Rust `coflux` without Node dependencies. Desktop, npm packages, and bundled components share one product version and `vX.Y.Z` tag. Updating the operations tool leaves running terminals intact. Updating the runtime keeps running terminals: PTYs live in `coflux-ptyd`, and the replacement runtime rebuilds its screens and sequences from there, with a brief pause; the launcher observes the candidate and rolls it back when it cannot pass. Only an update of ptyd itself ends terminals.
 
 Desktop serves humans and CLI serves agents, operating the same account's workspaces and terminals. CLI account operations enter existing Hub account operations through `/api/client/login` and `/api/client/command`. They share task transactions, prepared execution, terminal I/O, and human-priority rules. CLI is the unified agent entry point; MCP has been removed. Desktop live views continue using DeviceRouter; CLI does not introduce another PTY authority.
 
-The main app directly starts managed local processes. Content-addressed runtime directories under `COFLUX_HOME/desktop-runtimes/` preserve files used by live processes when the `.app` updates. `runtime.sock` exposes versions, instance IDs, live-session queries, and stop; `runtime.lock` prevents duplicate startup. Stop requests include a random instance identifier to avoid stopping a replacement process after a confirmation delay. The app owns `client.sock`, allowing CLI under the same OS user to reuse login state without returning session credentials.
+The main app directly starts ptyd and the launcher. Content-addressed runtime directories under `COFLUX_HOME/desktop-runtimes/` preserve files used by live processes when the `.app` updates. The launcher serves `runtime.sock` (versions, instance IDs, live-session queries, stop, leave, switch) across runtime swaps; `runtime.lock` prevents duplicate startup. After an app update the app asks the launcher to switch to the bundled runtime; a changed launcher is replaced through `leave` + start, terminals kept. Stop requests include a random instance identifier to avoid stopping a replacement process after a confirmation delay. The app owns `client.sock`, allowing CLI under the same OS user to reuse login state without returning session credentials.
 
 Closing the window hides it. Confirmed quit stops the local runtime; update restart preserves it. Logout first stops local work, then saves an encrypted cleanup record, removes device credentials and current terminal temporary data, and, once online, deletes this device's cloud terminal records and revokes the logged-out client session. Project directories and other devices are excluded. Development uses separate runtime directories; old LaunchAgent migration requires an explicit prompt. Permission guidance points to the main app. TCC ownership and inheritance across updates require system acceptance with production signatures, not inference from parent/child process relationships.
 
@@ -48,9 +47,9 @@ Closing the window hides it. Confirmed quit stops the local runtime; update rest
 
 `coflux executor run --prompt=… [--write]` hands one bounded sub-task to a small agent built into coflux. The whole loop is local; nothing traverses the center.
 
-**The executor process lives in the desktop app, not in the daemon**, for three reasons that are unlikely to change. Desktop packaging disables the `runAsNode` fuse as a security baseline (flipped before signing, and Gatekeeper keeps it flipped), so reusing the Electron binary as Node is not available and a daemon-hosted runner would mean shipping and notarizing a second Node. Worker hot upgrades kill the worker outright (see [docs/hot-upgrade-design.md](hot-upgrade-design.md)), so a multi-minute child process hung underneath it is orphaned by design, while hanging it under the supervisor would put the fastest-moving code inside the component that upgrades least. Provider credentials live in desktop safeStorage, which the daemon cannot read. The cost is accepted and explicit: **the executor serves only the machine the app is on, and a run ends when that app's local runtime stops** — always with a definite terminal state, so the polling CLI never hangs.
+**The executor process lives in the desktop app, not in the daemon**, for three reasons that are unlikely to change. Desktop packaging disables the `runAsNode` fuse as a security baseline (flipped before signing, and Gatekeeper keeps it flipped), so reusing the Electron binary as Node is not available and a daemon-hosted runner would mean shipping and notarizing a second Node. Runtime updates kill the runtime outright (see [docs/hot-upgrade-design.md](hot-upgrade-design.md)), so a multi-minute child process hung underneath it is orphaned by design, while hanging it under the launcher would put the fastest-moving code inside the component that upgrades least. Provider credentials live in desktop safeStorage, which the daemon cannot read. The cost is accepted and explicit: **the executor serves only the machine the app is on, and a run ends when that app's local runtime stops** — always with a definite terminal state, so the polling CLI never hangs.
 
-The transport reuses existing capabilities rather than inventing a reverse RPC. The daemon **pushes** `ExecutorAssign` down an already-connected channel, exactly like `pty_output`, and desktop answers with ordinary upstream `ExecutorReport` messages; no message in this path needs a paired response. The daemon accepts executor frames only from a loopback channel (`Principal::Local`), so a remote client holding SESSION_CONTROL still cannot claim this machine's work. **The job table and the write lock are true in the desktop main process.** Worker memory is lost on hot upgrade, so the daemon keeps only the state and terminal outcomes the CLI polls; it neither schedules nor re-dispatches. After a disconnect the host re-registers with a reconcile list and re-reports each run; anything the daemon is not told about becomes `unknown` and is **never re-run automatically** — an expired lease does not prove the previous writer stopped.
+The transport reuses existing capabilities rather than inventing a reverse RPC. The daemon **pushes** `ExecutorAssign` down an already-connected channel, exactly like `pty_output`, and desktop answers with ordinary upstream `ExecutorReport` messages; no message in this path needs a paired response. The daemon accepts executor frames only from a loopback channel (`Principal::Local`), so a remote client holding SESSION_CONTROL still cannot claim this machine's work. **The job table and the write lock are true in the desktop main process.** Runtime memory is lost on an update, so the daemon keeps only the state and terminal outcomes the CLI polls; it neither schedules nor re-dispatches. After a disconnect the host re-registers with a reconcile list and re-reports each run; anything the daemon is not told about becomes `unknown` and is **never re-run automatically** — an expired lease does not prove the previous writer stopped.
 
 Sandboxing is two complementary layers. Every bash command is wrapped in `sandbox-exec`: nothing outside the workspace is writable, git metadata is read-only (so the executor cannot commit), nested worktrees are carved out one by one, and a single `(deny network*)` rule closes loopback TCP and unix sockets alike. Structured file tools run inside the runner process, out of Seatbelt's reach, and are checked on each `tool_call` by an inline extension. The network rule closes an entire class of escape rather than one hole: the daemon's `/agent` endpoint identifies callers by a self-reported pid, so any tool process able to reach loopback could have the unconstrained daemon execute on its behalf through `terminal.new`. **The tier is "against mistakes, not against adversaries"** — Mach/XPC and Apple Events are not closed off, and this must not be described as full isolation. It is the same trust model as the rest of the product (see section 10).
 
@@ -58,9 +57,11 @@ Sandboxing is two complementary layers. Every bash command is wrapped in `sandbo
 
 | State | Sole authority | Other layers |
 |---|---|---|
-| PTY processes, VT, history, output sequence | Supervisor/sessiond | Worker forwards DeviceEnvelope; server receives no raw PTY |
-| Holder, holder epoch, input cursor | Supervisor/sessiond | Client retains unacknowledged input; transport is replaceable |
-| Device RPC and mutation deduplication | Current worker runtime / sessiond within current supervisor runtime | Local and native channels share logical client and request/operation IDs; lifecycle limits in 5.3 |
+| PTY processes | ptyd | The runtime rebuilds VT/history/sequence from ptyd's ring and checkpoint blob when replaced |
+| VT, history, output sequence | sessiond (in the runtime) | The runtime core forwards DeviceEnvelope; server receives no raw PTY |
+| Holder, holder epoch, input cursor | sessiond (in the runtime) | Client retains unacknowledged input; transport is replaceable; holders reset on a runtime update |
+| Runtime version, probation, rollback | Launcher | Remote switches are floor-bound; the desktop's switches are administrator actions |
+| Device RPC and mutation deduplication | Current runtime process | Local and native channels share logical client and request/operation IDs; lifecycle limits in 5.3 |
 | Accounts, devices, projects, workspaces, tasks | Server/Postgres | Daemon catalogs reconcile local facts without inventing exits |
 | Offline-visible screen | Latest server checkpoint | Display only; cannot decide holder or replace initial live snapshot |
 | Browser terminal rendering | xterm.js | Apply contiguous output deltas after attach snapshot |
@@ -81,11 +82,11 @@ tmux's ability to restore a view at any time does not restore processes; it keep
 3. Client detach, SSH disconnection, and terminal closure leave the server/PTYS alive. Reattach sends current screen state followed by deltas, without central replay of all bytes.
 4. If the tmux server or OS actually exits, PTYs/children disappear. Plugins such as tmux-resurrect can save layouts, commands, and some buffers, but cannot revive arbitrary process memory.
 
-coflux maps `supervisor/sessiond` to the tmux server and the browser to an attach client:
+coflux maps sessiond (in the runtime, backed by ptyd) to the tmux server and the browser to an attach client:
 
 | Capability | tmux | coflux |
 |---|---|---|
-| Session authority | Local tmux server | Local supervisor/sessiond |
+| Session authority | Local tmux server | Local sessiond (runtime) over ptyd |
 | Local attach | Unix socket | Loopback WebSocket + DeviceEnvelope |
 | Remote attach | Usually SSH first | Central grants + native Tailcat transport, no application listener ports |
 | Reconnection view | tmux grid/history | sessiond ANSI snapshot + sequence deltas |
@@ -93,25 +94,21 @@ coflux maps `supervisor/sessiond` to the tmux server and the browser to an attac
 | Central dependency | None | Initial login/pairing, cold start, orchestration; unnecessary for cached-direct hot path |
 | Survival after server/OS restart | Not guaranteed | Not guaranteed |
 
-The product boundary: a loaded, paired page can still catalog, attach, snapshot, input, resize, and stop live sessions after the center fully stops. This does not promise refresh/cold-start support while the center is offline or live-process recovery after ptyd/OS restart (a supervisor restart keeps live processes, screens and sequences).
+The product boundary: a loaded, paired page can still catalog, attach, snapshot, input, resize, and stop live sessions after the center fully stops. This does not promise refresh/cold-start support while the center is offline or live-process recovery after ptyd/OS restart (a runtime or launcher restart keeps live processes, screens and sequences).
 
 ## 4. Processes and local IPC
 
-The daemon core uses Rust without a Node runtime, split into three authority-owning processes:
+The daemon core uses Rust without a Node runtime, split into three authority-owning processes (plan 20261002-runtime-launcher-merge):
 
-- `coflux-ptyd`: long-lived, near-zero change rate, lifetime independent of the supervisor's. It owns the PTYs completely: `openpty`, fork/exec of a fully resolved spec (argv, env map, cwd, rows, cols — it interprets none of it), the read loop into a per-session 4 MiB output ring indexed by byte offset, input writes with per-`(session, client)` de-duplication cursors, `TIOCSWINSZ` with a resize log, an opaque checkpoint blob, and `waitpid`. It never overwrites a byte at or past the last checkpoint offset and stops reading instead. It serves a versioned UDS protocol with a capability handshake (see [hot-upgrade design](hot-upgrade-design.md) §1) and a read-only status the desktop uses while the supervisor is absent. Started only by the lifecycle owner (desktop app or the `cofluxd`-generated service), never by the supervisor. Everything that changes per release — `spawn_env`, shell integration, secrets, sessiond, DeviceEnvelope — stays out of it.
-- `coflux-supervisor`: replaceable at will and crash-recoverable; owns VT/history, holder/sequence, and exit tombstones, and rebuilds them from ptyd on start (checkpoint blob, ring replay, resize log, cursors) before starting the worker; manages worker versions and observation-period rollback. It assembles each PTY environment: `COFLUX_*` ownership IDs, `<COFLUX_HOME>/bin` first in PATH, and shell integration (plan 115). It injects a bundled rc by shell: zsh via `ZDOTDIR`, bash via `--init-file`, fish via vendor conf in `XDG_DATA_DIRS`; unknown shells receive none. After the original user rc chain runs unchanged, it defines a `claude` function translating the injector's `COFLUX_CLAUDE_PLUGIN_DIR` into `claude --plugin-dir <dir>`. On macOS the injector is the Coflux main app. An empty variable or missing directory falls back to the original `claude` behavior.
-- `coflux-worker`: frequently hot-upgraded; handles central WS, loopback gateway, local authorization, git/exec/fs, Device RPC, native helper ownership, and checkpoints.
+- `coflux-ptyd`: long-lived, near-zero change rate, lifetime independent of the others. It owns the PTYs completely: `openpty`, fork/exec of a fully resolved spec (argv, env map, cwd, rows, cols — it interprets none of it), the read loop into a per-session 4 MiB output ring indexed by byte offset, input writes with per-`(session, client)` de-duplication cursors, `TIOCSWINSZ` with a resize log, an opaque checkpoint blob, and `waitpid`. It never overwrites a byte at or past the last checkpoint offset and stops reading instead. It serves a versioned UDS protocol with a capability handshake (see [hot-upgrade design](hot-upgrade-design.md) §1) and a read-only status the desktop and the launcher use. Started only by the lifecycle owner (desktop app or the `cofluxd`-generated service), never by the launcher or the runtime. Everything that changes per release — `spawn_env`, shell integration, secrets, sessiond, DeviceEnvelope — stays out of it.
+- `coflux-launcher`: small and rarely changing. Owns the runtime version pointer (`runtime.active`) and the remote release floor (`runtime.release-floor`), spawns the runtime with a per-spawn nonce, serves the private `launcher.sock`, and decides probation from its own checks: the candidate's nonce echo, ptyd's own session list against the set the candidate reports as rebuilt, and a TCP connect to the gateway port it reports. It commits after the observation period, rolls back a crash-looping or pseudo-healthy candidate, falls back to the builtin runtime next to it, and serves `runtime.sock` / `runtime.lock` for the desktop app. On `stop` it asks ptyd to end every shell; on `leave` (or SIGTERM) it exits with the shells kept.
+- `coflux-runtime`: the unit that gets updated. Holds sessiond — VT/history, holder/sequence, exit tombstones, rebuilt from ptyd on start (checkpoint blob, pipelined ring replay, resize log, cursors) before the gateway or the centre is served — and assembles each PTY environment: `COFLUX_*` ownership IDs, `<COFLUX_HOME>/bin` first in PATH, and shell integration (plan 115; zsh via `ZDOTDIR`, bash via `--init-file`, fish via vendor conf in `XDG_DATA_DIRS`). It also runs the central WS, loopback gateway, local authorization, git/exec/fs, Device RPC, native helper ownership, checkpoints, the executor host, and release download/verification; it reports `ready` to the launcher and asks it to switch after installing a verified release.
 
-A separate Go `coflux-transport` executable embeds pinned Tailcat/Tailscale networking. Release artifacts and Desktop bundles include this companion; paired hot updates verify and publish worker/helper together, then retain the previous immutable pair for rollback. Released workers validate the local helper handshake before probation succeeds. Networking starts automatically after control authentication. The helper owns no PTYs or business authority, needs no installed Go runtime, and communicates only through inherited stdio with its worker or Electron-main owner. See [Native Tailcat transport](tailcat-transport.md) for the pinned build, bootstrap requirement, and delivery contract.
+A separate Go `coflux-transport` executable embeds pinned Tailcat/Tailscale networking. Release artifacts and Desktop bundles include this companion; paired updates verify and publish runtime/helper together, then retain the previous immutable pair for rollback. Released runtimes validate the local helper handshake before probation succeeds. Networking starts automatically after control authentication. The helper owns no PTYs or business authority, needs no installed Go runtime, and communicates only through inherited stdio with its runtime or Electron-main owner. See [Native Tailcat transport](tailcat-transport.md) for the pinned build, bootstrap requirement, and delivery contract.
 
-Supervisor and worker communicate over a mode-`0600` UDS. Internal frame kinds:
+Inside the runtime, sessiond and the core exchange length-prefixed records over bounded in-process channels (no UDS): kind 1 is a session-dirty notification, kinds 2/3 stay reserved and rejected, kind 5 is a transport-neutral DeviceEnvelope. Host capabilities the runtime advertises to the centre (`runtime_launcher_v1`, `transport_pair_v1`, `desktop_managed`) come from launcher-provided environment, never from its own code.
 
-- Kind 1: session-dirty notification, containing only session ID, never raw PTY.
-- Kinds 2/3: removed input/replay numbers, permanently reserved and rejected by decoders.
-- Kind 5: transport-neutral DeviceEnvelope.
-
-Worker restart leaves supervisor/PTYS intact. The new worker restores transports and derived caches through resync/catalog.
+A runtime restart leaves ptyd intact. The new runtime restores sessiond from ptyd, then transports and derived caches through resync/catalog.
 
 ## 5. DeviceTransport
 
@@ -130,7 +127,7 @@ provider retains identity and grants; the gateway validates signatures, nonces,
 expiry, and exact Origins. Desktop main uses `https://desktop.coflux.dev` for
 both control and gateway handshakes. Cached local session read/control can
 survive center outages; RPC/lifecycle requires an online lease. Supervisor PTYs
-remain independent of worker and transport replacement.
+remain independent of runtime and transport replacement.
 
 ### 5.2 Native remote channels and self-hosted DERP
 
@@ -166,8 +163,8 @@ Desktop client.
 
 - Input includes `holderEpoch + inputSeq`. Sessiond applies it sequentially, returns cumulative ACKs for duplicates, and never skips gaps.
 - Client clears input only through cumulative `PtyInputAck.appliedThroughSeq`. After lost ACKs, it resends in original order over the replacement transport.
-- Deduplication is not generic exactly-once across arbitrary failures. Its boundary is the ledger-owning authority: sessiond deduplicates PTY input and session create/stop across local/native and worker replacement, but not supervisor/OS restart. Other worker mutations—project/worktree/exec/fs—deduplicate only within the current worker runtime. After replacement, the same operation ID cannot be relied upon to prevent repeated external effects.
-- `execRun` may have started or completed an external command before a worker crash prevented result recording. The outcome is unknown: callers must not automatically retry non-idempotent commands or claim exactly-once execution.
+- Deduplication is not generic exactly-once across arbitrary failures. Its boundary is the ledger-owning authority: sessiond deduplicates PTY input across local/native channels and across a runtime replacement (ptyd keeps the cursors), while the session create/stop ledger and every other mutation—project/worktree/exec/fs—deduplicate only within the current runtime process and reset on a runtime update (accepted, plan 20261002-runtime-launcher-merge). After replacement, the same operation ID cannot be relied upon to prevent repeated external effects.
+- `execRun` may have started or completed an external command before a runtime crash prevented result recording. The outcome is unknown: callers must not automatically retry non-idempotent commands or claim exactly-once execution.
 - `fs.write` to a stable path fully overwrites contents. Retrying identical path/data after an unknown outcome converges to the same content: outcome idempotency, not exactly one execution.
 - Worktree operations can define dedicated probing/recovery using stable paths and Git state. Such semantics belong to each operation, not the generic ledger.
 - Output has monotonic sequence numbers. Gaps trigger reattach/snapshot, never silent concatenation across missing output.
@@ -241,14 +238,14 @@ Future server-driven daemon actions should use prepare + Execute + reconciliatio
 | Failure | Behavior |
 |---|---|
 | Brief browser `/client` control outage | Cached direct continues. Existing native remote session lanes survive up to 15 seconds and reuse same-credential `authOk`; online leases, elevated lanes, new rendezvous, and business orchestration stop immediately. Timeout/hard revoke closes remote lanes. |
-| Worker `/daemon` control outage | Close native remote channels immediately; supervisor/PTYS survive and rebuild after control recovery. |
+| Runtime `/daemon` control outage | Close native remote channels immediately; ptyd/PTYs survive and channels rebuild after control recovery. |
 | Direct failure/permission denial | Use native remote transport while retrying local loopback; do not misreport the daemon offline. |
 | Native peer traversal failure/interruption | Upstream Tailcat uses DERP fallback; the owner monitors application liveness and reconnects with bounded backoff. |
 | Relay/center failure | Established loopback direct continues catalog/attach/input/resize/stop. No new native remote channels while center is offline because rendezvous/signaling require it. Existing remote channels follow the two independent control-connection rules above. |
-| Worker restart | Supervisor/PTYS survive; increment generation and rebuild channel/catalog. |
+| Runtime restart or update | ptyd/PTYs survive; sessiond is rebuilt from ptyd (brief pause, holders reset); generation increments and channels/catalog rebuild. |
 | Server restart | Reconcile Postgres metadata with daemon catalogs/checkpoints; preserve unknown orphans. |
 | Slow center | Relay/checkpoints may lag or be discarded; local PTYS/direct channels continue. |
-| Supervisor/OS restart | Live-process recovery is not guaranteed and is outside V1. |
+| ptyd/OS restart | Live-process recovery is not guaranteed and is outside V1. |
 
 Task creation and first session creation require central orchestration. Local stop is a sessiond fact; central task deletion is separate business metadata. Stop succeeds with the center unreachable, and exit tombstones reconcile after reconnect. Permanent task deletion is a separate action after control-plane recovery.
 
@@ -331,9 +328,10 @@ packages/client      Control store + DeviceRouter
 packages/protocol    TS protobuf bindings
 packages/swift-client Swift protobuf, client core, Apple-platform transports
 packages/cli         Headless cofluxd host management + coflux account/local/remote operations
-crates/protocol      Rust protobuf and UDS frames/IPC
-crates/supervisor    PTY/sessiond authority
-crates/worker        Gateway, native helper ownership, RPC, checkpoints, upgrade adapter
+crates/protocol      Rust protobuf, record framing, ptyd and launcher channel contracts
+crates/ptyd          PTY custody
+crates/launcher      Runtime version pointer, probation, rollback, runtime.sock
+crates/runtime       sessiond + gateway, native helper ownership, RPC, checkpoints, release download/verify
 transport/tailcat    Pinned native helper; self-hosted stock DERP supplies fallback
 tests                Real-process WebSocket black-box harness
 ```

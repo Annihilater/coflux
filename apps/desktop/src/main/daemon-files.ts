@@ -30,7 +30,7 @@ export function launchAgentPlist(paths: DaemonHomePaths, options: { claudePlugin
 <dict>
   <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>${paths.supervisorBin}</string></array>
+  <array><string>${paths.launcherBin}</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>COFLUX_HOME</key><string>${paths.home}</string>${pluginEntry}</dict>
   <key>RunAtLoad</key><true/>
@@ -51,7 +51,7 @@ export function launchAgentPlist(paths: DaemonHomePaths, options: { claudePlugin
  * 2. 本机**已接入**（plist 已在磁盘上）：未接入的机器不凭空创建 plist。
  * 3. 内容确实不同。
  * 重写只动文件，绝不 launchctl reload——那会结束本机所有终端，与 plan 113「从不自动重启」矛盾；
- * 新值在下一次 supervisor 启动（面板点「重启」、开机、「重启并更新」）时生效。
+ * 新值在下一次 launcher 启动（面板点「重启」、开机、「重启并更新」）时生效。
  */
 export function shouldRewritePlist(existing: string | null, next: string, claudePluginDir: string | null | undefined): boolean {
   if (!claudePluginDir?.trim()) return false;
@@ -78,7 +78,7 @@ export function daemonSettingsJson(settings: DaemonSettings): string {
 
 export type PendingAuth = { token: string; expiresAt?: number };
 
-/** pending-auth.json（worker 落盘：{ url, expiresAt }）→ token；形状不对或 url 不是授权链接返回 null。 */
+/** pending-auth.json（runtime 落盘：{ url, expiresAt }）→ token；形状不对或 url 不是授权链接返回 null。 */
 export function parsePendingAuth(text: string | null): PendingAuth | null {
   if (!text) return null;
   try {
@@ -113,8 +113,8 @@ export function parseFdaStatus(text: string | null): DesktopDaemonFda {
   return value === "granted" || value === "denied" ? value : "unknown";
 }
 
-/** supervisor-version：原文去掉首尾空白；缺失 / 空 → null。 */
-export function parseSupervisorVersion(text: string | null): string | null {
+/** runtime-version：原文去掉首尾空白；缺失 / 空 → null。 */
+export function parseRuntimeVersion(text: string | null): string | null {
   const value = text?.trim();
   return value ? value : null;
 }

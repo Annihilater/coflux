@@ -157,14 +157,14 @@ jobs:
 
       - name: 构建
         env:
-          # supervisor 编译期版本注入（见 crates/supervisor/src/main.rs::SUPERVISOR_VERSION、build.rs）。
+          # launcher / runtime compile-time version (crates/launcher and crates/runtime main.rs, build.rs).
           COFLUX_RELEASE_VERSION: ${{ github.ref_name }}
           RUSTFLAGS: -D warnings
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-cli -p coflux-ptyd
+            cross build --release --target ${{ matrix.target }} -p coflux-launcher -p coflux-runtime -p coflux-cli -p coflux-ptyd
           else
-            cargo build --release --target ${{ matrix.target }} -p coflux-supervisor -p coflux-worker -p coflux-cli -p coflux-ptyd
+            cargo build --release --target ${{ matrix.target }} -p coflux-launcher -p coflux-runtime -p coflux-cli -p coflux-ptyd
           fi
 
       # macOS 专属：cargo 交叉/原生编译产物只有 ad-hoc 签名，launchd 直接 spawn 的新鲜下载二进制
@@ -204,7 +204,7 @@ jobs:
 
           SIGN_ID="Developer ID Application: Shuaiqi Wang (${APPLE_TEAM_ID})"
           bin="target/${{ matrix.target }}/release"
-          for name in coflux-supervisor coflux-worker coflux coflux-transport coflux-ptyd; do
+          for name in coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd; do
             codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$bin/$name"
             ditto -c -k --keepParent "$bin/$name" "$RUNNER_TEMP/$name.zip"
             SUBMIT_OUT=$(xcrun notarytool submit "$RUNNER_TEMP/$name.zip" \
@@ -224,17 +224,17 @@ jobs:
         run: |
           mkdir -p dist
           bin="target/${{ matrix.target }}/release"
-          # 原始二进制使用稳定资源名；cofluxd 先解析精确 tag，再按该 tag 的 manifest 下载并验签。
-          # worker 另保留 supervisor 热升级所需的原始二进制签名。
-          cp "$bin/coflux-supervisor" "dist/coflux-supervisor-${{ matrix.target }}"
-          cp "$bin/coflux-worker" "dist/coflux-worker-${{ matrix.target }}"
+          # Raw binaries use stable asset names; cofluxd resolves the exact tag, then downloads and
+          # verifies by that tag's manifest (schema 3: runtime + launcher, no raw signatures).
+          cp "$bin/coflux-launcher" "dist/coflux-launcher-${{ matrix.target }}"
+          cp "$bin/coflux-runtime" "dist/coflux-runtime-${{ matrix.target }}"
           cp "$bin/coflux-transport" "dist/coflux-transport-${{ matrix.target }}"
           cp "$bin/TRANSPORT-NOTICES.txt" "dist/coflux-transport-NOTICES-${{ matrix.target }}.txt"
           cp "$bin/TRANSPORT-MODULES.txt" "dist/coflux-transport-MODULES-${{ matrix.target }}.txt"
           cp "$bin/coflux" "dist/coflux-cli-${{ matrix.target }}"
           cp "$bin/coflux-ptyd" "dist/coflux-ptyd-${{ matrix.target }}"
-          # tar.gz contains supervisor, worker and the native CLI for manual installation
-          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-supervisor coflux-worker coflux coflux-transport coflux-ptyd TRANSPORT-NOTICES.txt TRANSPORT-MODULES.txt
+          # tar.gz contains launcher, runtime, ptyd, transport and the native CLI for manual installation
+          tar -C "$bin" -czf "dist/coflux-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd TRANSPORT-NOTICES.txt TRANSPORT-MODULES.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

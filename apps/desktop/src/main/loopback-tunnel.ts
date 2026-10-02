@@ -16,7 +16,7 @@ import {
  * every tunnel connection of every workspace on that device, multiplexed by connection id. Each
  * connection is a `Duplex` the browser proxy splices a Chromium socket onto.
  *
- * Flow control mirrors the worker (`crates/worker/src/device_loopback.rs`), counted in data frames:
+ * Flow control mirrors the worker (`crates/runtime/src/device_loopback.rs`), counted in data frames:
  * - device → here: the worker keeps at most 8 unacknowledged frames per connection and 48 per lane.
  *   Every data frame is acknowledged exactly once — when it was handed on (pushed below the readable
  *   high-water mark, or later when the consumer drains), or immediately when its connection is gone

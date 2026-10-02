@@ -50,7 +50,7 @@ test("ptyd 只宣告 v1 的一部分 op：supervisor 仍能建会话、写输入
   // 没有 blob / cursors 也能接回：只回放 ring（退化路径），shell 不变。
   const catalogBefore = await device.catalog();
   const before = catalogBefore.sessions.find((session) => session.sessionId === sessionId);
-  await stack.replaceSupervisor();
+  await stack.replaceLauncher();
   await stack.waitDaemonOnline(30000);
   await device.openNative();
   const catalogAfter = await device.catalog();

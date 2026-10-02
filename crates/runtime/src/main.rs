@@ -1,8 +1,13 @@
-//! worker —— 承载除 PTY 外的全部：连服务器(WS) + 认证 + git + exec + fs + 编排。
+//! coflux-runtime: one process that holds sessiond (VT/history/holder/sequence authority, PTY
+//! environment assembly, shell integration) and everything the former worker did (centre WS,
+//! authentication, git/exec/fs, local gateway, native channels, executor host). PTYs live in
+//! `coflux-ptyd`; `coflux-launcher` spawns this process, runs its probation and rolls it back
+//! (plan 20261002-runtime-launcher-merge).
 //!
-//! PTY 操作经 UDS 转给 supervisor。两级 resync：先拿到 supervisor 存活快照(supSynced)，
-//! 再向 server resync（否则空列表 resync 会让 server 误标 exited，随后真 resync 反触发 session.close 杀 PTY）。
-//! 全 Rust 化后整个 daemon 无 node 运行时依赖。
+//! Startup order matters: connect to ptyd, rebuild every session it holds, and only then start
+//! the gateway and the centre connection, so no client ever attaches to half-rebuilt state. The
+//! two-level resync stays: the core takes sessiond's live snapshot first and reports to the
+//! centre second (an empty resync would make the centre mark sessions exited).
 
 mod agent_ctl;
 mod agent_socket;
@@ -16,22 +21,30 @@ mod device;
 mod device_loopback;
 mod executor_host;
 mod executor_settings;
+mod fda;
 mod file_index;
 mod gateway;
 mod git;
 mod handle;
 mod hook;
+mod launcher_link;
 mod local_auth;
 mod observed;
 mod ops;
 mod ports;
+mod ptyd_reader;
 mod screen;
 mod secret;
 mod session_ledger;
+mod sessiond;
+mod sessiond_ipc;
+mod sessions;
+mod shell_integration;
 mod tailcat;
 mod tailcat_auth;
 mod tailcat_ipc;
 mod tunnel;
+mod upgrade;
 mod workspace_match;
 mod worktree_locate;
 
@@ -40,24 +53,67 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use coflux_protocol::logln;
-use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
-use coflux_protocol::{
-    decode_frame, is_frame, wire, write_record, DataFrame, RecordParser, Settings,
-    SupervisorToWorker, WorkerToSupervisor, LOCAL_GATEWAY_PORT, SUPERVISOR_SOCK_ENV,
-    SUPERVISOR_VERSION_ENV, WORKER_VERSION_ENV,
+use coflux_protocol::launcher::{
+    LAUNCHER_ENV, LAUNCHER_VERSION_ENV, RUNTIME_LAUNCHER_CAPABILITY, RUNTIME_VERSION_ENV,
 };
+use coflux_protocol::logln;
+use coflux_protocol::ptyd::{PTYD_PROTOCOL_VERSION, PTYD_SOCK_ENV, PTYD_SOCK_NAME};
+use coflux_protocol::wire::{daemon_to_server, server_to_daemon};
+use coflux_protocol::{wire, write_record, RecordParser, Settings, LOCAL_GATEWAY_PORT};
+use coflux_ptyd::PtydClient;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use conn_state::ConnState;
 use creds::{CredStore, Credentials, JoinOutcome, PendingAuth};
+use launcher_link::LauncherLink;
 use observed::ObservedState;
+use sessiond_ipc::{decode_frame, is_frame, DataFrame, SessiondCommand, SessiondEvent};
+use sessions::{Outbound, SessionContext, Sessions};
+use upgrade::RemoteUpgrader;
+
+/// The runtime's own release version, injected at build time from the release tag
+/// (`COFLUX_RELEASE_VERSION`); `dev` for local builds. Written to `<home>/runtime-version` for the
+/// desktop panel. What the centre sees as `worker_version` is the launcher-assigned version
+/// (`RUNTIME_VERSION_ENV`), which a test registry may name differently.
+const RUNTIME_VERSION: &str = match option_env!("COFLUX_RELEASE_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
+
+/// Scrollback kept per session after a gap recovery (plan 20260916-terminal-cursor-parity M2):
+/// 5_000 logical lines, bounded above so `COFLUX_HISTORY_LINES` cannot grow memory arbitrarily.
+const DEFAULT_HISTORY_LINE_LIMIT: usize = 5_000;
+const MAX_HISTORY_LINE_LIMIT: usize = 10_000;
+
+fn parse_history_line_limit(value: Option<&str>) -> usize {
+    value
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_HISTORY_LINE_LIMIT)
+        .clamp(1, MAX_HISTORY_LINE_LIMIT)
+}
+
+/// Retry connecting to ptyd within `window` (a missing socket or a refused connection from a
+/// predecessor's leftover socket both mean "not up yet"). Only waits; never starts ptyd.
+fn connect_ptyd(path: &str, window: Duration) -> Result<Arc<PtydClient>, coflux_ptyd::PtydError> {
+    let deadline = Instant::now() + window;
+    loop {
+        match PtydClient::connect(path) {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                let retryable = matches!(&error, coflux_ptyd::PtydError::Io(io) if matches!(io.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+                if !retryable || Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Config {
@@ -65,16 +121,16 @@ struct Config {
     device_name: String,
     host: String,
     platform: String,
-    /// 热更新编排（plan 015）：worker 完全不知自身版本——纯 supervisor 侧概念，每次 spawn 经
-    /// env 告知（见 crates/supervisor/src/manager.rs 的 WORKER_VERSION_ENV/SUPERVISOR_VERSION_ENV）。
-    /// 握手消息原样携带，供 server 比对 + web 展示。
+    /// The launcher-assigned version of this runtime (`RUNTIME_VERSION_ENV`) and the launcher's
+    /// own version (`LAUNCHER_VERSION_ENV`), reported in the handshake as `worker_version` /
+    /// `supervisor_version` (the wire field names are unchanged): the centre compares the first
+    /// with `latest` to decide on a push.
     worker_version: String,
     supervisor_version: String,
     arch: String,
     home: String,
     cred_path: String,
     worktrees_dir: String,
-    sock_path: String,
     reconnect_base_ms: u64,
     reconnect_cap_ms: u64,
     /// 入站帧 idle 达此阈值 → 主动发 WS Ping 探活（半死连接自愈，plan 033）。
@@ -93,9 +149,6 @@ struct WorkerState {
     /// supervisor/sessiond 是 snapshot epoch 唯一生成者；worker 只缓存并原样转发。
     snapshot_owner_id: String,
     snapshot_epoch: u64,
-    /// 最近一次 supervisor resync.list 的 challenge。只有对应快照已排入中心发送队列后，
-    /// 才回 resync.applied；断开 supervisor 时作废，防旧连接的 ACK 误判新 worker 健康。
-    sup_resync_nonce: Option<String>,
     /// 当前中心登记身份；本地 gateway challenge 与 operation report 都从可信凭证/认证消息取得，
     /// 不接受 browser 自报 daemonId。
     daemon_id: Option<String>,
@@ -154,6 +207,16 @@ const CAPABILITY_DEVICE_EXEC: &str = "device_exec";
 /// machine's cache file, where the desktop main process reads it. Paired with
 /// DAEMON_CAPABILITY_EXECUTOR_SETTINGS in apps/server.
 const CAPABILITY_EXECUTOR_SETTINGS: &str = "executor_settings_v1";
+/// This daemon's lifecycle belongs to Coflux Desktop (plan 20261002-runtime-follows-app): the app
+/// moves the runtime onto its bundled version by itself, so the centre must not hot-push a worker
+/// into it — neither the automatic sweep nor a client's upgrade request. Paired with
+/// DAEMON_CAPABILITY_DESKTOP_MANAGED in apps/server.
+const CAPABILITY_DESKTOP_MANAGED: &str = "desktop_managed";
+
+/// Set by the desktop app on the launcher it starts (`desktop-runtime.ts`), which passes its
+/// environment through to every runtime, centre-pushed ones included. The launcher reads the same
+/// variable to serve `runtime.sock`; nothing else sets it.
+const DESKTOP_RUNTIME_CONTROL_ENV: &str = "COFLUX_RUNTIME_CONTROL";
 
 /// The remote screen bridge (plan 20260929-remote-desktop), when this worker has one. Read by
 /// every server handshake so the capability follows the helper's hello, not the worker version.
@@ -168,6 +231,14 @@ fn daemon_capabilities() -> Vec<String> {
     ];
     if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() == Ok("1") {
         capabilities.push("transport_pair_v1".into());
+    }
+    if std::env::var(DESKTOP_RUNTIME_CONTROL_ENV).as_deref() == Ok("1") {
+        capabilities.push(CAPABILITY_DESKTOP_MANAGED.to_string());
+    }
+    // Host capability, launcher-provided: a runtime started by hand never claims it, so the
+    // centre never pushes a runtime release at a process nothing could roll back.
+    if std::env::var(LAUNCHER_ENV).as_deref() == Ok("1") {
+        capabilities.push(RUNTIME_LAUNCHER_CAPABILITY.to_string());
     }
     // Advertised only while the helper answered its hello on a live connection: clients offer
     // the 「屏幕」 tab for this device on exactly that condition.
@@ -184,7 +255,6 @@ struct PendingResync {
     snapshot_owner_id: String,
     snapshot_epoch: u64,
     sessions: Vec<wire::SessionRef>,
-    nonce: Option<String>,
 }
 
 #[derive(Clone)]
@@ -194,7 +264,6 @@ struct ResyncDelivery {
     snapshot_owner_id: String,
     snapshot_epoch: u64,
     sessions: Vec<wire::SessionRef>,
-    nonce: Option<String>,
 }
 
 #[derive(Default)]
@@ -209,18 +278,17 @@ impl ResyncOutbox {
     /// snapshot、释放锁再 publish，否则认证续体可能在较新的 ResyncList 之后写回旧值。
     fn publish_current(&self, state: &Arc<Mutex<WorkerState>>) -> bool {
         let state = state.lock().unwrap();
-        let Some((owner_id, epoch, sessions, nonce)) = resync_after_auth(
+        let Some((owner_id, epoch, sessions)) = resync_after_auth(
             state.sup_synced,
             &state.snapshot_owner_id,
             state.snapshot_epoch,
             &state.alive,
-            state.sup_resync_nonce.as_deref(),
         ) else {
             return false;
         };
         // state guard 刻意持有到 outbox 更新完成，使 ResyncList 的 state 更新与 publish、
         // 认证重放三者共享同一全序。
-        self.publish(owner_id, epoch, sessions, nonce);
+        self.publish(owner_id, epoch, sessions);
         true
     }
 
@@ -229,7 +297,6 @@ impl ResyncOutbox {
         snapshot_owner_id: String,
         snapshot_epoch: u64,
         sessions: Vec<wire::SessionRef>,
-        nonce: Option<String>,
     ) {
         let revision = self
             .next_revision
@@ -241,7 +308,6 @@ impl ResyncOutbox {
             snapshot_owner_id,
             snapshot_epoch,
             sessions,
-            nonce,
         });
         self.notify.notify_one();
     }
@@ -262,7 +328,6 @@ impl ResyncOutbox {
                         snapshot_owner_id: entry.snapshot_owner_id.clone(),
                         snapshot_epoch: entry.snapshot_epoch,
                         sessions: entry.sessions.clone(),
-                        nonce: entry.nonce.clone(),
                     })
                 })
             };
@@ -325,21 +390,19 @@ fn alive_to_resync(alive: &HashMap<String, (String, i32)>) -> Vec<wire::SessionR
         .collect()
 }
 
-/// 中心每次认证成功都要用最近一次 supervisor 快照对账；challenge 只决定本次对账后是否
-/// 额外向 supervisor 回健康 ACK，不能反过来成为 daemon.resync 的发送条件。
+/// Every successful authentication reconciles with the latest sessiond snapshot; without one,
+/// no `daemon.resync` is sent (an empty list would make the centre mark sessions exited).
 fn resync_after_auth(
     sup_synced: bool,
     snapshot_owner_id: &str,
     snapshot_epoch: u64,
     alive: &HashMap<String, (String, i32)>,
-    pending_nonce: Option<&str>,
-) -> Option<(String, u64, Vec<wire::SessionRef>, Option<String>)> {
+) -> Option<(String, u64, Vec<wire::SessionRef>)> {
     sup_synced.then(|| {
         (
             snapshot_owner_id.to_string(),
             snapshot_epoch,
             alive_to_resync(alive),
-            pending_nonce.map(str::to_owned),
         )
     })
 }
@@ -383,7 +446,8 @@ fn announce_local_gateway(
         );
     }
 }
-async fn sup_ctrl(tx: &Sender<Vec<u8>>, msg: &WorkerToSupervisor) -> bool {
+/// Queue a control record for sessiond on the in-process bridge.
+async fn send_command(tx: &Sender<Vec<u8>>, msg: &SessiondCommand) -> bool {
     if let Ok(bytes) = serde_json::to_vec(msg) {
         if let Ok(record) = write_record(&bytes) {
             return tx.send(record).await.is_ok();
@@ -542,23 +606,76 @@ async fn consume_hook_events(
 }
 
 fn main() {
+    let home = env_or(
+        "COFLUX_HOME",
+        format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()),
+    );
+    // PTYs belong to coflux-ptyd, started only by the lifecycle owner (desktop app / the service
+    // cofluxd generates). The runtime connects; without ptyd it exits and names the fix, never
+    // opening a PTY itself. Service managers may bring ptyd up a few hundred ms later, hence the
+    // bounded wait.
+    let ptyd_sock = std::env::var(PTYD_SOCK_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("{home}/{PTYD_SOCK_NAME}"));
+    let ptyd = match connect_ptyd(&ptyd_sock, Duration::from_secs(10)) {
+        Ok(client) => client,
+        Err(error) => {
+            let message = format!(
+                "找不到 coflux-ptyd（{ptyd_sock}）：{error}。本机运行组件不完整或 cofluxd 版本过旧——\
+                 请运行 `cofluxd update && cofluxd restart`（桌面版：重新安装 Coflux 应用）。\
+                 runtime 不会自己接管 PTY，现在退出。"
+            );
+            logln!("[runtime] {message}");
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+    if ptyd.hello().protocol_version != PTYD_PROTOCOL_VERSION {
+        // The capability handshake is the compatibility mechanism; the version is only logged.
+        logln!(
+            "[runtime] ptyd protocol version {} (this runtime {}), working from its advertised ops",
+            ptyd.hello().protocol_version,
+            PTYD_PROTOCOL_VERSION
+        );
+    }
+    logln!(
+        "[runtime] ptyd connected identity={} ops={}",
+        ptyd.hello().identity,
+        ptyd.hello().ops.len()
+    );
+    let settings = Settings::load(&home);
+    fda::write_status(&home); // macOS: full-disk-access probe for cofluxd status / the desktop; no-op elsewhere
+    let _ = std::fs::write(format!("{home}/runtime-version"), format!("{RUNTIME_VERSION}\n")); // read by the desktop panel
+    shell_integration::write_files(&home); // session shell integration rc files, idempotent
+    let shell = std::env::var("COFLUX_SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or(settings.shell)
+        .or_else(|| std::env::var("SHELL").ok())
+        .unwrap_or_else(|| "/bin/bash".to_string());
+    let history_line_limit =
+        parse_history_line_limit(std::env::var("COFLUX_HISTORY_LINES").ok().as_deref());
+    // sessiond never waits for the core: every attachment has its own bounded outbound writer.
+    let outbound = Outbound::new();
+    let sessions = Sessions::new(outbound, ptyd, shell, home.clone(), history_line_limit);
+    // Rebuild what the previous runtime left in ptyd before anything can serve sessions:
+    // neither the gateway nor the centre may see sequence numbers that are still moving.
+    sessions.recover();
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("创建 tokio 运行时失败")
-        .block_on(worker_main());
+        .block_on(runtime_main(home, sessions));
 }
 
-async fn worker_main() {
+async fn runtime_main(home: String, sessions: Arc<Sessions>) {
     // rustls 0.23 要求在任何 TLS 握手前选定 process-level CryptoProvider，
     // 否则连 wss:// 时 panic（"Could not automatically determine the process-level CryptoProvider"）。
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("安装 rustls ring CryptoProvider 失败");
-    let home = env_or(
-        "COFLUX_HOME",
-        format!("{}/.coflux", std::env::var("HOME").unwrap_or_default()),
-    );
     let s = Settings::load(&home); // 用户配置，env 同名变量可覆盖
     let cfg = Arc::new(Config {
         server_url: pick("COFLUX_SERVER", s.server_url, "ws://localhost:8787/daemon"),
@@ -569,12 +686,11 @@ async fn worker_main() {
         ),
         host: env_or("HOSTNAME", "localhost".into()),
         platform: std::env::consts::OS.to_string(),
-        worker_version: env_or(WORKER_VERSION_ENV, "builtin".into()),
-        supervisor_version: env_or(SUPERVISOR_VERSION_ENV, "dev".into()),
+        worker_version: env_or(RUNTIME_VERSION_ENV, "builtin".into()),
+        supervisor_version: env_or(LAUNCHER_VERSION_ENV, "dev".into()),
         arch: std::env::consts::ARCH.to_string(),
         cred_path: format!("{home}/credentials.json"),
         worktrees_dir: format!("{home}/worktrees"),
-        sock_path: std::env::var(SUPERVISOR_SOCK_ENV).unwrap_or_default(),
         home: home.clone(),
         reconnect_base_ms: 1_000,
         reconnect_cap_ms: 30_000,
@@ -590,7 +706,7 @@ async fn worker_main() {
         || std::env::var("COFLUX_TRANSPORT_REQUIRED").as_deref() == Ok("1");
     if release_requires_transport {
         if std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() != Ok("1") {
-            logln!("[worker] native companion requires a newer supervisor; run cofluxd update, then explicitly restart the daemon");
+            logln!("[runtime] native companion requires a launcher; run cofluxd update, then explicitly restart the daemon");
             std::process::exit(1);
         }
         let path = std::env::current_exe()
@@ -610,19 +726,17 @@ async fn worker_main() {
             }
         }
     }
-    if cfg.sock_path.is_empty() {
-        logln!("[worker] 缺少 {SUPERVISOR_SOCK_ENV}");
-        std::process::exit(1);
-    }
-
     logln!(
         "[worker] config server={} device={}",
         cfg.server_url,
         cfg.device_name
     );
 
-    // 写 pid 文件（测试/运维定位 worker 进程）
-    let _ = std::fs::write(format!("{home}/worker.pid"), std::process::id().to_string());
+    // pid file: tests and cofluxd status locate the runtime process by it.
+    let _ = std::fs::write(format!("{home}/runtime.pid"), std::process::id().to_string());
+    // The private channel to the launcher that started us; None for a bare runtime.
+    let launcher = LauncherLink::from_env();
+    let upgrader = RemoteUpgrader::new(home.clone(), launcher.clone());
 
     let creds_store = Arc::new(CredStore::new(cfg.cred_path.clone(), cfg.home.clone()));
     let mut conn_state = ConnState::new(&home);
@@ -636,7 +750,6 @@ async fn worker_main() {
         sup_synced: false,
         snapshot_owner_id: String::new(),
         snapshot_epoch: 0,
-        sup_resync_nonce: None,
         daemon_id,
         gateway_port: None,
         alive: HashMap::new(),
@@ -654,8 +767,8 @@ async fn worker_main() {
     let observed = Arc::new(ObservedState::new());
 
     let (to_server_tx, to_server_rx) = tokio::sync::mpsc::channel::<WsOut>(2048);
+    // Commands for sessiond (session create/close, Device frames) cross the in-process bridge.
     let (to_sup_tx, to_sup_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2048);
-    let (to_sup_priority_tx, to_sup_priority_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     // gateway 身份损坏/不可写只关闭 direct；中心 relay 与既有 daemon 能力照常启动。
     let local_auth = match local_auth::LocalAuth::load_or_create(&home) {
         Ok(auth) => Some(Arc::new(auth)),
@@ -781,24 +894,54 @@ async fn worker_main() {
         tokio::spawn(async move { device.run_catalog_retry_loop().await });
     }
 
-    // supervisor 连接循环
+    // The sessiond bridge: commands on a dedicated thread (sessiond is synchronous and may block
+    // on PTY work), events consumed by a task that re-attaches with a new generation whenever
+    // sessiond cuts the attachment.
     {
-        let cfg = cfg.clone();
+        let sessions = sessions.clone();
+        std::thread::spawn(move || sessiond_command_thread(sessions, to_sup_rx));
+    }
+    {
+        let sessions = sessions.clone();
         let state = state.clone();
         let to_server_tx = to_server_tx.clone();
         let resyncs = resyncs.clone();
         let device = device.clone();
         tokio::spawn(async move {
-            supervisor_loop(
-                cfg,
-                state,
-                to_server_tx,
-                to_sup_priority_rx,
-                to_sup_rx,
-                resyncs,
-                device,
-            )
-            .await
+            sessiond_bridge(sessions, state, to_server_tx, resyncs, device).await
+        });
+    }
+
+    // Report to the launcher once the gateway is bound (or known to be disabled): the launcher
+    // then checks ptyd's session list and the port itself before it counts this process healthy.
+    if let Some(link) = launcher.clone() {
+        let sessions = sessions.clone();
+        let state = state.clone();
+        let gateway_enabled = local_auth.is_some();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let port = loop {
+                if !gateway_enabled {
+                    break None;
+                }
+                if let Some(port) = state.lock().unwrap().gateway_port {
+                    break Some(port);
+                }
+                if Instant::now() >= deadline {
+                    logln!("[runtime] gateway not bound in time; reporting ready without a port");
+                    break None;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            let outcome = tokio::task::spawn_blocking(move || {
+                link.report_ready(|| sessions.live_session_ids(), port)
+            })
+            .await;
+            match outcome {
+                Ok(Ok(())) => logln!("[runtime] launcher acknowledged ready"),
+                Ok(Err(error)) => logln!("[runtime] launcher did not accept ready: {error}"),
+                Err(error) => logln!("[runtime] ready report task failed: {error}"),
+            }
         });
     }
 
@@ -907,7 +1050,8 @@ async fn worker_main() {
         });
     }
 
-    // 优雅关闭
+    // Graceful shutdown: SIGTERM is "leave" — exit, shells stay in ptyd. Ending terminals is the
+    // launcher's `stop` op (it asks ptyd to kill every shell).
     {
         let home = home.clone();
         tokio::spawn(async move {
@@ -915,8 +1059,8 @@ async fn worker_main() {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             {
                 sig.recv().await;
-                logln!("[worker] shutdown");
-                let _ = std::fs::remove_file(format!("{home}/worker.pid"));
+                logln!("[runtime] shutdown (leave: terminals stay in ptyd)");
+                let _ = std::fs::remove_file(format!("{home}/runtime.pid"));
                 std::process::exit(0);
             }
         });
@@ -935,7 +1079,7 @@ async fn worker_main() {
         exits,
         resyncs,
         to_sup_tx,
-        to_sup_priority_tx,
+        upgrader,
         local_auth,
         device,
         tailcat,
@@ -943,115 +1087,105 @@ async fn worker_main() {
     .await;
 }
 
-/* ----------------------------- supervisor ----------------------------- */
+/* ------------------------------ sessiond ------------------------------ */
 
-async fn supervisor_loop(
-    cfg: Arc<Config>,
+/// Dispatches control records and Device frames to sessiond on a dedicated thread, exactly as
+/// the former supervisor's per-connection handler did (device input only reserves authority and
+/// try_sends; blocking PTY writes run on their own threads inside sessiond).
+fn sessiond_command_thread(sessions: Arc<Sessions>, mut commands: Receiver<Vec<u8>>) {
+    let mut parser = RecordParser::new();
+    while let Some(record) = commands.blocking_recv() {
+        let result = parser.push(&record, |payload| {
+            if is_frame(payload) {
+                if let Some(DataFrame::Device { channel_id, data }) = decode_frame(payload) {
+                    sessions.handle_device(&channel_id, &data);
+                }
+            } else if let Ok(command) = serde_json::from_slice::<SessiondCommand>(payload) {
+                dispatch_command(command, &sessions);
+            }
+        });
+        if let Err(error) = result {
+            logln!("[runtime] sessiond command record violation: {error}");
+        }
+    }
+}
+
+fn dispatch_command(command: SessiondCommand, sessions: &Arc<Sessions>) {
+    match command {
+        SessiondCommand::SessionCreate {
+            session_id,
+            task_id,
+            cwd,
+            shell,
+            cols,
+            rows,
+            workspace_id,
+            project_id,
+            daemon_id,
+            mcp_url,
+        } => sessions.create(
+            session_id,
+            task_id,
+            cwd,
+            shell.unwrap_or_default(),
+            cols,
+            rows,
+            SessionContext {
+                daemon_id: daemon_id.unwrap_or_default(),
+                project_id: project_id.unwrap_or_default(),
+                workspace_id: workspace_id.unwrap_or_default(),
+                mcp_url: mcp_url.unwrap_or_default(),
+            },
+        ),
+        SessiondCommand::SessionClose { session_id } => sessions.close(&session_id),
+        SessiondCommand::ResyncRequest => {
+            if !sessions.send_resync(String::new()) {
+                // The bounded queue was momentarily full: cut the attachment so the bridge
+                // re-attaches and asks again.
+                sessions.worker_disconnected_current();
+            }
+        }
+    }
+}
+
+/// Attach to sessiond, request a resync, consume its events; re-attach with a new generation
+/// whenever sessiond drops the attachment (its bounded queue overflowed on a lifecycle record).
+async fn sessiond_bridge(
+    sessions: Arc<Sessions>,
     state: Arc<Mutex<WorkerState>>,
     to_server_tx: Sender<WsOut>,
-    mut to_sup_priority_rx: Receiver<Vec<u8>>,
-    mut to_sup_rx: Receiver<Vec<u8>>,
     resyncs: Arc<ResyncOutbox>,
     device: Arc<device::DeviceRuntime>,
 ) {
+    let mut generation = 0u64;
     loop {
-        match UnixStream::connect(&cfg.sock_path).await {
-            Ok(stream) => {
-                logln!("[worker] connected to supervisor");
-                device.supervisor_connected();
-                run_sup_connection(
-                    stream,
-                    &state,
-                    &to_server_tx,
-                    &mut to_sup_priority_rx,
-                    &mut to_sup_rx,
-                    &resyncs,
-                    &device,
-                )
-                .await;
+        generation += 1;
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        sessions.worker_connected(generation, event_tx);
+        logln!("[runtime] sessiond attached generation={generation}");
+        device.supervisor_connected();
+        if !sessions.send_resync(String::new()) {
+            sessions.worker_disconnected(generation);
+        }
+        let mut parser = RecordParser::new();
+        while let Some(record) = event_rx.recv().await {
+            let mut payloads: Vec<Vec<u8>> = Vec::new();
+            if let Err(error) = parser.push(&record, |payload| payloads.push(payload.to_vec())) {
+                logln!("[runtime] sessiond event record violation: {error}");
+                break;
             }
-            Err(_) => {}
+            for payload in payloads {
+                handle_sessiond_record(payload, &state, &to_server_tx, &resyncs, &device).await;
+            }
         }
         {
             let mut state = state.lock().unwrap();
             state.sup_synced = false;
-            state.sup_resync_nonce = None;
         }
+        sessions.worker_disconnected(generation);
         device.supervisor_disconnected();
+        logln!("[runtime] sessiond attachment ended generation={generation}");
         tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-async fn run_sup_connection(
-    stream: UnixStream,
-    state: &Arc<Mutex<WorkerState>>,
-    to_server_tx: &Sender<WsOut>,
-    to_sup_priority_rx: &mut Receiver<Vec<u8>>,
-    to_sup_rx: &mut Receiver<Vec<u8>>,
-    resyncs: &Arc<ResyncOutbox>,
-    device: &Arc<device::DeviceRuntime>,
-) {
-    let (mut rd, mut wr) = stream.into_split();
-    let write_timeout = Duration::from_secs(5);
-    // 索要存活会话快照
-    if let Ok(bytes) = serde_json::to_vec(&WorkerToSupervisor::ResyncRequest) {
-        let Ok(record) = write_record(&bytes) else {
-            return;
-        };
-        if !matches!(
-            tokio::time::timeout(write_timeout, wr.write_all(&record)).await,
-            Ok(Ok(()))
-        ) {
-            return;
-        }
-    }
-
-    // UDS 读写必须独立推进：reader 可能等待中心出站队列，server loop 又可能等待本地命令队列；
-    // 若唯一的 UDS writer 也绑在 reader 上，两条有界队列同时满会形成环形等待。健康 ACK 走
-    // 连接内优先 lane，普通命令仍走跨重连保留的 to_sup_rx。
-    let writer = async {
-        loop {
-            let record = tokio::select! {
-                biased;
-                record = to_sup_priority_rx.recv() => match record {
-                    Some(record) => record,
-                    None => return,
-                },
-                record = to_sup_rx.recv() => match record {
-                    Some(record) => record,
-                    None => return,
-                },
-            };
-            if !matches!(
-                tokio::time::timeout(write_timeout, wr.write_all(&record)).await,
-                Ok(Ok(()))
-            ) {
-                return;
-            }
-        }
-    };
-    let reader = async {
-        let mut parser = RecordParser::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            match rd.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => {
-                    let mut records: Vec<Vec<u8>> = Vec::new();
-                    if let Err(error) = parser.push(&buf[..n], |r| records.push(r.to_vec())) {
-                        logln!("[worker] supervisor UDS record 违规: {error}");
-                        return;
-                    }
-                    for rec in records {
-                        handle_sup_record(rec, state, to_server_tx, resyncs, device).await;
-                    }
-                }
-            }
-        }
-    };
-    tokio::select! {
-        _ = writer => {}
-        _ = reader => {}
     }
 }
 
@@ -1074,7 +1208,7 @@ fn commit_supervisor_exit(
     true
 }
 
-async fn handle_sup_record(
+async fn handle_sessiond_record(
     rec: Vec<u8>,
     state: &Arc<Mutex<WorkerState>>,
     to_server_tx: &Sender<WsOut>,
@@ -1096,12 +1230,12 @@ async fn handle_sup_record(
         }
         return;
     }
-    let msg: SupervisorToWorker = match serde_json::from_slice(&rec) {
+    let msg: SessiondEvent = match serde_json::from_slice(&rec) {
         Ok(m) => m,
         Err(_) => return,
     };
     match msg {
-        SupervisorToWorker::SessionStarted {
+        SessiondEvent::SessionStarted {
             session_id,
             task_id,
             pid,
@@ -1132,7 +1266,7 @@ async fn handle_sup_record(
                 }),
             );
         }
-        SupervisorToWorker::SessionExit {
+        SessiondEvent::SessionExit {
             session_id,
             exit_code,
             task_id,
@@ -1151,7 +1285,7 @@ async fn handle_sup_record(
             device.report_session_exit(&session_id, exit_code);
             device.request_reconciliation_catalog();
         }
-        SupervisorToWorker::SessionCommand {
+        SessiondEvent::SessionCommand {
             session_id,
             state: command,
         } => {
@@ -1160,7 +1294,7 @@ async fn handle_sup_record(
             s.ledger.set_command_state(&session_id, command);
             s.bump_command_epoch();
         }
-        SupervisorToWorker::SessionCreateFailed {
+        SessiondEvent::SessionCreateFailed {
             session_id,
             task_id,
             error,
@@ -1175,8 +1309,8 @@ async fn handle_sup_record(
             // 新 worker 同样只对账，不按裸 sessionId 改 alive 或上报 SessionExit。
             device.request_reconciliation_catalog();
         }
-        SupervisorToWorker::ResyncList {
-            nonce,
+        SessiondEvent::ResyncList {
+            nonce: _,
             snapshot_owner_id,
             snapshot_epoch,
             sessions,
@@ -1211,7 +1345,6 @@ async fn handle_sup_record(
                 }
                 s.bump_command_epoch();
                 s.sup_synced = true;
-                s.sup_resync_nonce = (!nonce.is_empty()).then_some(nonce);
                 s.snapshot_owner_id = snapshot_owner_id.clone();
                 s.snapshot_epoch = snapshot_epoch;
                 changed
@@ -1277,7 +1410,7 @@ async fn server_loop(
     exits: Arc<device::ExitOutbox>,
     resyncs: Arc<ResyncOutbox>,
     to_sup_tx: Sender<Vec<u8>>,
-    to_sup_priority_tx: Sender<Vec<u8>>,
+    upgrader: Arc<RemoteUpgrader>,
     local_auth: Option<Arc<local_auth::LocalAuth>>,
     device: Arc<device::DeviceRuntime>,
     tailcat: Arc<tailcat::TailcatRuntime>,
@@ -1311,7 +1444,7 @@ async fn server_loop(
                     &resyncs,
                     connection_epoch,
                     &to_sup_tx,
-                    &to_sup_priority_tx,
+                    &upgrader,
                     local_auth.as_ref(),
                     &device,
                     &tailcat,
@@ -1402,7 +1535,7 @@ async fn run_server_connection(
     resyncs: &Arc<ResyncOutbox>,
     connection_epoch: u64,
     to_sup_tx: &Sender<Vec<u8>>,
-    to_sup_priority_tx: &Sender<Vec<u8>>,
+    upgrader: &Arc<RemoteUpgrader>,
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
     tailcat: &Arc<tailcat::TailcatRuntime>,
@@ -1535,23 +1668,6 @@ async fn run_server_connection(
                     break;
                 }
                 if resyncs.acknowledge(&delivery) {
-                    if let Some(nonce) = delivery.nonce {
-                        let current = {
-                            let s = state.lock().unwrap();
-                            s.snapshot_owner_id == delivery.snapshot_owner_id
-                                && s.snapshot_epoch == delivery.snapshot_epoch
-                                && s.sup_resync_nonce.as_deref() == Some(nonce.as_str())
-                        };
-                        if current {
-                            if !sup_ctrl(to_sup_priority_tx, &WorkerToSupervisor::ResyncApplied { nonce: nonce.clone() }).await {
-                                break;
-                            }
-                            let mut s = state.lock().unwrap();
-                            if s.sup_resync_nonce.as_deref() == Some(&nonce) {
-                                s.sup_resync_nonce = None;
-                            }
-                        }
-                    }
                     // server 重启后 catalog/sessions 都是空的；派生观测若先发会因无法校验
                     // session 归属而被丢弃。只有当前连接成功发送并认领了这份 resync，才按
                     // wire 顺序补发 ports/agent 全量。旧连接代际或被新快照替代的 delivery
@@ -1602,6 +1718,7 @@ async fn run_server_connection(
                             creds_store,
                             to_server_tx,
                             to_sup_tx,
+                            upgrader,
                             &tunnels,
                             local_auth,
                             device,
@@ -1635,6 +1752,7 @@ async fn on_server_message(
     creds_store: &Arc<CredStore>,
     to_server_tx: &Sender<WsOut>,
     to_sup_tx: &Sender<Vec<u8>>,
+    upgrader: &Arc<RemoteUpgrader>,
     tunnels: &tunnel::TunnelSet,
     local_auth: Option<&Arc<local_auth::LocalAuth>>,
     device: &Arc<device::DeviceRuntime>,
@@ -1968,7 +2086,7 @@ async fn on_server_message(
                             );
                         });
                     }
-                    legacy => route_authed(legacy, cfg, to_server_tx, to_sup_tx, tunnels).await,
+                    legacy => route_authed(legacy, cfg, to_server_tx, to_sup_tx, upgrader, tunnels).await,
                 }
             }
         }
@@ -2002,6 +2120,7 @@ async fn route_authed(
     cfg: &Arc<Config>,
     to_server_tx: &Sender<WsOut>,
     to_sup_tx: &Sender<Vec<u8>>,
+    upgrader: &Arc<RemoteUpgrader>,
     tunnels: &tunnel::TunnelSet,
 ) {
     match msg {
@@ -2079,9 +2198,9 @@ async fn route_authed(
             mcp_url,
         }) => {
             let non_empty = |value: String| (!value.is_empty()).then_some(value);
-            sup_ctrl(
+            send_command(
                 to_sup_tx,
-                &WorkerToSupervisor::SessionCreate {
+                &SessiondCommand::SessionCreate {
                     session_id,
                     task_id,
                     cwd,
@@ -2097,41 +2216,38 @@ async fn route_authed(
             .await;
         }
         server_to_daemon::Payload::SessionClose(wire::SessionClose { session_id }) => {
-            sup_ctrl(to_sup_tx, &WorkerToSupervisor::SessionClose { session_id }).await;
+            send_command(to_sup_tx, &SessiondCommand::SessionClose { session_id }).await;
         }
+        // A release push (the wire message keeps its historical name): with a URL the runtime
+        // downloads and verifies it here, then asks the launcher to switch; without one the
+        // launcher switches to a version it already knows. The legacy raw `signature` field is
+        // ignored — runtime artifacts carry none.
         server_to_daemon::Payload::WorkerUpgrade(wire::WorkerUpgrade {
             version,
             url,
             sha256,
-            signature,
+            signature: _,
             target,
             artifact_size,
             release_signature,
             transport,
         }) => {
             if transport.is_some() && std::env::var("COFLUX_TRANSPORT_PAIR").as_deref() != Ok("1") {
-                logln!("[worker] paired upgrade requires explicit supervisor bootstrap");
+                logln!("[runtime] paired upgrade requires a launcher-provided transport pair");
                 return;
             }
-            sup_ctrl(
-                to_sup_tx,
-                &WorkerToSupervisor::WorkerUpgrade {
+            match url {
+                Some(url) => upgrader.install_from_url(
                     version,
                     url,
-                    sha256,
-                    signature,
-                    target,
-                    artifact_size,
-                    release_signature,
-                    transport: transport.map(|value| coflux_protocol::TransportArtifact {
-                        url: value.url,
-                        sha256: value.sha256,
-                        size: value.size,
-                        release_signature: value.release_signature,
-                    }),
-                },
-            )
-            .await;
+                    sha256.unwrap_or_default(),
+                    target.unwrap_or_default(),
+                    artifact_size.unwrap_or_default(),
+                    release_signature.unwrap_or_default(),
+                    transport.map(upgrade::TransportArtifact::from),
+                ),
+                None => upgrader.switch_known(version),
+            }
         }
         // 隧道 → 连接本地端口 / 关闭，字节走 ProxyData payload（main.rs 的 WS 分派处理）
         server_to_daemon::Payload::ProxyOpen(wire::ProxyOpen { conn_id, port }) => {
@@ -2183,7 +2299,6 @@ mod tests {
             sup_synced: true,
             snapshot_owner_id: "owner-old".into(),
             snapshot_epoch: 1,
-            sup_resync_nonce: Some("nonce-old".into()),
             daemon_id: None,
             gateway_port: None,
             alive: HashMap::from([("session-old".into(), ("task-old".into(), 11))]),
@@ -2235,32 +2350,19 @@ mod tests {
     }
 
     #[test]
-    fn 中心重连在健康_nonce_已消费后仍发送_resync() {
+    fn 中心重连仍按最近快照发送_resync() {
         let alive = HashMap::from([("session-1".to_string(), ("task-1".to_string(), 42))]);
-
-        let first = resync_after_auth(true, "owner-1", 7, &alive, Some("challenge"))
-            .expect("已有 supervisor 快照");
-        assert_eq!(first.0, "owner-1");
-        assert_eq!(first.1, 7);
-        assert_eq!(
-            first.3.as_deref(),
-            Some("challenge"),
-            "首次对账同时回候选健康 ACK"
-        );
-
-        let reconnect = resync_after_auth(true, "owner-1", 7, &alive, None)
-            .expect("nonce 消费后中心重连仍须对账");
-        assert!(reconnect.3.is_none(), "已消费的 challenge 不应重复 ACK");
+        let reconnect = resync_after_auth(true, "owner-1", 7, &alive).expect("已有 sessiond 快照");
+        assert_eq!(reconnect.0, "owner-1");
+        assert_eq!(reconnect.1, 7);
         assert_eq!(reconnect.2.len(), 1);
         assert_eq!(reconnect.2[0].session_id, "session-1");
         assert_eq!(reconnect.2[0].task_id, "task-1");
     }
 
     #[test]
-    fn 未取得_supervisor_快照时不向中心发送空_resync() {
-        assert!(
-            resync_after_auth(false, "owner-1", 7, &HashMap::new(), Some("challenge")).is_none()
-        );
+    fn 未取得_sessiond_快照时不向中心发送空_resync() {
+        assert!(resync_after_auth(false, "owner-1", 7, &HashMap::new()).is_none());
     }
 
     #[test]
@@ -2274,7 +2376,6 @@ mod tests {
                 &state.snapshot_owner_id,
                 state.snapshot_epoch,
                 &state.alive,
-                state.sup_resync_nonce.as_deref(),
             )
             .unwrap()
         };
@@ -2284,7 +2385,6 @@ mod tests {
             let mut state = state.lock().unwrap();
             state.snapshot_owner_id = "owner-new".into();
             state.snapshot_epoch = 2;
-            state.sup_resync_nonce = Some("nonce-new".into());
             state.alive = HashMap::from([("session-new".into(), ("task-new".into(), 22))]);
         }
         assert!(outbox.publish_current(&state));
@@ -2296,7 +2396,6 @@ mod tests {
         let pending = pending.as_ref().unwrap();
         assert_eq!(pending.snapshot_owner_id, "owner-new");
         assert_eq!(pending.snapshot_epoch, 2);
-        assert_eq!(pending.nonce.as_deref(), Some("nonce-new"));
         assert_eq!(pending.sessions.len(), 1);
         assert_eq!(pending.sessions[0].session_id, "session-new");
     }
@@ -2304,16 +2403,15 @@ mod tests {
     #[tokio::test]
     async fn resync_outbox只重放最新authority且旧连接不能确认新值() {
         let outbox = ResyncOutbox::default();
-        outbox.publish("owner-a".into(), 1, vec![], Some("nonce-a".into()));
+        outbox.publish("owner-a".into(), 1, vec![]);
         let old = outbox.claim(1).await;
-        outbox.publish("owner-b".into(), 1, vec![], Some("nonce-b".into()));
+        outbox.publish("owner-b".into(), 1, vec![]);
         assert!(
             !outbox.acknowledge(&old),
             "被新 authority 替代的 delivery 不得越过 resync/force gate"
         );
         let current = outbox.claim(2).await;
         assert_eq!(current.snapshot_owner_id, "owner-b");
-        assert_eq!(current.nonce.as_deref(), Some("nonce-b"));
         assert!(
             outbox.acknowledge(&current),
             "只有当前 authority 可以触发后续派生观测 force"
@@ -2330,7 +2428,6 @@ mod tests {
                 session_id: "session-1".into(),
                 task_id: "task-1".into(),
             }],
-            Some("nonce-a".into()),
         );
 
         let failed_connection = outbox.claim(10).await;
@@ -2339,7 +2436,6 @@ mod tests {
         assert_eq!(replayed.snapshot_owner_id, "owner-a");
         assert_eq!(replayed.snapshot_epoch, 9);
         assert_eq!(replayed.sessions, failed_connection.sessions);
-        assert_eq!(replayed.nonce, failed_connection.nonce);
         assert!(
             !outbox.acknowledge(&failed_connection),
             "失败连接的 delivery 不得触发派生观测 force"

@@ -1,0 +1,23 @@
+[package]
+name = "coflux-launcher"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "coflux-launcher"
+path = "src/main.rs"
+
+[dependencies]
+coflux-protocol = { path = "../protocol" }
+# Read-only ptyd client: the launcher compares ptyd's own session list with the set a candidate
+# runtime reports as rebuilt, and ends every shell on `stop`. It never opens a PTY and never starts ptyd.
+coflux-ptyd = { path = "../ptyd" }
+serde.workspace = true
+serde_json.workspace = true
+signal-hook = "0.3"
+libc = "0.2"
+hex = "0.4"
+# Pointer recovery re-checks the transport-pair marker digests the runtime wrote at install.
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }

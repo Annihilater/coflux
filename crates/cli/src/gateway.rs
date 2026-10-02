@@ -13,7 +13,7 @@
 //! `EPERM`/`EACCES`) fails hard and names the socket.
 //!
 //! 只打本机明文 HTTP，故不引 TLS/异步栈——std 的 stream 手写最小 HTTP/1.1（worker 侧
-//! `crates/worker/src/hook.rs` 也是手写的极小 HTTP 服务端）。请求体、端点、超时与错误文案以 node 版
+//! `crates/runtime/src/hook.rs` 也是手写的极小 HTTP 服务端）。请求体、端点、超时与错误文案以 node 版
 //! `packages/cli/coflux.mjs` 的 `localPost` / `agentPost` / `localGatewayPort` / `agentTimeoutMs`
 //! 为参照。
 //!
@@ -33,8 +33,8 @@ pub const DEFAULT_LOCAL_GATEWAY_PORT: u16 = coflux_protocol::LOCAL_GATEWAY_PORT;
 pub const AGENT_TIMEOUT_MS: u64 = 30_000;
 /// 调用方能收窄单次 `/agent` 等待的下限；再低就只够覆盖进程自己的启动，等于必然超时。
 pub const MIN_AGENT_TIMEOUT_MS: u64 = 200;
-/// Mirrors `SOCKET_DIR` in `crates/worker/src/secret/socket.rs` and `SOCKET_FILE` in
-/// `crates/worker/src/agent_socket.rs`; change them together.
+/// Mirrors `SOCKET_DIR` in `crates/runtime/src/secret/socket.rs` and `SOCKET_FILE` in
+/// `crates/runtime/src/agent_socket.rs`; change them together.
 pub const IPC_DIR: &str = "ipc";
 pub const AGENT_SOCKET_FILE: &str = "agent.sock";
 /// The worker never binds a socket path longer than this (`sun_path` is 104 bytes on macOS, 108

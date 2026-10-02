@@ -20,15 +20,15 @@ test("路径：默认 ~/.coflux；COFLUX_HOME 设了就尊重；plist 固定在 
   assert.equal(resolveCofluxHome({ COFLUX_HOME: "  " }, HOME_DIR), "/Users/alice/.coflux");
   const paths = daemonHomePaths(HOME_DIR, { COFLUX_HOME: "/tmp/cf" });
   assert.equal(paths.binDir, "/tmp/cf/bin");
-  assert.equal(paths.supervisorBin, "/tmp/cf/bin/coflux-supervisor");
-  assert.equal(paths.workerBin, "/tmp/cf/bin/coflux-worker");
+  assert.equal(paths.launcherBin, "/tmp/cf/bin/coflux-launcher");
+  assert.equal(paths.runtimeBin, "/tmp/cf/bin/coflux-runtime");
   assert.equal(paths.cliBin, "/tmp/cf/bin/coflux");
   assert.equal(paths.settings, "/tmp/cf/settings.json");
   assert.equal(paths.logFile, "/tmp/cf/daemon.log");
   assert.equal(paths.credentials, "/tmp/cf/credentials.json");
   assert.equal(paths.pendingAuth, "/tmp/cf/pending-auth.json");
   assert.equal(paths.fdaStatus, "/tmp/cf/fda-status");
-  assert.equal(paths.supervisorVersion, "/tmp/cf/supervisor-version");
+  assert.equal(paths.runtimeVersion, "/tmp/cf/runtime-version");
   assert.equal(paths.plist, "/Users/alice/Library/LaunchAgents/com.coflux.daemon.plist");
 });
 
@@ -39,7 +39,7 @@ const NPM_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>Label</key><string>com.coflux.daemon</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/alice/.coflux/bin/coflux-supervisor</string></array>
+  <array><string>/Users/alice/.coflux/bin/coflux-launcher</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>COFLUX_HOME</key><string>/Users/alice/.coflux</string></dict>
   <key>RunAtLoad</key><true/>

@@ -2,7 +2,7 @@
  * The capability name an executor host declares when it registers with the local daemon.
  *
  * The daemon gates registration on this **exact** string (`CAPABILITY_EXECUTOR_HOST` in
- * `crates/worker/src/agent_ctl/executor.rs`), with no version comparison, so the copies must stay
+ * `crates/runtime/src/agent_ctl/executor.rs`), with no version comparison, so the copies must stay
  * identical. A mismatch is invisible from inside the app — the settings page still reads "ready" —
  * and surfaces only on the agent's side as "there is no executor host on this machine". `src/capability.test.ts`
  * reads the daemon's own source and this file's third copy in `packages/protocol/src/index.ts`, so
