@@ -536,6 +536,16 @@ impl Manager {
         }
     }
 
+    /// Log a health refusal and keep it on the pending switch record, where it becomes the
+    /// rollback reason. Takes the state lock: callers must not hold it.
+    fn note_refusal(&self, refusal: &HealthRefusal) {
+        logln!("[launcher] ready refused: {}", refusal.message);
+        let mut st = self.state.lock().unwrap();
+        if let Some(record) = st.last_switch.as_mut().filter(|record| record.state == SwitchState::Pending) {
+            record.reason = Some(refusal.message.clone());
+        }
+    }
+
     /// `ready` from the runtime on connection `generation`. For the active runtime this only
     /// returns the floor; for a pending one the launcher verifies nonce, ptyd takeover and the
     /// gateway port itself before it counts the process healthy.
@@ -546,28 +556,32 @@ impl Manager {
         sessions: &[String],
         gateway_port: Option<u16>,
     ) -> Result<Option<String>, HealthRefusal> {
-        let refuse = |message: String, retry: bool| {
-            logln!("[launcher] ready refused: {message}");
-            // Keep the latest refusal on the switch record: it becomes the rollback reason.
-            let mut st = self.state.lock().unwrap();
-            if let Some(record) = st.last_switch.as_mut().filter(|record| record.state == SwitchState::Pending) {
-                record.reason = Some(message.clone());
-            }
-            Err(HealthRefusal { message, retry })
+        // Refusals are decided first and recorded afterwards: `note_refusal` takes the state
+        // lock, so it must never run from a scope that already holds it (std's Mutex is not
+        // reentrant; a stale connection's `ready` would otherwise wedge the launcher for good).
+        let refuse = |message: String, retry: bool| -> Result<Option<String>, HealthRefusal> {
+            let refusal = HealthRefusal { message, retry };
+            self.note_refusal(&refusal);
+            Err(refusal)
         };
-        let (expected_nonce, floor) = {
+        // Decide under the guard, then drop it before recording anything.
+        let decision: Result<(String, Option<String>), Result<Option<String>, HealthRefusal>> = {
             let st = self.state.lock().unwrap();
             let floor = st.committed_release_floor.as_ref().map(|f| f.as_str().to_string());
             if !Self::pending_running(&st) {
-                return Ok(floor);
+                Err(Ok(floor))
+            } else if st.pending_connection_generation != Some(generation) {
+                Err(Err(HealthRefusal { message: "ready arrived on a connection that is not the candidate's".into(), retry: false }))
+            } else if st.pending_termination_requested {
+                Err(Err(HealthRefusal { message: "candidate is being terminated".into(), retry: false }))
+            } else {
+                Ok((st.spawn_nonce.clone(), floor))
             }
-            if st.pending_connection_generation != Some(generation) {
-                return refuse("ready arrived on a connection that is not the candidate's".into(), false);
-            }
-            if st.pending_termination_requested {
-                return refuse("candidate is being terminated".into(), false);
-            }
-            (st.spawn_nonce.clone(), floor)
+        };
+        let (expected_nonce, floor) = match decision {
+            Ok(values) => values,
+            Err(Ok(floor)) => return Ok(floor),
+            Err(Err(refusal)) => return refuse(refusal.message, refusal.retry),
         };
         if nonce.is_empty() || nonce != expected_nonce {
             return refuse("nonce does not match this spawn".into(), false);
