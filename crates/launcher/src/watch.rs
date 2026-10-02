@@ -37,8 +37,15 @@ use coflux_protocol::ptyd::PTYD_SOCK_NAME;
 use serde_json::{json, Value};
 
 /// Written into `watch.json`; cofluxd also looks for it inside the launcher binary to tell a
-/// launcher that has `watch` from one that predates it, without running the binary.
+/// launcher that has `watch` from one that predates it, without running the binary. Read it
+/// through [`watch_protocol`] only: copying the constant directly lets LLVM fold the 14 bytes
+/// into immediate stores (it does on x86_64), and then the binary no longer contains the marker.
 pub const WATCH_PROTOCOL: &str = "coflux-watch/1";
+
+/// [`WATCH_PROTOCOL`] behind an opaque pointer, which keeps it in the binary as one byte run.
+fn watch_protocol() -> &'static str {
+    std::hint::black_box(WATCH_PROTOCOL)
+}
 
 /// The watcher refused to start: another service already owns this home.
 pub const EXIT_REFUSED: i32 = 3;
@@ -376,7 +383,7 @@ impl Watcher {
         };
         json!({
             "ok": true,
-            "protocol": WATCH_PROTOCOL,
+            "protocol": watch_protocol(),
             "pid": std::process::id(),
             "mode": if self.foreground { "foreground" } else { "background" },
             "ptyd": {"running": self.ptyd.is_some(), "pid": self.ptyd.as_ref().map(|p| p.proc.pid())},
@@ -493,7 +500,7 @@ impl Watcher {
     /// Record the pids a successor needs to adopt or replace, should this watcher be killed.
     fn write_state(&self) {
         let state = json!({
-            "protocol": WATCH_PROTOCOL,
+            "protocol": watch_protocol(),
             "pid": std::process::id(),
             "mode": if self.foreground { "foreground" } else { "background" },
             "ptydPid": self.ptyd.as_ref().map(|p| p.proc.pid()),
