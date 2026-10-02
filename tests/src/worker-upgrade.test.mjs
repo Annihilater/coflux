@@ -282,11 +282,14 @@ test("pseudo-healthy rollback: the right nonce but a live ptyd session not taken
 
 test("pseudo-healthy rollback: the right nonce but a gateway port nothing listens on never commits", async () => {
   // Stop every terminal first so the session check passes with an empty report and only the
-  // gateway check can fail.
+  // gateway check can fail. A stop goes through the holder, so attach first; any failure to
+  // stop must surface here, not be swallowed into a misleading assertion later.
   const device = await openNativeDevice(stack);
   const catalog = await device.catalog();
   for (const session of catalog.sessions) {
-    try { await device.stopSession(session.sessionId); } catch { /* already gone */ }
+    await device.attach(session.sessionId);
+    const ack = await device.stopSession(session.sessionId);
+    assert.equal(ack.ok, true, `stop of ${session.sessionId} must be acknowledged`);
   }
   for (let i = 0; i < 100; i += 1) {
     if ((await device.catalog()).sessions.length === 0) break;
