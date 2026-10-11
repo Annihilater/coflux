@@ -1706,6 +1706,11 @@ export function Workbench({ client }: { client: CofluxClient }) {
   // The left dock is on screen only while the sidebar is collapsed and the workbench is what is
   // visible: immersive mode has no chrome at all, and the settings page brings its own left column.
   const showLeftDock = sidebarCollapsed && !immersiveOnScreen && !settingsOpen;
+  // The dock's screen button (plan 20261011-standalone-device-screen): the current selection's device's
+  // screen, offered where that device advertises the helper and is not this Mac. Pressed while that
+  // screen is the selection; pressing it then returns to where the user came from.
+  const screenButtonPressed = selectedScreenId !== null;
+  const screenButtonDeviceId = selectedScreenId ?? (canOpenScreenOn(selectionDeviceId) ? selectionDeviceId : null);
   const reservedLeft = sidebarCollapsed ? leftDockReserve(windowFullScreen) : 0;
 
   // 恢复会话 / 登录握手中：只显示安静加载，不渲染登录表单（避免刷新闪一下）。
@@ -1764,6 +1769,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
         onRenameDevice={setRenameDevice}
         localDaemonId={daemonState?.daemonId ?? null}
         onOpenScreen={(daemon) => openScreen(daemon.daemonId)}
+        screens={screens}
+        selectedScreenDeviceId={selectedScreenId}
+        onSelectScreen={selectScreen}
+        onDisconnectScreen={disconnectScreen}
         createMenuProjectId={createMenuProjectId}
         onCreateMenuProjectIdChange={setCreateMenuProjectId}
         pendingWorkspaces={pendingWorkspaces}
@@ -2103,6 +2112,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
           is filled back in by the strip's later `drag`, and the dock's buttons get no click or mouseenter
           (dead buttons, no tooltips; see drag-region.ts). It is absolutely positioned, so being last only
           changes composition and paint order, not layout.
+          屏幕 (plan 20261011-standalone-device-screen) comes first: it opens, or jumps to, the screen of the current
+          selection's device, and takes the user back when pressed again. The screen layer's status bar is a drag
+          band under this dock, which is why that layer precedes this node too.
           「文件」 (plan 20260923-terminal-split-groups, renamed from 「变更」 by plan 20261002-workspace-files-view)
           lives here instead of a resident tab: pressing it covers the whole main area with the files view,
           pressing again or Esc returns to the groups. Directory workspaces get it too; their tree has no git parts. */}
@@ -2114,6 +2126,22 @@ export function Workbench({ client }: { client: CofluxClient }) {
         style={{ top: showReconnectBanner ? 28 : 0, ...NO_DRAG_REGION_STYLE }}
       >
         <div aria-hidden className="pointer-events-none absolute inset-y-0 right-full w-6 bg-gradient-to-r from-transparent to-background" />
+        {screenButtonDeviceId ? (
+          <Tooltip content={screenButtonPressed ? "返回" : "屏幕"} placement="below">
+            <button
+              type="button"
+              aria-label="屏幕"
+              aria-pressed={screenButtonPressed}
+              className={cn(
+                "flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md px-1.5 transition-colors",
+                screenButtonPressed ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+              onClick={() => (screenButtonPressed ? leaveScreen(screenButtonDeviceId) : openScreen(screenButtonDeviceId))}
+            >
+              <Monitor className="size-3.5" />
+            </button>
+          </Tooltip>
+        ) : null}
         {activeWorkspace ? (
           <Tooltip content={selectedChangesOpen ? "返回终端 Esc" : "文件"} placement="below">
             <button

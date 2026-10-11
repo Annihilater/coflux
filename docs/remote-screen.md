@@ -1,7 +1,34 @@
-# Remote screen (「屏幕」 tab)
+# Remote screen (「屏幕」)
 
-Plan `20260929-remote-desktop`. Coflux Desktop views and drives another of the account's Macs from a
-native tab in the device page. Nothing else is installed on either Mac.
+Plans `20260929-remote-desktop` and `20261011-standalone-device-screen`. Coflux Desktop views and
+drives another of the account's Macs from a standalone view of that device's screen. Nothing else is
+installed on either Mac.
+
+## Form and entry points
+
+- A screen belongs to a device, not to a workspace: **at most one per device**. It is not a tab and
+  involves no workspace (opening one never creates or needs the device's directory workspace).
+- Opened from the **屏幕 button in the top-right action dock** (the current selection's device: the
+  selected workspace's, the device page's, or the selected screen's), the device row's context menu
+  (「打开屏幕」), the ⌘P palette (「打开屏幕」) and the device page's empty state. They are offered only
+  for a device that advertises `screen_v1` and is not this Mac. On a device whose screen is already
+  open they only select it — same remote session, no takeover — so every workspace of that device
+  lands on the same screen. Pressing the dock button while the screen is selected returns to the
+  selection the user came from.
+- An open screen is a **sub-row under its device** in the sidebar's 设备 section (`屏幕 · 1440×900`:
+  the connected remote size, else the fixed preset chosen). Clicking it selects the screen; its ×
+  (or the status bar's 「断开」) disconnects: the remote session ends, the virtual display goes away,
+  the row disappears, and a selected screen hands the main area back to the previous selection.
+- A selected screen fills the whole main area right of the sidebar, under a status bar (device,
+  直连/中继 and latency, the resolution dropdown, 「沉浸」, 「断开」) that is a window drag band like the
+  files overlay's header. It is a workbench selection of its own (`screen:<daemonId>`), so no
+  workspace is active and workspace shortcuts (⌘T, ⌘W, ⌘1–9, ⌘\\) do nothing. Selecting anything
+  else pauses the screen (session and virtual display kept, the view stays mounted); selecting it
+  again resumes without reconnecting.
+- **Restart**: open screens come back as sidebar sub-rows (records per device, scoped by server
+  address) and reconnect when selected, without taking over; a stored screen selection is restored
+  too. The per-device resolution choice is kept. Screens of devices removed from the account are
+  dropped. Records from the tab era (`coflux_screen_tabs:*`) are discarded without migration.
 
 ## Pieces
 
@@ -18,8 +45,8 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
 ```
 
 - **Contract**: `proto/coflux/v1/device.proto`, section "Remote screen" (envelope numbers 125–143) and
-  the worker ⟷ helper `ScreenHelperFrame`; `client.proto` `DirectoryWorkspaceEnsure` (a screen tab
-  needs the device's directory workspace, created without a shell); `DaemonInfo.capabilities`.
+  the worker ⟷ helper `ScreenHelperFrame`; `DaemonInfo.capabilities`. (`client.proto`
+  `DirectoryWorkspaceEnsure` was added for screen tabs; screens no longer use it.)
 - **Helper** (`native/screen`): built by `node scripts/build-screen-helper.mjs [out] [--test]` (SDK
   pinned away from a rejected 27.x CLT SDK; warnings in `native/screen` fail the build), staged and
   signed with the other runtime binaries (`DAEMON_BINARIES`), shipped **only** inside Coflux.app —
@@ -43,14 +70,15 @@ coflux-runtime: crates/runtime/src/screen.rs                             per ses
   while a visible session asks, writes it on the remote's changes, and calls
   `webContents.setIgnoreMenuShortcuts` while a picture has focus (probed on Electron 44.3.0: covers
   `role: quit`).
-- **Renderer**: `screen-tabs.ts` (records: workspace, device, stable remote session id),
-  `screen-runtime.ts`, `screen-session.ts` (protocol, credit, WebCodecs `avc1.64001f` Annex B),
-  `screen-view.tsx` (status bar 直连/中继 + latency, resolution, 沉浸, 断开; states; input; cursor). The tab kind is
-  registered in `terminal-layout.ts` (`SCREEN_TAB_PREFIX`, exempt from reconcile, not a task).
+- **Renderer**: `screen-records.ts` (records per device: the stable remote session id),
+  `screen-runtime.ts` (records and live sessions, keyed by device), `screen-session.ts` (protocol,
+  credit, WebCodecs `avc1.64001f` Annex B), `screen-view.tsx` (status bar 直连/中继 + latency,
+  resolution, 沉浸, 断开; states; input; cursor). The selection kind is in `workbench-state.ts`; the
+  screen layer, the dock button and the sidebar sub-row are wired in `workbench.tsx` / `sidebar.tsx`.
 - **Resolution**: the status bar's dropdown (`screen-resolution.ts`) offers 「跟随窗口」 (default: the
-  remote display follows the tab 1:1 in points) or a fixed size in points (1280×800 … 1920×1080) at
-  the local screen's scale, sent through `ScreenSessionResize` at once; on a fixed size resizing the tab
-  or immersive mode only scales the picture. Remembered per (server, device) on this Mac.
+  remote display follows the view 1:1 in points) or a fixed size in points (1280×800 … 1920×1080) at
+  the local screen's scale, sent through `ScreenSessionResize` at once; on a fixed size resizing the
+  window or immersive mode only scales the picture. Remembered per (server, device) on this Mac.
 
 ## Budgets
 
@@ -75,9 +103,10 @@ physical `KeyboardEvent.code` and are mapped to macOS virtual key codes on the r
   environment has no helper path before that). Headless `cofluxd` installs never offer it.
 - A session left open when the app quits keeps its virtual display and power assertions for the
   helper's 10-minute orphan grace.
-- Takeover: a user-initiated open (a new 屏幕 tab, 「打开屏幕」, 「重新接管」) takes the session over;
-  automatic reconnects (restore after restart, lane reopen, resume) never do, and a taken-over tab
-  stays detached until 「重新接管」.
+- Takeover: a user-initiated open of a screen that was not open (the dock button, 「打开屏幕」) and
+  「重新接管」 take the session over; selecting an already open screen, automatic reconnects (restore
+  after restart, lane reopen, resume) never do, and a taken-over screen stays detached until
+  「重新接管」 — including after a restart, where 「打开屏幕」 only selects the restored screen.
 - A helper of another version answering the socket (left by a previous desktop build) is told to
   retire (`ScreenHelperRetire`): it stops listening at once; if it holds a live session the worker
   keeps serving that session over the existing connection and the helper exits when it ends
