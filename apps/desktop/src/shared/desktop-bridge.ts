@@ -121,8 +121,6 @@ export type DesktopCommand =
   | `select-tab-${DesktopDigit}`
   /** 文件 → 新建浏览器标签页 (plan 20260924-desktop-browser-tab); no keyboard shortcut. */
   | "new-browser-tab"
-  /** 文件 → 新建屏幕标签页 (plan 20260929-remote-desktop); no keyboard shortcut. */
-  | "new-screen-tab"
   | "toggle-help"
   /** ⌘B / 视图 → 显示/隐藏侧边栏 (plan 20260930-collapsible-sidebar): collapse or expand the workbench sidebar. */
   | "toggle-sidebar"

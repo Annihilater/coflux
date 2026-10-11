@@ -98,19 +98,8 @@ export function isBrowserTabId(id: string): boolean {
 }
 
 /**
- * Prefix of a remote screen tab's id (plan 20260929-remote-desktop): a layout entry like a browser
- * tab — persisted, never a task, exempt from reconcile — whose device and remote session live in a
- * separate record (screen-tabs.ts).
- */
-export const SCREEN_TAB_PREFIX = "screen-tab-";
-
-export function isScreenTabId(id: string): boolean {
-  return id.startsWith(SCREEN_TAB_PREFIX);
-}
-
-/**
  * Prefix of a file tab's id (plan 20261001-terminal-file-tab): a read-only view of one workspace
- * file, opened from a terminal file link. A layout entry like a screen tab — persisted, never a
+ * file, opened from a terminal file link. A layout entry like a browser tab — persisted, never a
  * task, exempt from reconcile — whose workspace and canonical path live in a separate record
  * (file-tabs.ts).
  */
@@ -122,10 +111,10 @@ export function isFileTabId(id: string): boolean {
 
 /** A layout entry that is not a task but a tab kind of its own, kept until the user closes it. */
 export function isViewTabId(id: string): boolean {
-  return isBrowserTabId(id) || isScreenTabId(id) || isFileTabId(id);
+  return isBrowserTabId(id) || isFileTabId(id);
 }
 
-/** A layout id that is a terminal task — neither the optimistic pending tab, a browser tab, a screen tab nor a file tab. */
+/** A layout id that is a terminal task — neither the optimistic pending tab, a browser tab nor a file tab. */
 export function isTaskTabId(id: string): boolean {
   return !id.startsWith(PENDING_TAB_PREFIX) && !isViewTabId(id);
 }
@@ -180,11 +169,6 @@ export function layoutTabIds(layout: TerminalLayout): string[] {
 /** The layout's browser tabs, in layout (tree) order. */
 export function browserTabIdsOf(layout: TerminalLayout): string[] {
   return layoutTabIds(layout).filter(isBrowserTabId);
-}
-
-/** The layout's screen tabs, in layout (tree) order. */
-export function screenTabIdsOf(layout: TerminalLayout): string[] {
-  return layoutTabIds(layout).filter(isScreenTabId);
 }
 
 /** The layout's file tabs, in layout (tree) order. */
@@ -729,8 +713,8 @@ export type ReconcileOptions = {
 /**
  * Brings a workspace's layout in line with its live task list (ordered by creation):
  * - the pending tab is exempt from removal; the task answering it replaces it in place;
- * - browser, screen and file tabs are not tasks and are exempt from removal too (they go when the
- *   user closes them);
+ * - browser and file tabs are not tasks and are exempt from removal too (they go when the user
+ *   closes them);
  * - tasks that vanished (closed, or moved to another workspace) are removed, emptied groups collapse;
  * - tasks the layout does not hold yet (created here or elsewhere, or moved in) land in the focused
  *   group, becoming its active tab only when it had none;
@@ -774,15 +758,6 @@ export function reconcileLayout(layout: TerminalLayout, taskIds: readonly string
 export function pruneBrowserTabs(layout: TerminalLayout, keep: (tabId: string) => boolean): TerminalLayout {
   let next = layout;
   for (const id of browserTabIdsOf(layout)) {
-    if (!keep(id)) next = removeTab(next, id);
-  }
-  return next;
-}
-
-/** The screen-tab twin of `pruneBrowserTabs`: a screen id without a stored record is dropped on restore. */
-export function pruneScreenTabs(layout: TerminalLayout, keep: (tabId: string) => boolean): TerminalLayout {
-  let next = layout;
-  for (const id of screenTabIdsOf(layout)) {
     if (!keep(id)) next = removeTab(next, id);
   }
   return next;

@@ -55,7 +55,7 @@ test("records round-trip and reject junk", () => {
     tabs: {
       [A]: { workspaceId: "w1", path: "src/a.ts", line: 42 },
       [B]: { workspaceId: "w2" },
-      "screen-tab-x": { workspaceId: "w1", path: "src/a.ts" },
+      "browser-tab-x": { workspaceId: "w1", path: "src/a.ts" },
       [`${FILE_TAB_PREFIX}bad`]: { workspaceId: "has space", path: "src/a.ts" },
       [`${FILE_TAB_PREFIX}line`]: { workspaceId: "w1", path: "src/c.ts", line: -1 },
     },

@@ -20,7 +20,7 @@ import type { ActivityDotsStatus } from "@/components/workbench/pending-dots";
  */
 export type PaletteEntryKind = "workspace" | "project" | "terminal" | "device" | "action";
 
-export type PaletteAction = "new-browser-tab" | "new-screen-tab";
+export type PaletteAction = "new-browser-tab" | "open-screen";
 
 /** The filter tab row. `all` is the tab the palette opens on. */
 export type PaletteFilter = "all" | "workspace" | "terminal" | "device";
@@ -121,8 +121,11 @@ export type PaletteSnapshotInput = {
   };
   /** Whether 新建浏览器标签页 is on offer: there is a workspace on screen to open it in. */
   canOpenBrowserTab?: boolean;
-  /** Whether 打开屏幕 is on offer (plan 20260929-remote-desktop): the workspace on screen is on a device that advertises the helper. */
-  canOpenScreenTab?: boolean;
+  /**
+   * Whether 打开屏幕 is on offer (plan 20261011-standalone-device-screen): the current selection's
+   * device — a workspace's, a device page's or a screen's — advertises the helper and is not this Mac.
+   */
+  canOpenScreen?: boolean;
 };
 
 /** Map the shared workspace aggregate onto the dot states; idle becomes no dots at all. */
@@ -249,9 +252,9 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
     });
   }
 
-  if (input.canOpenScreenTab) {
+  if (input.canOpenScreen) {
     entries.push({
-      key: "action:new-screen-tab",
+      key: "action:open-screen",
       kind: "action",
       label: "打开屏幕",
       detail: "",
@@ -259,7 +262,7 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
       keywords: "screen remote desktop display 屏幕 远程 桌面 显示器 打开",
       activity: null,
       isOffline: false,
-      target: { kind: "action", action: "new-screen-tab" },
+      target: { kind: "action", action: "open-screen" },
     });
   }
 

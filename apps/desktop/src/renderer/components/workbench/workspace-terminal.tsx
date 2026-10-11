@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, Monitor, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -23,7 +23,6 @@ import { effectiveAgents, type AgentId, type EffectiveAgent } from "@/components
 import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
-import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
 import type { FileRuntime } from "@/components/workbench/file-runtime";
 import { fileTabTitle } from "@/components/workbench/file-tabs";
 import { FileView } from "@/components/workbench/file-view";
@@ -40,7 +39,6 @@ import {
   groupFrameStyle,
   isBrowserTabId,
   isFileTabId,
-  isScreenTabId,
   layoutGeometry,
   moveTabToGroup,
   moveTabToNewGroup,
@@ -127,8 +125,6 @@ export type WorkspaceTerminalHandle = {
   splitTerminal: (side: "right" | "down") => void;
   /** 文件 / ⌘P → 新建浏览器标签页 (plan 20260924-desktop-browser-tab): a blank browser tab in the focused group. */
   openBrowserTab: () => void;
-  /** 文件 / ⌘P → 新建屏幕标签页 (plan 20260929-remote-desktop): the workspace device's screen in the focused group; a no-op where not offered. */
-  openScreenTab: () => void;
 };
 
 /**
@@ -170,10 +166,6 @@ export type WorkspaceLayoutActions = {
   /** A browser tab's close button / context menu: removes the tab, no confirmation (plan 20260924-desktop-browser-tab). */
   closeBrowserTab: (workspaceId: string, tabId: string) => void;
   reloadBrowserTab: (tabId: string) => void;
-  /** ＋ menu's 屏幕 (plan 20260929-remote-desktop): focuses that group, then opens the device's screen there. */
-  createScreenTab: (workspaceId: string, groupId: string) => void;
-  /** A screen tab's close button / context menu: ends the remote session, no confirmation. */
-  closeScreenTab: (workspaceId: string, tabId: string) => void;
   /** A file tab's close button / context menu (plan 20261001-terminal-file-tab): removes the tab, no confirmation. */
   closeFileTab: (workspaceId: string, tabId: string) => void;
   /** 「在标签页中打开」 in the files overlay (plan 20261002-workspace-files-view): opens or focuses the file's tab. */
@@ -202,12 +194,8 @@ type WorkspaceTerminalProps = {
   actions: WorkspaceLayoutActions;
   /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
   browser: BrowserRuntime;
-  /** Remote screen tabs' records for their strip chips (plan 20260929-remote-desktop). */
-  screens: ScreenRuntime;
   /** File tabs' records and views (plan 20261001-terminal-file-tab). */
   files: FileRuntime;
-  /** Whether 屏幕 is offered in this workspace's ＋ menu: its device advertises the helper and is not this Mac. */
-  canOpenScreen: boolean;
   /** The group whose ＋ menu is open, if it is in this workspace. */
   newTabMenuGroupId: string | null;
   /** Terminal tabs opened as an agent (task id → agent id): their brand logo when no agent is detected. */
@@ -238,7 +226,6 @@ function NewTabMenu({
   onTerminal,
   onAgent,
   onBrowser,
-  onScreen,
   onRestoreFocus,
 }: {
   open: boolean;
@@ -250,8 +237,6 @@ function NewTabMenu({
   onTerminal: () => void;
   onAgent: (agentId: AgentId) => void;
   onBrowser: () => void;
-  /** 屏幕 (plan 20260929-remote-desktop); absent where the device does not offer it. */
-  onScreen: (() => void) | null;
   onRestoreFocus: () => void;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
@@ -337,7 +322,6 @@ function NewTabMenu({
           </DropdownMenuSubMenu>
         ) : null}
         <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
-        {onScreen ? <DropdownMenuItem icon={<Monitor className="size-3.5" />} label="屏幕" onClick={onScreen} /> : null}
       </DropdownMenu>
       <Tooltip anchorRef={anchorRef} isEnabled={!open && !tooltipQuiet} isOpen={open ? false : undefined} content="新建标签页" />
     </>
@@ -395,8 +379,6 @@ type DragGhost = {
   title: string;
   /** A browser tab's ghost shows its favicon (or a globe) instead of the terminal glyph. */
   browser: { favicon: string | null } | null;
-  /** A screen tab's ghost shows the monitor glyph (plan 20260929-remote-desktop). */
-  screen: boolean;
   /** A file tab's ghost shows its file-type icon (plan 20261001-terminal-file-tab): the file's path. */
   file: string | null;
   width: number;
@@ -539,9 +521,7 @@ export function WorkspaceTerminal({
   leftDockReserve,
   actions,
   browser,
-  screens,
   files,
-  canOpenScreen,
   newTabMenuGroupId,
   agentTabs,
   fileReveal,
@@ -565,9 +545,7 @@ export function WorkspaceTerminal({
   const effectiveAgentList = useMemo(() => effectiveAgents(agentSettings), [agentSettings]);
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
-  const screenTabs = useStore(screens.tabs, (state) => state.tabs);
   const fileTabs = useStore(files.tabs, (state) => state.tabs);
-  const daemons = useStore(client.store, (state) => state.daemons);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   // Executor runs (plan 20260929-executor-pip): a tab whose terminal delegated a sub-task shows an
@@ -692,7 +670,7 @@ export function WorkspaceTerminal({
   let seenNext = seenDone;
   for (const { group } of geometry.groups) {
     for (const taskId of group.tabs) {
-      if (isBrowserTabId(taskId) || isScreenTabId(taskId)) continue;
+      if (isBrowserTabId(taskId)) continue;
       const sessionId = taskById.get(taskId)?.sessionId;
       if (!sessionId) continue;
       const agentState = sessionAgents[sessionId]?.state;
@@ -747,7 +725,7 @@ export function WorkspaceTerminal({
   }
 
   /** Native HTML5 drag of any tab (terminal or browser); its payload is not a file type. */
-  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], screenGhost = false, fileGhost: string | null = null) {
+  function tabDragProps(tabId: string, title: string, browserGhost: DragGhost["browser"], fileGhost: string | null = null) {
     return {
       draggable: true,
       onDragStart: (event: ReactDragEvent<HTMLDivElement>) => {
@@ -758,7 +736,6 @@ export function WorkspaceTerminal({
         dragGhostRef.current = {
           title,
           browser: browserGhost,
-          screen: screenGhost,
           file: fileGhost,
           width: tabRect.width,
           offsetX: event.clientX - tabRect.left,
@@ -856,70 +833,6 @@ export function WorkspaceTerminal({
   }
 
   /**
-   * A remote screen tab's chip (plan 20260929-remote-desktop): the monitor glyph, the device name, a
-   * close button — the same chrome, drag and split behaviour as the other tabs. Closing ends the
-   * remote session without confirmation (nothing on the remote is lost: its windows stay).
-   */
-  function renderScreenTab(
-    group: LayoutGroup,
-    tabId: string,
-    isActive: boolean,
-    bright: boolean,
-    activeClass: string,
-    idleClass: string,
-    indicators: ReactNode,
-  ) {
-    const record = screenTabs[tabId];
-    const daemon = record ? daemons.find((item) => item.daemonId === record.daemonId) : undefined;
-    const label = daemon?.name ? `${daemon.name} 的屏幕` : "屏幕";
-    const canSplit = group.tabs.length > 1;
-    return (
-      <div
-        key={tabId}
-        data-tab-slot
-        className={cn("relative shrink-0", dragTaskId === tabId && "opacity-50")}
-        style={NO_DRAG_REGION_STYLE}
-        {...tabDragProps(tabId, label, null, true)}
-      >
-        <ContextMenu
-          label={`标签页「${label}」操作`}
-          size="sm"
-          items={[
-            {
-              label: "移到右侧新分组",
-              isDisabled: !canSplit,
-              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "right")),
-            },
-            {
-              label: "移到下方新分组",
-              isDisabled: !canSplit,
-              onClick: () => actions.moveTab(workspaceId, tabId, (current) => moveTabToNewGroup(current, tabId, group.id, "down")),
-            },
-            { type: "divider" },
-            { label: "断开并关闭", onClick: () => actions.closeScreenTab(workspaceId, tabId) },
-          ]}
-        >
-          <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
-            <button className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left" onClick={() => actions.activateTab(workspaceId, tabId)}>
-              <Monitor className={cn("size-3 shrink-0", bright ? "opacity-90" : "opacity-70")} />
-              <span className="truncate">{label}</span>
-            </button>
-            <Tooltip content={bright ? `断开并关闭 ${modPrefix}W` : "断开并关闭"} placement="below">
-              <button
-                className="mr-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
-                onClick={() => actions.closeScreenTab(workspaceId, tabId)}
-              >
-                <X className="size-3" />
-              </button>
-            </Tooltip>
-          </div>
-        </ContextMenu>
-        {indicators}
-      </div>
-    );
-  }
-
-  /**
    * A file tab's chip (plan 20261001-terminal-file-tab): the file-type icon, the file name (the
    * workspace-relative path in a tooltip, since names collide and truncate), a close button — the
    * same chrome, drag and split behaviour as the other tabs. Closing needs no confirmation.
@@ -943,7 +856,7 @@ export function WorkspaceTerminal({
         data-tab-slot
         className={cn("relative shrink-0", dragTaskId === tabId && "opacity-50")}
         style={NO_DRAG_REGION_STYLE}
-        {...tabDragProps(tabId, label, null, false, path)}
+        {...tabDragProps(tabId, label, null, path)}
       >
         <ContextMenu
           label={`标签页「${label}」操作`}
@@ -1027,7 +940,6 @@ export function WorkspaceTerminal({
     }
 
     if (isBrowserTabId(taskId)) return renderBrowserTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
-    if (isScreenTabId(taskId)) return renderScreenTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
     if (isFileTabId(taskId)) return renderFileTab(group, taskId, isActive, isActive && groupFocused, activeClass, idleClass, indicators);
 
     const task = taskById.get(taskId);
@@ -1224,7 +1136,6 @@ export function WorkspaceTerminal({
               onTerminal={() => actions.createTerminal(workspaceId, group.id)}
               onAgent={(agentId) => actions.createAgentTerminal(workspaceId, group.id, agentId)}
               onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}
-              onScreen={canOpenScreen ? () => actions.createScreenTab(workspaceId, group.id) : null}
               onRestoreFocus={() => actions.focusActiveTab(workspaceId)}
             />
           </div>
@@ -1398,8 +1309,6 @@ export function WorkspaceTerminal({
           >
             {dragGhost.browser ? (
               <BrowserTabGlyph favicon={dragGhost.browser.favicon} loading={false} className="opacity-90" />
-            ) : dragGhost.screen ? (
-              <Monitor className="size-3 shrink-0 opacity-90" />
             ) : dragGhost.file !== null ? (
               <FileTypeIcon path={dragGhost.file} />
             ) : (

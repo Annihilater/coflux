@@ -36,7 +36,7 @@ type GlobalShortcutsOptions = {
    * the one reserved combination, ⌃⌥⌘F. A ref, read per key: focus changes without a re-render.
    */
   screenFocusedRef?: RefObject<boolean>;
-  /** ⌃⌥⌘F: toggle immersive mode of the focused screen tab (both ways, tab mode included). */
+  /** ⌃⌥⌘F: toggle immersive mode of the selected screen (both ways). */
   onToggleImmersive?: () => void;
 };
 
@@ -73,7 +73,7 @@ export function useGlobalShortcuts({
 }: GlobalShortcutsOptions) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      // ⌃⌥⌘F is the screen tab's one local combination; it works in tab mode and immersive mode alike.
+      // ⌃⌥⌘F is the screen's one local combination; it works in and out of immersive mode alike.
       if (event.code === "KeyF" && event.ctrlKey && event.altKey && event.metaKey && !event.shiftKey) {
         if (!onToggleImmersive || isSuspended) return;
         event.preventDefault();
@@ -271,9 +271,6 @@ export function useGlobalShortcuts({
             return;
           case "new-browser-tab":
             terminal?.openBrowserTab();
-            return;
-          case "new-screen-tab":
-            terminal?.openScreenTab();
             return;
           case "toggle-sidebar":
             onToggleSidebar();
