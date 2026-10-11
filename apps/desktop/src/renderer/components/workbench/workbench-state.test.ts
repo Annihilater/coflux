@@ -17,6 +17,39 @@ test("工作区与设备选择的持久化格式保持向后兼容", () => {
   assert.equal(serializeSelection(null), null);
 });
 
+test("a screen selection round-trips through storage (plan 20261011-standalone-device-screen)", () => {
+  assert.equal(serializeSelection({ kind: "screen", id: "daemon-1" }), "screen:daemon-1");
+  assert.deepEqual(parseStoredSelection("screen:daemon-1"), { kind: "screen", id: "daemon-1" });
+});
+
+test("a screen selection holds only while its device exists and its screen is open", () => {
+  const screen = { kind: "screen", id: "daemon-1" } as const;
+  const base = {
+    selection: screen,
+    pendingWorkspaceIds: new Set<string>(),
+    projects: [{ id: "p1", createdAt: 1 }],
+    workspaces: [{ id: "main", projectId: "p1", isMain: true }],
+  };
+  assert.deepEqual(resolveWorkbenchSelection({ ...base, daemons: [{ daemonId: "daemon-1" }], screenDeviceIds: new Set(["daemon-1"]) }), {
+    selection: screen,
+    changed: false,
+    shouldPersist: true,
+  });
+  // The screen was closed (no record): falls back like any invalid selection.
+  assert.deepEqual(resolveWorkbenchSelection({ ...base, daemons: [{ daemonId: "daemon-1" }], screenDeviceIds: new Set() }), {
+    selection: { kind: "workspace", id: "main" },
+    changed: true,
+    shouldPersist: true,
+  });
+  // The device is gone although a record is left.
+  assert.deepEqual(resolveWorkbenchSelection({ ...base, daemons: [], screenDeviceIds: new Set(["daemon-1"]) }).selection, { kind: "workspace", id: "main" });
+  // A device page of the same device does not need a screen.
+  assert.equal(
+    resolveWorkbenchSelection({ ...base, selection: { kind: "device", id: "daemon-1" }, daemons: [{ daemonId: "daemon-1" }], screenDeviceIds: new Set() }).changed,
+    false,
+  );
+});
+
 test("有效设备选择即使离线也保留，乐观工作区暂不持久化", () => {
   const device = { kind: "device", id: "daemon-1" } as const;
   assert.deepEqual(
@@ -26,6 +59,7 @@ test("有效设备选择即使离线也保留，乐观工作区暂不持久化",
       projects: [],
       workspaces: [],
       daemons: [{ daemonId: "daemon-1" }],
+      screenDeviceIds: new Set(),
     }),
     { selection: device, changed: false, shouldPersist: true },
   );
@@ -38,6 +72,7 @@ test("有效设备选择即使离线也保留，乐观工作区暂不持久化",
       projects: [],
       workspaces: [],
       daemons: [],
+      screenDeviceIds: new Set(),
     }),
     { selection: pending, changed: false, shouldPersist: false },
   );
@@ -60,6 +95,7 @@ test("失效选择优先回退到最早项目的 main workspace，再回退任�
       projects,
       workspaces,
       daemons: [],
+      screenDeviceIds: new Set(),
     }),
     { selection: { kind: "workspace", id: "older-main" }, changed: true, shouldPersist: true },
   );
@@ -70,6 +106,7 @@ test("失效选择优先回退到最早项目的 main workspace，再回退任�
       projects: [],
       workspaces,
       daemons: [],
+      screenDeviceIds: new Set(),
     }).selection,
     { kind: "workspace", id: "newer-main" },
   );
