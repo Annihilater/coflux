@@ -453,10 +453,9 @@ public final class ScreenHelper: HelperServerDelegate {
                 completion(error)
                 return
             }
-            let displayID = self.provider.displayID
-            DisplayConfiguration.waitOnline(displayID) { [weak self] online in
+            DisplayConfiguration.waitOnline({ [weak self] in self?.provider.displayID ?? 0 }) { [weak self] online in
                 guard let self, self.session === session else { return }
-                guard online else {
+                guard let displayID = online else {
                     session.displayReady = false
                     completion(HelperError.display("virtual display did not come online (displays asleep?)"))
                     return

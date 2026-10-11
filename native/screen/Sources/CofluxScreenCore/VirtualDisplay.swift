@@ -25,7 +25,22 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
 
     public init() {}
 
-    public var displayID: CGDirectDisplayID { display?.displayID ?? 0 }
+    private static let vendorID: UInt32 = 0x434F // "CO"
+    private static let productID: UInt32 = 0x4658 // "FX"
+    private static let serialNum: UInt32 = 1
+
+    /// The online display this provider created, found by vendor, product and serial number; the
+    /// object's own `displayID` only when no such display is online. A display created while every
+    /// display slept is configured only once they wake, and comes online under an id other than the
+    /// one the object reported at creation (measured on macOS 27): trusting the object's id waits
+    /// forever for a display that never appears.
+    public var displayID: CGDirectDisplayID {
+        guard let display else { return 0 }
+        let ours = DisplayConfiguration.onlineDisplays().first {
+            CGDisplayVendorNumber($0) == Self.vendorID && CGDisplayModelNumber($0) == Self.productID && CGDisplaySerialNumber($0) == Self.serialNum
+        }
+        return ours ?? display.displayID
+    }
 
     public func apply(_ geometry: DisplayGeometry) throws {
         if display == nil {
@@ -36,10 +51,10 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
             // Roughly a 27" panel: the physical size only affects the point density the system
             // assumes, and the HiDPI mode is selected explicitly anyway.
             descriptor.sizeInMillimeters = CGSize(width: 600, height: 340)
-            descriptor.vendorID = 0x434F // "CO"
-            descriptor.productID = 0x4658 // "FX"
+            descriptor.vendorID = Self.vendorID
+            descriptor.productID = Self.productID
             // Fixed on purpose: WindowServer may still be deferring an earlier attempt.
-            descriptor.serialNum = 1
+            descriptor.serialNum = Self.serialNum
             descriptor.queue = DispatchQueue.main
             descriptor.terminationHandler = nil
             display = CGVirtualDisplay(descriptor: descriptor)
@@ -83,14 +98,17 @@ public enum DisplayConfiguration {
         poll()
     }
 
-    /// Wait until `displayID` is in the online display list (the reconfiguration landed).
-    public static func waitOnline(_ displayID: CGDirectDisplayID, timeout: TimeInterval = 5, completion: @escaping (Bool) -> Void) {
+    /// Wait until the display `displayID()` names is in the online display list (the
+    /// reconfiguration landed); the id is read on every poll, since it may change as it comes online.
+    /// A display created while the others slept appears only after they wake, hence the margin.
+    public static func waitOnline(_ displayID: @escaping () -> CGDirectDisplayID, timeout: TimeInterval = 15, completion: @escaping (CGDirectDisplayID?) -> Void) {
         let deadline = Date().addingTimeInterval(timeout)
         func poll() {
-            if onlineDisplays().contains(displayID) {
-                completion(true)
+            let id = displayID()
+            if id != 0, onlineDisplays().contains(id) {
+                completion(id)
             } else if Date() >= deadline {
-                completion(false)
+                completion(nil)
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { poll() }
             }
