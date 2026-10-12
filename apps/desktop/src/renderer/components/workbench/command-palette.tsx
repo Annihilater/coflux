@@ -23,7 +23,7 @@ import {
   type PaletteSnapshot,
 } from "@/components/workbench/command-palette-data";
 import { readRecentPlaces, type RecentPlacesStore } from "@/components/workbench/command-palette-recent";
-import { deviceOsMarkOf, type DeviceMarkComponent } from "@/components/workbench/device-os";
+import { DeviceOsMark } from "@/components/workbench/device-os";
 import { cn } from "@/lib/utils";
 import type { CofluxClient } from "@coflux/client";
 
@@ -167,6 +167,11 @@ function PaletteHeader({
   );
 }
 
+function KindIcon({ kind, className }: { kind: Exclude<PaletteEntryKind, "device">; className: string }) {
+  const Icon = KIND_ICON[kind];
+  return <Icon className={className} />;
+}
+
 /**
  * One row: kind icon, primary label, secondary label, then trailing metadata.
  *
@@ -175,14 +180,16 @@ function PaletteHeader({
  * draw itself from it — two rows would look active after one arrow press.
  */
 function PaletteRow({ entry }: { entry: PaletteEntry }) {
-  const Icon: DeviceMarkComponent = entry.kind === "device" ? deviceOsMarkOf(entry.platform) : KIND_ICON[entry.kind];
   const isMainWorkspace = entry.kind === "workspace" && entry.detail === "主工作区";
+  const iconClass = cn("size-3.5 shrink-0", isMainWorkspace ? "text-warning" : "opacity-70");
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2">
       {entry.activity ? (
         <ActivityDots status={entry.activity} label={ACTIVITY_LABEL[entry.activity]} />
+      ) : entry.kind === "device" ? (
+        <DeviceOsMark platform={entry.platform} className={iconClass} />
       ) : (
-        <Icon className={cn("size-3.5 shrink-0", isMainWorkspace ? "text-warning" : "opacity-70")} />
+        <KindIcon kind={entry.kind} className={iconClass} />
       )}
       <span className="truncate text-base text-foreground">{entry.label}</span>
       {entry.detail ? <span className="shrink-0 truncate text-sm text-muted-foreground">{entry.detail}</span> : null}

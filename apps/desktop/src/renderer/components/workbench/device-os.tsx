@@ -57,23 +57,17 @@ export function LinuxMark({ className }: MarkProps) {
   );
 }
 
-function ServerMark({ className }: MarkProps) {
-  return <Server aria-hidden className={cn("shrink-0", className)} />;
-}
-
-const OS_MARKS: Readonly<Record<DeviceOs, DeviceMarkComponent>> = {
-  mac: AppleMark,
-  linux: LinuxMark,
-  unknown: ServerMark,
-};
-
-/** The mark component for a device's platform, for slots typed as an icon component. */
-export function deviceOsMarkOf(platform: string | undefined): DeviceMarkComponent {
-  return OS_MARKS[deviceOsOf(platform)];
-}
-
-/** A device's OS mark: Apple for macOS, Tux for Linux, lucide `Server` for anything else. */
+/**
+ * A device's OS mark: Apple for macOS, Tux for Linux, lucide `Server` for anything else. Explicit
+ * branches rather than a looked-up component, so no component is picked during render.
+ */
 export function DeviceOsMark({ platform, className }: { platform: string | undefined; className?: string }) {
-  const Mark = deviceOsMarkOf(platform);
-  return <Mark className={className} />;
+  switch (deviceOsOf(platform)) {
+    case "mac":
+      return <AppleMark className={className} />;
+    case "linux":
+      return <LinuxMark className={className} />;
+    case "unknown":
+      return <Server aria-hidden className={cn("shrink-0", className)} />;
+  }
 }
