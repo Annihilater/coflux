@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Eye, EyeOff, Folder, Monitor, MonitorUp, Search } from "lucide-react";
+import { Eye, EyeOff, Folder, MonitorUp, Search } from "lucide-react";
 import { FsEntryKind, type DaemonInfo, type FsEntry } from "@coflux/protocol";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -10,6 +10,8 @@ import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 
 import type { FsListResult } from "@coflux/client";
+
+import { DeviceOsMark } from "@/components/workbench/device-os";
 
 type ImportProjectWizardProps = {
   open: boolean;
@@ -377,7 +379,7 @@ export function ImportProjectWizard(props: ImportProjectWizardProps) {
                           onClick={() => selectDevice(daemon.daemonId)}
                         >
                           <span className="coflux-import-row__icon">
-                            <Monitor aria-hidden />
+                            <DeviceOsMark platform={daemon.platform} />
                           </span>
                           <Text type="body" className="coflux-import-row__name" maxLines={1}>
                             {daemon.name}

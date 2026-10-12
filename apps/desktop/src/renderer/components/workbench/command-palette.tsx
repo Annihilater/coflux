@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Folder, GitBranch, Globe, Monitor, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Folder, GitBranch, Globe, SquareTerminal, type LucideIcon } from "lucide-react";
 import {
   CommandPalette,
   CommandPaletteFooter,
@@ -23,6 +23,7 @@ import {
   type PaletteSnapshot,
 } from "@/components/workbench/command-palette-data";
 import { readRecentPlaces, type RecentPlacesStore } from "@/components/workbench/command-palette-recent";
+import { deviceOsMarkOf, type DeviceMarkComponent } from "@/components/workbench/device-os";
 import { cn } from "@/lib/utils";
 import type { CofluxClient } from "@coflux/client";
 
@@ -62,11 +63,11 @@ const FILTER_TABS: readonly { id: PaletteFilter; label: string }[] = [
   { id: "device", label: "设备" },
 ];
 
-const KIND_ICON: Record<PaletteEntryKind, LucideIcon> = {
+/** Per-kind icons; a device entry draws its own OS mark instead. */
+const KIND_ICON: Record<Exclude<PaletteEntryKind, "device">, LucideIcon> = {
   workspace: GitBranch,
   project: Folder,
   terminal: SquareTerminal,
-  device: Monitor,
   action: Globe,
 };
 
@@ -174,7 +175,7 @@ function PaletteHeader({
  * draw itself from it — two rows would look active after one arrow press.
  */
 function PaletteRow({ entry }: { entry: PaletteEntry }) {
-  const Icon = KIND_ICON[entry.kind];
+  const Icon: DeviceMarkComponent = entry.kind === "device" ? deviceOsMarkOf(entry.platform) : KIND_ICON[entry.kind];
   const isMainWorkspace = entry.kind === "workspace" && entry.detail === "主工作区";
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2">
