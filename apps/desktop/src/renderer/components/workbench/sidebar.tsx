@@ -1,13 +1,14 @@
-import { Fragment, useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Workspace } from "@coflux/protocol";
 
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
+import { DeviceOsMark, deviceOsName } from "@/components/workbench/device-os";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
@@ -377,7 +378,7 @@ export function Sidebar(props: SidebarProps) {
                                 <span className="truncate">{workspace.path}</span>
                               </span>
                               <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                                <Monitor className="size-3 shrink-0 opacity-70" />
+                                <DeviceOsMark platform={daemon?.platform} className="size-3 shrink-0 opacity-70" />
                                 <span className="truncate">{daemon ? `${daemon.name}（${daemon.online ? "在线" : "离线"}）` : "设备记录缺失"}</span>
                               </span>
                               {hasDiff ? (
@@ -512,7 +513,7 @@ export function Sidebar(props: SidebarProps) {
               className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-base text-muted-foreground hover:bg-accent/70"
               onClick={() => props.onAddDevice()}
             >
-              <Monitor className="size-3.5" />
+              <Plus className="size-3.5" />
               添加第一台设备
             </button>
           ) : null}
@@ -574,8 +575,8 @@ export function Sidebar(props: SidebarProps) {
               // 用组件库 Tooltip 而非原生 title：原生要悬停约 1s 才弹，且弹出后内容不再随
               // 心跳更新——延迟读数正是每 15s 会变的东西。
               // 布局照 Cursor：一行标题说结论（走哪条路 + 多快），下面是图标条目列表铺上下文。
-              const tooltipRows: { icon: LucideIcon; text: string }[] = [
-                { icon: Monitor, text: `${daemon.host} / ${daemon.platform}` },
+              const tooltipRows: { icon: ReactNode; text: string }[] = [
+                { icon: <DeviceOsMark platform={daemon.platform} className="size-3 shrink-0 opacity-70" />, text: `${daemon.host} · ${deviceOsName(daemon.platform)}` },
               ];
               const tooltipContent = (
                 <div className="flex flex-col gap-1">
@@ -586,7 +587,7 @@ export function Sidebar(props: SidebarProps) {
                   <div className="flex flex-col gap-0.5">
                     {tooltipRows.map((row) => (
                       <span key={row.text} className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                        <row.icon className="size-3 shrink-0 opacity-70" />
+                        {row.icon}
                         <span className="truncate">{row.text}</span>
                       </span>
                     ))}
@@ -630,7 +631,7 @@ export function Sidebar(props: SidebarProps) {
                             <span className={cn("size-1.5 rounded-full", dotClass)} />
                           )}
                         </span>
-                        <Monitor className="size-3.5 opacity-70" />
+                        <DeviceOsMark platform={daemon.platform} className="size-3.5 opacity-70" />
                         <span className="min-w-0 flex-1 truncate">
                           {daemon.name}
                         </span>

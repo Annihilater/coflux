@@ -3,7 +3,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent, LayoutPanel, VStack } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { ArrowLeft, Bot, Monitor, Settings2, Sparkles, type LucideIcon } from "lucide-react";
+import { ArrowLeft, Bot, Settings2, Sparkles } from "lucide-react";
 import type { CofluxClient } from "@coflux/client";
 
 import { AgentsSection } from "@/components/settings/agents-section";
@@ -17,6 +17,7 @@ import {
   type SettingsSectionId,
 } from "@/components/settings/settings-nav";
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
+import { AppleMark, type DeviceMarkComponent } from "@/components/workbench/device-os";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
@@ -32,11 +33,15 @@ import type { DesktopDaemonState } from "@/desktop-bridge";
  */
 const SETTINGS_NAV_ITEM_CLASS = "h-7 px-3 py-0 font-medium";
 
-/** 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。 */
-const SECTION_ICONS: Record<SettingsSectionId, LucideIcon> = {
+/**
+ * 导航项图标：与分区一一对应，缺一个都会让那一行看起来是另一种东西。
+ * 「本机」 takes the Apple mark: the desktop app ships only for macOS, so this machine is always a
+ * Mac (plan 20261012-device-os-icons; the monitor glyph is reserved for a device's screen).
+ */
+const SECTION_ICONS: Record<SettingsSectionId, DeviceMarkComponent> = {
   general: Settings2,
   agents: Sparkles,
-  machine: Monitor,
+  machine: AppleMark,
   executor: Bot,
 };
 

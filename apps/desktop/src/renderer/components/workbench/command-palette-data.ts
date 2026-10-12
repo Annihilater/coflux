@@ -50,6 +50,8 @@ export type PaletteEntry = {
   activity: PaletteActivity;
   /** The device hosting this entry is offline. Opening it still works, landing on the offline state. */
   isOffline: boolean;
+  /** Device entries only: the platform the device reported, from which the row draws its OS mark. */
+  platform?: string;
   target: PaletteTarget;
 };
 
@@ -234,6 +236,7 @@ export function buildPaletteSnapshot(input: PaletteSnapshotInput): PaletteSnapsh
       keywords: daemon.platform,
       activity: null,
       isOffline: !daemon.online,
+      platform: daemon.platform,
       target: { kind: "device", daemonId: daemon.daemonId },
     });
   }
