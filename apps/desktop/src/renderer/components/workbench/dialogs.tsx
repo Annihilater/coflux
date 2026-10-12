@@ -212,7 +212,7 @@ function shortcutRows(): { keys: string[]; description: string }[] {
     { keys: [...mod, "B"], description: "显示 / 隐藏侧边栏" },
     // ⌘R 不在 use-global-shortcuts 里：它由原生菜单的 role: "reload" 注册（见 main/menu.ts）。
     { keys: [...mod, "R"], description: "重新载入界面" },
-    // The screen tab's one local combination (plan 20260929-remote-desktop); everything else goes to the remote.
+    // The screen's one local combination (plan 20260929-remote-desktop); everything else goes to the remote.
     { keys: ["⌃", "⌥", ...mod, "F"], description: "屏幕：进入 / 退出沉浸模式" },
     { keys: ["⌘", "/"], description: "显示 / 隐藏本面板" },
   ];

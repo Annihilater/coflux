@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useStore } from "zustand";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
@@ -11,6 +11,9 @@ import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
 import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/executor-run";
 import { ActivityDots } from "@/components/workbench/pending-dots";
+import { screenResolutionLabel } from "@/components/workbench/screen-resolution";
+import type { ScreenRuntime } from "@/components/workbench/screen-runtime";
+import { useScreenSessionState } from "@/components/workbench/screen-view";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
@@ -34,6 +37,59 @@ function activityLabel(activity: WorkspaceActivity): string {
 function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labeled?: boolean }) {
   if (activity.status === "idle") return null;
   return <ActivityDots status={activity.status} label={labeled ? activityLabel(activity) : undefined} />;
+}
+
+/**
+ * An open screen's sub-row under its device (plan 20261011-standalone-device-screen): the monitor
+ * glyph, 「屏幕」 and the resolution — the connected remote size when known, else the fixed preset
+ * chosen, else nothing. Clicking selects the screen; the × shown on hover disconnects it.
+ */
+function ScreenRow({
+  runtime,
+  daemonId,
+  selected,
+  onSelect,
+  onDisconnect,
+}: {
+  runtime: ScreenRuntime;
+  daemonId: string;
+  selected: boolean;
+  onSelect: () => void;
+  onDisconnect: () => void;
+}) {
+  const state = useScreenSessionState(runtime, daemonId);
+  const display = state?.display;
+  const resolution = display ? `${display.widthPoints}×${display.heightPoints}` : state?.resolution ? screenResolutionLabel(state.resolution) : null;
+  return (
+    <div className="ml-3 border-l border-border pl-1.5">
+      <div
+        className={cn(
+          "group/screen relative flex h-7 items-center rounded-md transition-colors",
+          selected ? "bg-accent text-foreground" : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
+        )}
+      >
+        <button className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left" aria-pressed={selected} onClick={onSelect}>
+          <Monitor className="size-3.5 shrink-0 opacity-70" />
+          <span className="shrink-0 text-base">屏幕</span>
+          {resolution ? (
+            <span className="min-w-0 truncate text-sm text-muted-foreground group-hover/screen:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]">
+              · {resolution}
+            </span>
+          ) : null}
+        </button>
+        <Tooltip content="断开屏幕" placement="end">
+          <button
+            type="button"
+            aria-label="断开屏幕"
+            className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/screen:opacity-100 focus-visible:opacity-100"
+            onClick={onDisconnect}
+          >
+            <X className="size-3" />
+          </button>
+        </Tooltip>
+      </div>
+    </div>
+  );
 }
 
 /** 乐观工作区条目（plan 078）：创建请求发出后、服务端广播到达前的占位行。
@@ -65,6 +121,13 @@ type SidebarProps = {
   localDaemonId: string | null;
   /** 打开屏幕 on a device row: only for devices advertising the screen helper (`screen_v1`). */
   onOpenScreen: (daemon: DaemonInfo) => void;
+  /** Open screens (plan 20261011-standalone-device-screen): each is a sub-row under its device. */
+  screens: ScreenRuntime;
+  /** The device whose screen is the selection; exclusive with the other two selections. */
+  selectedScreenDeviceId: string | null;
+  onSelectScreen: (daemonId: string) => void;
+  /** The sub-row's ×: ends the remote session and closes the screen. */
+  onDisconnectScreen: (daemonId: string) => void;
   /** 新建工作区菜单当前打开的项目（受控：+ 按钮/右键菜单项/Cmd+Ctrl+N 快捷键共用同一个锚点菜单） */
   createMenuProjectId: string | null;
   onCreateMenuProjectIdChange: (projectId: string | null) => void;
@@ -88,6 +151,7 @@ export function Sidebar(props: SidebarProps) {
   const tasks = useStore(client.store, (state) => state.tasks);
   const localSessions = useStore(client.store, (state) => state.localSessions);
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
+  const screenRecords = useStore(props.screens.records, (state) => state.records);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
   // Executor runs (plan 20260929-executor-pip): a workspace whose terminal has one delegated a
   // sub-task; the row shows activity for it when the agents themselves are idle.
@@ -530,8 +594,8 @@ export function Sidebar(props: SidebarProps) {
                 </div>
               );
               return (
+                <Fragment key={daemon.daemonId}>
                 <ContextMenu
-                  key={daemon.daemonId}
                   label={`设备「${daemon.name}」操作`}
                   size="sm"
                   items={[
@@ -589,6 +653,16 @@ export function Sidebar(props: SidebarProps) {
                     </div>
                   </Tooltip>
                 </ContextMenu>
+                {screenRecords[daemon.daemonId] ? (
+                  <ScreenRow
+                    runtime={props.screens}
+                    daemonId={daemon.daemonId}
+                    selected={daemon.daemonId === props.selectedScreenDeviceId}
+                    onSelect={() => props.onSelectScreen(daemon.daemonId)}
+                    onDisconnect={() => props.onDisconnectScreen(daemon.daemonId)}
+                  />
+                ) : null}
+                </Fragment>
               );
             })}
           </div>

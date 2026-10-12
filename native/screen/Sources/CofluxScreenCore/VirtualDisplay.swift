@@ -6,8 +6,9 @@ import Foundation
 /// 27) can be swapped for the macOS 27 SkyLight `SLVirtualDisplay` family later without touching
 /// the session. Measured facts the implementation respects (see the plan's Decisions):
 ///  1. re-applying settings on the same object changes resolution and keeps the displayID;
-///  2. the first apply lands on a 1× mode of doubled point size: the HiDPI mode is selected
-///     explicitly afterwards from the modes the system then offers;
+///  2. with hiDPI the mode is given in points and the system offers the HiDPI mode at twice it in
+///     pixels, but may not land on it by itself: it is selected explicitly afterwards from the
+///     modes the system then offers;
 ///  3. while every display sleeps WindowServer defers all configuration: the displays are woken
 ///     and the display waited for before creating, capturing or destroying — and the same serial
 ///     number is reused on every attempt (a lingering display is deferred, not leaked);
@@ -24,7 +25,22 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
 
     public init() {}
 
-    public var displayID: CGDirectDisplayID { display?.displayID ?? 0 }
+    private static let vendorID: UInt32 = 0x434F // "CO"
+    private static let productID: UInt32 = 0x4658 // "FX"
+    private static let serialNum: UInt32 = 1
+
+    /// The online display this provider created, found by vendor, product and serial number; the
+    /// object's own `displayID` only when no such display is online. A display created while every
+    /// display slept is configured only once they wake, and comes online under an id other than the
+    /// one the object reported at creation (measured on macOS 27): trusting the object's id waits
+    /// forever for a display that never appears.
+    public var displayID: CGDirectDisplayID {
+        guard let display else { return 0 }
+        let ours = DisplayConfiguration.onlineDisplays().first {
+            CGDisplayVendorNumber($0) == Self.vendorID && CGDisplayModelNumber($0) == Self.productID && CGDisplaySerialNumber($0) == Self.serialNum
+        }
+        return ours ?? display.displayID
+    }
 
     public func apply(_ geometry: DisplayGeometry) throws {
         if display == nil {
@@ -35,10 +51,10 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
             // Roughly a 27" panel: the physical size only affects the point density the system
             // assumes, and the HiDPI mode is selected explicitly anyway.
             descriptor.sizeInMillimeters = CGSize(width: 600, height: 340)
-            descriptor.vendorID = 0x434F // "CO"
-            descriptor.productID = 0x4658 // "FX"
+            descriptor.vendorID = Self.vendorID
+            descriptor.productID = Self.productID
             // Fixed on purpose: WindowServer may still be deferring an earlier attempt.
-            descriptor.serialNum = 1
+            descriptor.serialNum = Self.serialNum
             descriptor.queue = DispatchQueue.main
             descriptor.terminationHandler = nil
             display = CGVirtualDisplay(descriptor: descriptor)
@@ -46,8 +62,12 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
         guard let display else { throw HelperError.display("CGVirtualDisplay unavailable") }
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = geometry.scale == 2 ? 1 : 0
+        // With hiDPI set, the mode's size is read as points: the system then offers the native
+        // HiDPI mode at twice it in pixels. Given pixels, it would build a mode twice as large and
+        // offer the wanted one only as unusable for the desktop, which a selection refuses with
+        // kCGErrorFailure (measured on macOS 27).
         settings.modes = [
-            CGVirtualDisplayMode(width: UInt(geometry.widthPixels), height: UInt(geometry.heightPixels), refreshRate: 60),
+            CGVirtualDisplayMode(width: UInt(geometry.widthPoints), height: UInt(geometry.heightPoints), refreshRate: 60),
         ]
         guard display.apply(settings) else {
             throw HelperError.display("applySettings refused \(geometry.widthPixels)x\(geometry.heightPixels)")
@@ -78,16 +98,40 @@ public enum DisplayConfiguration {
         poll()
     }
 
-    /// Wait until `displayID` is in the online display list (the reconfiguration landed).
-    public static func waitOnline(_ displayID: CGDirectDisplayID, timeout: TimeInterval = 5, completion: @escaping (Bool) -> Void) {
+    /// Wait until the display `displayID()` names is in the online display list (the
+    /// reconfiguration landed); the id is read on every poll, since it may change as it comes online.
+    /// A display created while the others slept appears only after they wake, hence the margin.
+    public static func waitOnline(_ displayID: @escaping () -> CGDirectDisplayID, timeout: TimeInterval = 15, completion: @escaping (CGDirectDisplayID?) -> Void) {
         let deadline = Date().addingTimeInterval(timeout)
         func poll() {
-            if onlineDisplays().contains(displayID) {
-                completion(true)
+            let id = displayID()
+            if id != 0, onlineDisplays().contains(id) {
+                completion(id)
             } else if Date() >= deadline {
-                completion(false)
+                completion(nil)
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { poll() }
+            }
+        }
+        poll()
+    }
+
+    /// Run `attempt` until it stops throwing, every `interval` up to `timeout`; the completion carries
+    /// the last failure. A virtual display that just came online (or was just re-applied) is still
+    /// being reconfigured: WindowServer refuses a mode change or a mirror with kCGErrorFailure until
+    /// it settles, and accepts the same request a moment later (measured on macOS 27).
+    public static func settle(timeout: TimeInterval = 3, interval: TimeInterval = 0.2, _ attempt: @escaping () throws -> Void, completion: @escaping (Error?) -> Void) {
+        let deadline = Date().addingTimeInterval(timeout)
+        func poll() {
+            do {
+                try attempt()
+                completion(nil)
+            } catch {
+                if Date() >= deadline {
+                    completion(error)
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + interval) { poll() }
+                }
             }
         }
         poll()
@@ -125,8 +169,9 @@ public enum DisplayConfiguration {
             throw HelperError.display("cannot begin display configuration")
         }
         CGConfigureDisplayWithDisplayMode(config, displayID, modes[index], nil)
-        guard CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else {
-            throw HelperError.display("mode selection refused")
+        let status = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        guard status == .success else {
+            throw HelperError.display("mode selection refused (CGError \(status.rawValue))")
         }
     }
 
@@ -141,8 +186,9 @@ public enum DisplayConfiguration {
         for display in onlineDisplays() where display != virtualDisplay {
             CGConfigureDisplayMirrorOfDisplay(config, display, virtualDisplay)
         }
-        guard CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else {
-            throw HelperError.display("mirroring refused")
+        let status = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        guard status == .success else {
+            throw HelperError.display("mirroring refused (CGError \(status.rawValue))")
         }
     }
 

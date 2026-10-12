@@ -30,21 +30,31 @@ export function taskCloseNeedsConfirmation(status: TaskStatus): boolean {
   return status === TaskStatus.RUNNING;
 }
 
-export type WorkbenchSelection = { kind: "workspace" | "device"; id: string };
+/**
+ * What the main area shows: a workspace, a device page, or a device's remote screen (plan
+ * 20261011-standalone-device-screen); for both device kinds `id` is the device id.
+ */
+export type WorkbenchSelection = { kind: "workspace" | "device" | "screen"; id: string };
 
 const DEVICE_SELECTION_PREFIX = "device:";
+const SCREEN_SELECTION_PREFIX = "screen:";
 
 export function parseStoredSelection(raw: string | null): WorkbenchSelection | null {
   if (!raw) return null;
   if (raw.startsWith(DEVICE_SELECTION_PREFIX)) {
     return { kind: "device", id: raw.slice(DEVICE_SELECTION_PREFIX.length) };
   }
+  if (raw.startsWith(SCREEN_SELECTION_PREFIX)) {
+    return { kind: "screen", id: raw.slice(SCREEN_SELECTION_PREFIX.length) };
+  }
   return { kind: "workspace", id: raw };
 }
 
 export function serializeSelection(selection: WorkbenchSelection | null): string | null {
   if (!selection) return null;
-  return selection.kind === "device" ? `${DEVICE_SELECTION_PREFIX}${selection.id}` : selection.id;
+  if (selection.kind === "device") return `${DEVICE_SELECTION_PREFIX}${selection.id}`;
+  if (selection.kind === "screen") return `${SCREEN_SELECTION_PREFIX}${selection.id}`;
+  return selection.id;
 }
 
 type SelectionProject = Pick<Project, "id" | "createdAt">;
@@ -62,6 +72,7 @@ export type SelectionResolution = {
 /**
  * 快照到达后校准工作台选择：离线设备仍有效，乐观工作区暂时有效；失效项优先回退到
  * 最早项目的 main workspace，再回退到任一工作区。
+ * A screen selection is valid only while its device exists and its screen is open (has a record).
  */
 export function resolveWorkbenchSelection(input: {
   selection: WorkbenchSelection | null;
@@ -69,14 +80,19 @@ export function resolveWorkbenchSelection(input: {
   projects: readonly SelectionProject[];
   workspaces: readonly SelectionWorkspace[];
   daemons: readonly SelectionDaemon[];
+  /** Devices with an open screen (plan 20261011-standalone-device-screen). */
+  screenDeviceIds: ReadonlySet<string>;
 }): SelectionResolution {
-  const { selection, pendingWorkspaceIds, projects, workspaces, daemons } = input;
+  const { selection, pendingWorkspaceIds, projects, workspaces, daemons, screenDeviceIds } = input;
   const pending = selection?.kind === "workspace" && pendingWorkspaceIds.has(selection.id);
+  const deviceExists = (daemonId: string) => daemons.some((daemon) => daemon.daemonId === daemonId);
   const valid =
     pending ||
     (selection?.kind === "device"
-      ? daemons.some((daemon) => daemon.daemonId === selection.id)
-      : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
+      ? deviceExists(selection.id)
+      : selection?.kind === "screen"
+        ? screenDeviceIds.has(selection.id) && deviceExists(selection.id)
+        : selection?.kind === "workspace" && workspaces.some((workspace) => workspace.id === selection.id));
 
   if (selection && valid) {
     return { selection, changed: false, shouldPersist: !pending };

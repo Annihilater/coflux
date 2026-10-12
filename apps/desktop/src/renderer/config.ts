@@ -37,10 +37,21 @@ export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
  */
 export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
 /**
- * Remote screen tabs' records (plan 20260929-remote-desktop): per tab, its workspace, device and
- * remote session id. Scoped like the layouts that reference them.
+ * Open remote screens' records (plan 20261011-standalone-device-screen): at most one per device, its
+ * remote session id. Scoped by server address — device ids mean nothing on another server.
  */
-export const SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
+export const SCREENS_KEY = `coflux_screens:${SERVER_URL}`;
+/**
+ * Where screens were kept while they were workspace tabs (plan 20260929-remote-desktop). Never read;
+ * only removed, without migration.
+ */
+export const LEGACY_SCREEN_TABS_KEY = `coflux_screen_tabs:${SERVER_URL}`;
+/**
+ * The remote screen's resolution choice per device (plan 20261011-screen-resolution-presets): a
+ * fixed preset in points, or nothing for 「跟随窗口」. Scoped by server address like the screen
+ * records — device ids mean nothing on another server.
+ */
+export const SCREEN_RESOLUTIONS_KEY = `coflux_screen_resolutions:${SERVER_URL}`;
 /**
  * File tabs' records (plan 20261001-terminal-file-tab): per tab, its workspace, the file's canonical
  * workspace-relative path and the line it was opened at. Scoped like the layouts that reference
