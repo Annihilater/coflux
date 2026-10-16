@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
+import { privateClientUrl } from "./private-build";
 
 /**
  * 服务器地址（plan 103）：桌面下没有 location.host 可推导，地址由 app 侧给出。优先级：
  * 命令行 `--server=<ws(s) url>` > 环境变量 COFLUX_SERVER_URL > userData/settings.json 的 serverUrl >
- * 默认值（打包版 wss://api.coflux.yourantiandi.com/client；dev ws://localhost:8787/client）。非法值跳过、落到下一级。
+ * 默认值（打包版 wss://api.coflux.yourantiandi.com/client；未设置私有编译地址时）。非法值跳过、落到下一级。
  */
-export const DEFAULT_SERVER_URL = "wss://api.coflux.yourantiandi.com/client";
+export const DEFAULT_SERVER_URL = privateClientUrl() ?? "wss://api.coflux.yourantiandi.com/client";
 /**
  * The default before the centre moved to its ICP-registered name (2026-10-09). coflux.dev still reaches it
  * through a forwarder, but slowly; a saved or passed copy of the old default means "the public server".

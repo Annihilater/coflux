@@ -30,9 +30,10 @@ import {
 } from "./release-trust.mjs";
 import { executorRuntime, plistXml, ptydPlistXml, ptydSystemdUnit, systemdUnit, watcherEnv } from "./service-unit.mjs";
 import { bold, duration, error as printError, fail, info, step, success, table, warn } from "./output.mjs";
+import { daemonServer, origin, tlsCa } from "./private-build.mjs";
 
-// The public server; self-hosted servers pass --server.
-const DEFAULT_SERVER = "wss://api.coflux.yourantiandi.com/daemon";
+// The public server, unless this package was built for a private centre.
+const DEFAULT_SERVER = daemonServer();
 // The public server's address before it moved to its ICP-registered name; a saved copy means the default.
 const LEGACY_DEFAULT_SERVER = "wss://api.coflux.dev/daemon";
 
@@ -42,7 +43,7 @@ const REPO = "myWsq/coflux";
 // version, and every prerelease, comes from the GitHub Releases archive. No mirror-then-GitHub fallback:
 // a mirror outage must stay visible.
 const RELEASE_MIRROR_BASE = (
-  process.env.COFLUX_RELEASE_DOWNLOAD_BASE || "https://dl.coflux.dev/releases"
+  process.env.COFLUX_RELEASE_DOWNLOAD_BASE || (origin ? "" : "https://dl.coflux.dev/releases")
 ).replace(/\/+$/, "");
 const RELEASE_ARCHIVE_BASE = (
   process.env.COFLUX_RELEASE_ARCHIVE_BASE || `https://github.com/${REPO}/releases/download`
@@ -365,6 +366,12 @@ async function ensureBinaries({ version, binDir, skipIfPresent }) {
   if (skipIfPresent && !version && fs.existsSync(LAUNCHER_BIN) && fs.existsSync(RUNTIME_BIN) && fs.existsSync(PTYD_BIN)) {
     success("Using the installed Coflux. To upgrade, run cofluxd update.");
     return null;
+  }
+  if (origin && !process.env.COFLUX_RELEASE_DOWNLOAD_BASE) {
+    die(
+      "This build is tied to a private centre and does not download public releases.",
+      "Pass --bin-dir with the binaries compiled for that centre.",
+    );
   }
   const target = rustTarget();
   let releaseVersion;
@@ -1218,7 +1225,7 @@ function probeTcp(host, port) {
 function probeTls(host, port) {
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const socket = tls.connect({ host, port, servername: host, timeout: DOCTOR_TIMEOUT_MS }, () => {
+    const socket = tls.connect({ host, port, servername: net.isIP(host) ? undefined : host, ca: tlsCa(), timeout: DOCTOR_TIMEOUT_MS }, () => {
       const detail = socket.authorized ? socket.getProtocol() : `${socket.getProtocol()}, certificate not verified: ${socket.authorizationError}`;
       socket.destroy();
       resolve({ ok: true, ms: Date.now() - t0, detail });
@@ -1258,7 +1265,7 @@ function probeWsUpgrade({ host, port, path, useTls, origin }) {
       socket.write(req);
     };
     const socket = useTls
-      ? tls.connect({ host, port, servername: host, timeout: DOCTOR_TIMEOUT_MS })
+      ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host, ca: tlsCa(), timeout: DOCTOR_TIMEOUT_MS })
       : net.connect({ host, port, timeout: DOCTOR_TIMEOUT_MS });
     socket.once(useTls ? "secureConnect" : "connect", () => onOpen(socket));
     socket.once("timeout", () => { socket.destroy(); finish({ ok: false, error: `timed out after ${DOCTOR_TIMEOUT_MS}ms` }); });

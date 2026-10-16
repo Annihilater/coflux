@@ -17,6 +17,9 @@ serde_json.workspace = true
 libc = "0.2"
 # 账号命令使用系统独立的 HTTPS 通道，不要求 Node 或 MCP 宿主。
 ureq = { version = "2", features = ["json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
 url = "2"
 sha2 = "0.10"
 regex = "1"

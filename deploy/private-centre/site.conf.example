@@ -1,0 +1,30 @@
+# 复制成同目录的 site.conf 再填写。site.conf 不入库。
+# PUBLIC_IP 是这台 Debian 机器的公网 IPv4。先在云上绑定固定公网地址，再签发证书。
+
+PUBLIC_IP=
+SSH_PORT=22
+CENTRE_PORT=8443
+DERP_PORT=8444
+STUN_PORT=3478
+REGION_ID=901
+
+# 服务器 CPU：amd64 或 arm64
+ARCH=amd64
+
+# tarball：在 Mac 上下载 Node，打进物料包，服务器不必访问 NodeSource。
+# nodesource：服务器自己从 NodeSource 安装 Node 22。
+NODE_MODE=tarball
+NODE_VERSION=22.23.3
+NODE_MIRROR=https://npmmirror.com/mirrors/node
+
+# 服务器上的 pnpm 和依赖走这个 registry。
+NPM_REGISTRY=https://registry.npmmirror.com
+
+# 在 Mac 上编译 derper 时使用。
+GOPROXY=https://goproxy.cn,direct
+
+# 打进服务器的源码修订。必须是已经提交的 git 修订，工作区里没提交的改动不会进去。
+SRC_REV=HEAD
+
+# CA、叶子证书和物料包放在仓库外面。留空则用 ~/.coflux-private-ca
+PKI_DIR=

@@ -11,6 +11,8 @@
     "cofluxd.mjs",
     "coflux.mjs",
     "account-client.mjs",
+    "private-build.mjs",
+    "private-build.local.json",
     "output.mjs",
     "release-pubkey.hex",
     "release-trust.mjs",

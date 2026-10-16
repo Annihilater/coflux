@@ -14,8 +14,10 @@ fn err(what: &str, next: &str) -> String {
     format!("{what}\n{next}")
 }
 const USAGE_NEXT: &str = "Run coflux --help for usage.";
-/// The public server. Sessions saved before it moved to its ICP-registered name name the old origin.
-const DEFAULT_SERVER: &str = "https://api.coflux.yourantiandi.com";
+/// Public account origin, or `COFLUX_BUILD_PUBLIC_ORIGIN` when this binary was compiled for a private centre.
+fn default_server() -> &'static str {
+    crate::private_tls::default_account_server()
+}
 const LEGACY_DEFAULT_SERVER: &str = "https://api.coflux.dev";
 const LOGIN_NEXT: &str = "Sign in to the Coflux app, or run coflux login.";
 const QUERY_NEXT: &str = "Check whether it took effect before you try again.";
@@ -55,10 +57,13 @@ fn http(
     body: Value,
     timeout: u64,
 ) -> Result<Value, String> {
-    let agent = ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(timeout))
-        .redirects(0)
-        .build();
+        .redirects(0);
+    if let Some(config) = crate::private_tls::client_config() {
+        builder = builder.tls_config(config);
+    }
+    let agent = builder.build();
     let mut request = agent.post(&format!("{server}{path}"));
     if let Some(token) = token {
         request = request.set("Authorization", &format!("Bearer {token}"));
@@ -243,7 +248,7 @@ pub fn handles(args: &ParsedArgs) -> bool {
 pub fn run(args: &ParsedArgs) -> Result<(), String> {
     let command = args.positional(0).unwrap_or("");
     if command == "login" {
-        let server = origin(args.string("server").unwrap_or(DEFAULT_SERVER))?;
+        let server = origin(args.string("server").unwrap_or(default_server()))?;
         // No credential flags: sign in through the browser (loopback + PKCE, or a paste code over SSH).
         if args.string("username").is_none() && !args.flag("password-stdin") {
             let post = |path: &str, body: Value| http(&server, path, None, body, 30);
@@ -300,7 +305,7 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
                 err("This CLI's sign-in record is damaged.", "Run coflux login again.")
             })?)?;
             let server = if saved == LEGACY_DEFAULT_SERVER {
-                DEFAULT_SERVER.to_string()
+                default_server().to_string()
             } else {
                 saved
             };

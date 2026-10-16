@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
@@ -53,10 +54,21 @@ function absoluteBase(): Plugin {
   };
 }
 
+function privateBuildDefine(): Record<string, string> {
+  const origin = (process.env.COFLUX_BUILD_PUBLIC_ORIGIN ?? "").replace(/\/+$/, "");
+  const caFile = process.env.COFLUX_BUILD_CA_FILE ?? "";
+  const caPem = caFile ? readFileSync(caFile, "utf8") : "";
+  return {
+    "globalThis.__COFLUX_BUILD_ORIGIN__": JSON.stringify(origin),
+    "globalThis.__COFLUX_BUILD_CA_PEM__": JSON.stringify(caPem),
+  };
+}
+
 export default defineConfig(({ command }) => {
   const buildId = resolveBuildId(command === "build" ? "build" : "serve");
   return {
     main: {
+      define: privateBuildDefine(),
       plugins: [externalizeDepsPlugin()],
       build: {
         rollupOptions: {

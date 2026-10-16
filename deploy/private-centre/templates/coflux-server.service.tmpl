@@ -1,0 +1,22 @@
+[Unit]
+Description=Coflux centre
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=coflux
+Group=coflux
+WorkingDirectory=/opt/coflux
+EnvironmentFile=/etc/coflux/server.env
+ExecStart={{NODE_BIN}} --import tsx apps/server/src/index.ts
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

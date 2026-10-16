@@ -25,6 +25,7 @@ import { createExecutorHost, type ExecutorHost } from "./executor-host";
 import { createExecutorSettingsWriter } from "./executor-settings-writer";
 import { createBrowserLogin } from "./browser-login";
 import { createRendererResetListener } from "./renderer-reset";
+import { installChromiumTrust, installNodeTrust, privateOrigin } from "./private-build";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
@@ -37,6 +38,8 @@ import { DeviceScope } from "@coflux/protocol";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
 // IndexedDB/crypto.subtle 可用）+ fetch/流式/代码缓存。不 bypassCSP——CSP 由响应头自己带。
+installNodeTrust();
+
 protocol.registerSchemesAsPrivileged([
   { scheme: APP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, codeCache: true } },
 ]);
@@ -186,6 +189,7 @@ if (!app.requestSingleInstanceLock()) {
     if (instanceLabel) setDockBadgeLabel(instanceLabel);
     registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
+    installChromiumTrust(session.defaultSession);
 
     // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
     // 只放行全屏与剪贴板读写。其余（摄像头/麦克风/地理位置/...）一律拒绝。
@@ -210,7 +214,7 @@ if (!app.requestSingleInstanceLock()) {
     // Auto-update: the generic provider reads latest-mac.yml from the R2 download mirror (dl.coflux.dev/desktop)；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
     const updater = createUpdater({
-      enabled: app.isPackaged,
+      enabled: app.isPackaged && !privateOrigin(),
       beforeInstall: async () => {
         if (exitInFlight) return false;
         exitInFlight = true;

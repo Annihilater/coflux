@@ -6,6 +6,7 @@
 //! stdout 短语与退出码；宿主管理由 Coflux.app 或 cofluxd 独立负责。
 
 mod account;
+mod private_tls;
 mod annotations;
 mod args;
 mod browser_login;

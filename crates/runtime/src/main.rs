@@ -32,6 +32,7 @@ mod local_auth;
 mod observed;
 mod ops;
 mod ports;
+mod private_tls;
 mod ptyd_reader;
 mod screen;
 mod secret;
@@ -66,7 +67,7 @@ use prost::Message as _;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async, connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream};
 
 use conn_state::ConnState;
 use creds::{CredStore, Credentials, JoinOutcome, PendingAuth};
@@ -1445,6 +1446,22 @@ async fn send_server_ws(
     )
 }
 
+async fn connect_centre(
+    url: &str,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    if let Some(config) = private_tls::client_config() {
+        connect_async_tls_with_config(url, None, false, Some(Connector::Rustls(config))).await
+    } else {
+        connect_async(url).await
+    }
+}
+
 async fn server_loop(
     cfg: Arc<Config>,
     state: Arc<Mutex<WorkerState>>,
@@ -1469,7 +1486,7 @@ async fn server_loop(
         // 本身也要包超时，否则这是第二个永久挂死路径（idle watchdog 只覆盖"连上之后"）。
         match tokio::time::timeout(
             Duration::from_millis(cfg.connect_timeout_ms),
-            connect_async(&cfg.server_url),
+            connect_centre(&cfg.server_url),
         )
         .await
         {

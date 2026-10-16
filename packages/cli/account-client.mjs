@@ -8,6 +8,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
 import { error as printError, success } from "./output.mjs";
+import { accountServer } from "./private-build.mjs";
 
 /** An error with the next step to show under it. */
 function cliError(message, next) {
@@ -18,7 +19,7 @@ function cliError(message, next) {
 const USAGE_NEXT = "Run coflux --help for usage.";
 const LOGIN_NEXT = "Sign in to the Coflux app, or run coflux login.";
 // The public server. Sessions saved before it moved to its ICP-registered name name the old origin.
-const DEFAULT_ACCOUNT_SERVER = "https://api.coflux.yourantiandi.com";
+const DEFAULT_ACCOUNT_SERVER = accountServer();
 const LEGACY_ACCOUNT_SERVER = "https://api.coflux.dev";
 
 /* --------------------------------- 实体标识 -------------------------------- */

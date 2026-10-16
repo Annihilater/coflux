@@ -30,6 +30,8 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # 固定 rustls 只用 ring provider，关掉默认 aws-lc-rs：交叉编译（musl）友好、无需 C 工具链；
 # 且避免依赖树里两个 provider 并存时 rustls 无法自动选定而 panic。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
 futures-util = "0.3"
 base64 = "0.22"
 hex = "0.4"

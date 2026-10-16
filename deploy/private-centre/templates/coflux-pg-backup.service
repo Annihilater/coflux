@@ -1,0 +1,6 @@
+[Unit]
+Description=Coflux Postgres backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/coflux-pg-backup

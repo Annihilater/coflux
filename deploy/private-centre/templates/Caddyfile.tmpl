@@ -1,0 +1,12 @@
+{
+	auto_https off
+	default_sni {{PUBLIC_IP}}
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://:{{CENTRE_PORT}} {
+	tls /etc/coflux/tls/server.crt /etc/coflux/tls/server.key
+	reverse_proxy 127.0.0.1:8787
+}

@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { create, ClientToServerSchema, encodeClientToServer, decodeServerToClient, CONTROL_PROTOCOL_VERSION, DEVICE_PROTOCOL_VERSION, DeviceScope, type ClientToServerPayload, type DeviceTailcatResult } from "@coflux/protocol";
+import { wsCaOption } from "./private-build";
 import { TailcatHelper } from "./tailcat-helper";
 
 import type { NativeOpen, NativeEvent } from "../shared/native-transport";
@@ -59,7 +60,7 @@ export class NativeTailcatTransport {
       if (epoch !== this.epoch || !this.online) throw new Error("连接已取消");
       const url = new URL(this.serverUrl); url.protocol = url.protocol.startsWith("https") || url.protocol === "wss:" ? "wss:" : "ws:"; url.pathname = "/client"; url.search = "";
       await new Promise<void>((resolve, reject) => {
-        const socket = new WebSocket(url, { origin: "https://desktop.coflux.dev", maxPayload: 1024 * 1024 }); this.control = socket;
+        const socket = new WebSocket(url, { origin: "https://desktop.coflux.dev", maxPayload: 1024 * 1024, ...wsCaOption() }); this.control = socket;
         let authed = false, pongAt = Date.now();
         const timeout = setTimeout(() => { socket.terminate(); reject(new Error("账号连接超时")); }, 10_000);
         socket.on("open", () => {

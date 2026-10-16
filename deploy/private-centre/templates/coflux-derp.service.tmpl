@@ -1,0 +1,25 @@
+[Unit]
+Description=Coflux DERP
+After=network-online.target coflux-server.service
+Wants=coflux-server.service
+
+[Service]
+Type=simple
+User=coflux-derp
+Group=coflux-derp
+SupplementaryGroups=coflux-tls
+EnvironmentFile=/etc/coflux/derp.env
+StateDirectory=coflux-derp
+StateDirectoryMode=0700
+ExecStart=/opt/coflux-derp/derper -a :{{DERP_PORT}} -http-port -1 -stun=true -stun-port {{STUN_PORT}} -hostname ${DERP_HOSTNAME} -certmode manual -certdir /etc/coflux/tls -c /var/lib/coflux-derp/derper.json -verify-client-url ${DERP_VERIFY_URL} -verify-client-url-fail-open=false
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/coflux-derp
+
+[Install]
+WantedBy=multi-user.target
