@@ -12,6 +12,9 @@ usermod -aG coflux-tls coflux-derp
 install -d -m 0755 /etc/coflux
 install -d -m 0750 -o root -g coflux-tls /etc/coflux/tls
 install -m 0644 -o root -g root "$BUNDLE/tls/ca.crt" /etc/coflux/tls/ca.crt
+if [[ -f "$BUNDLE/tls/ca.key" ]]; then
+  install -m 0600 -o root -g root "$BUNDLE/tls/ca.key" /etc/coflux/tls/ca.key
+fi
 install -m 0644 -o root -g coflux-tls "$BUNDLE/tls/server.crt" /etc/coflux/tls/server.crt
 install -m 0640 -o root -g coflux-tls "$BUNDLE/tls/server.key" /etc/coflux/tls/server.key
 install -m 0644 -o root -g root "$BUNDLE/tls/pin.txt" /etc/coflux/tls/pin.txt

@@ -2,6 +2,8 @@
 
 这是 `private-centre` 分支上的部署说明。`main` 保持和上游一致，私有化编译的改动只在这个分支。不带下面两个编译变量时，编出来的程序仍然默认连接作者的服务器。
 
+可以拿到服务器上直接安装的包是 `deploy/private-centre/out/coflux-private-centre-2.19.1-private.1.tar.gz`。它对应本地标签 `v2.19.1-private.1`，没有推到 GitHub：上游的 `v*` 发布只会接受打在 `origin/main` 尖上的标签。包里没有证书私钥。在 Debian 上解压后执行 `PUBLIC_IP=你的公网IP bash server/install.sh`，证书按这个地址现签。短说明在包内的 `INSTALL.txt`。
+
 一台新的 Debian 机器跑中心、Postgres、Caddy 和一只 stock `derper`。桌面和设备 daemon 留在你自己的电脑上。没有域名，不听 80 和 443。证书是私有 CA 签的，叶子证书的 SAN 是这台机器的公网 IPv4。
 
 建议用 Debian 13。Debian 12 也能装空库。只有将来要恢复现有生产库的备份时才必须用 13：那边是 PostgreSQL 17，12 自带的是 15，17 的 dump 恢复不进 15。
