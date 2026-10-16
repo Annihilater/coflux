@@ -1,0 +1,75 @@
+name: private-centre
+
+# 私有中心的部署包。标签刻意不是 v*：release.yml 只接受打在 origin/main 尖上的 v*，
+# 这个分支不能走那条正式发布。
+on:
+  push:
+    tags: ["private-centre-*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: private-centre-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: 打包 Debian 部署物料
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: transport/tailcat/go.sum
+
+      - name: 编译 derper
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: go1.27.1
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/derper"
+          cd transport/tailcat
+          GOOS=linux GOARCH=amd64 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/derper/derper-amd64" tailscale.com/cmd/derper
+          GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/derper/derper-arm64" tailscale.com/cmd/derper
+
+      - name: 下载 Node 22
+        run: |
+          set -euo pipefail
+          version=22.23.3
+          cache="$RUNNER_TEMP/node"
+          mkdir -p "$cache"
+          base="https://nodejs.org/dist/v${version}"
+          curl -fsSL --retry 3 -o "$cache/SHASUMS256.txt" "$base/SHASUMS256.txt"
+          for name in "node-v${version}-linux-x64.tar.xz" "node-v${version}-linux-arm64.tar.xz"; do
+            curl -fsSL --retry 3 -o "$cache/$name" "$base/$name"
+            awk -v f="$name" '$2 == f { print $1 "  " f }' "$cache/SHASUMS256.txt" | (cd "$cache" && sha256sum -c -)
+          done
+
+      - name: 打包
+        env:
+          VERSION: 2.19.1-private.2
+          BIN_DIR: ${{ runner.temp }}/derper
+          CACHE_DIR: ${{ runner.temp }}/node
+        run: deploy/private-centre/mac/60-pack-server.sh
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "Private centre ${GITHUB_REF_NAME}" \
+            --notes "Debian 部署包。服务器上解压后执行 PUBLIC_IP=<公网 IP> bash server/install.sh。这个标签不是上游 v* 发布。" \
+            deploy/private-centre/out/*.tar.gz \
+            deploy/private-centre/out/*.sha256
