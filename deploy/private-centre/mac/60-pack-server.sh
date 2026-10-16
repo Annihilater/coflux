@@ -4,24 +4,24 @@ set -euo pipefail
 MAC_DIR=$(cd "$(dirname "$0")" && pwd)
 KIT_DIR=$(cd "$MAC_DIR/.." && pwd)
 REPO_DIR=$(cd "$KIT_DIR/../.." && pwd)
-VERSION=${VERSION:-2.19.1-private.1}
+VERSION=${VERSION:-2.19.1-private.2}
 BIN_DIR=${BIN_DIR:-$HOME/.coflux-private-ca/bin}
 CACHE_DIR=${CACHE_DIR:-$HOME/.coflux-private-ca/cache}
-SRC_REV=${SRC_REV:-HEAD}
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
-rev=$(git -C "$REPO_DIR" rev-parse --verify "${SRC_REV}^{commit}") || die "SRC_REV=$SRC_REV 不是已提交的修订"
 for arch in amd64 arm64; do
   [[ -f "$BIN_DIR/derper-$arch" ]] || die "缺少 $BIN_DIR/derper-$arch"
 done
 [[ -f "$CACHE_DIR/node-v22.23.3-linux-x64.tar.xz" ]] || die "缺少 Node x64 包"
 [[ -f "$CACHE_DIR/node-v22.23.3-linux-arm64.tar.xz" ]] || die "缺少 Node arm64 包"
+centre=$(mktemp -d)
+node "$REPO_DIR/scripts/bundle-private-server.mjs" "$centre"
 
 stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT
+trap 'rm -rf "$stage" "$centre"' EXIT
 root="$stage/coflux-private-centre"
-mkdir -p "$root/bin" "$root/server" "$root/templates" "$root/tls"
-git -C "$REPO_DIR" archive --format=tar.gz --prefix=coflux/ "$rev" > "$root/src.tar.gz"
+mkdir -p "$root/bin" "$root/server" "$root/templates" "$root/tls" "$root/centre"
+cp "$centre/coflux-server.mjs" "$centre/create-user.mjs" "$root/centre/"
 cp "$KIT_DIR/site.conf.example" "$root/site.conf"
 cp "$KIT_DIR/README.md" "$root/README.md"
 cp "$KIT_DIR/INSTALL.txt" "$root/INSTALL.txt"
@@ -36,10 +36,12 @@ if find "$root" \( -name 'ca.key' -o -name 'server.key' -o -name '*.crt' \) | gr
   die "物料包里出现了证书或私钥"
 fi
 
+rev=$(git -C "$REPO_DIR" rev-parse --verify HEAD^{commit})
 cat > "$root/MANIFEST" <<EOF
 version=$VERSION
 src_rev=$rev
 node_version=22.23.3
+centre=bundled
 built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
@@ -63,5 +65,5 @@ mkdir -p "$out"
 name="coflux-private-centre-${VERSION}.tar.gz"
 tar -C "$stage" -czf "$out/$name" coflux-private-centre
 openssl dgst -sha256 -r "$out/$name" | awk -v f="$name" '{ print $1 "  " f }' > "$out/${name}.sha256"
-printf '物料包 %s\n源码 %s\n' "$out/$name" "$rev"
+printf '物料包 %s\n中心程序来自 %s\n' "$out/$name" "$rev"
 cat "$out/${name}.sha256"

@@ -2,7 +2,7 @@
 
 这是 `private-centre` 分支上的部署说明。`main` 保持和上游一致，私有化编译的改动只在这个分支。不带下面两个编译变量时，编出来的程序仍然默认连接作者的服务器。
 
-可以拿到服务器上直接安装的包是 `deploy/private-centre/out/coflux-private-centre-2.19.1-private.1.tar.gz`。它对应本地标签 `v2.19.1-private.1`，没有推到 GitHub：上游的 `v*` 发布只会接受打在 `origin/main` 尖上的标签。包里没有证书私钥。在 Debian 上解压后执行 `PUBLIC_IP=你的公网IP bash server/install.sh`，证书按这个地址现签。短说明在包内的 `INSTALL.txt`。
+可以拿到服务器上直接安装的包是 `deploy/private-centre/out/coflux-private-centre-2.19.1-private.2.tar.gz`。它对应本地标签 `v2.19.1-private.2`，没有推到 GitHub：上游的 `v*` 发布只会接受打在 `origin/main` 尖上的标签。包里是编好的中心程序、`derper` 和 Node，没有仓库源码，服务器上不会再编译。证书私钥也不在包里。在 Debian 上解压后执行 `PUBLIC_IP=你的公网IP bash server/install.sh`，证书按这个地址现签。短说明在包内的 `INSTALL.txt`。
 
 一台新的 Debian 机器跑中心、Postgres、Caddy 和一只 stock `derper`。桌面和设备 daemon 留在你自己的电脑上。没有域名，不听 80 和 443。证书是私有 CA 签的，叶子证书的 SAN 是这台机器的公网 IPv4。
 
@@ -127,7 +127,7 @@ bash server/install.sh
 3. `30-node.sh` 把 Node 解到 `/opt/node`，链接到 `/usr/local/bin`。版本低于 22.13 会失败。`NODE_MODE=nodesource` 时才访问 NodeSource，大陆机器默认不要用这个。
 4. `40-postgres.sh` 创建角色和库 `coflux`。密码用 `openssl rand -hex 24` 写到 `/etc/coflux/pg-coflux.pass`，权限 `0600`。密码从标准输入进 `psql`，不出现在 `-c` 参数里。再次安装会沿用这个密码，并 `ALTER ROLE` 成同一个值。然后检查 5432 只听在 `127.0.0.1` 和 `[::1]`。
 5. `50-tls.sh` 建立组 `coflux-tls`，用户 `coflux` 和 `coflux-derp`。证书目录 `0750 root:coflux-tls`，私钥 `0640` 同组可读。Caddy 和 derper 都以普通用户运行，读得到私钥，其他用户读不到。`derper` 按主机名找证书，所以这里会做 `公网IP.crt` 和 `公网IP.key` 两个符号链接。
-6. `60-app.sh` 把 `src.tar.gz` 解到 `/opt/coflux`，用 corepack 安装 pnpm 11.6.0，再 `pnpm install --frozen-lockfile`，registry 是 npmmirror。corepack 对镜像的签名校验失败时，脚本会关掉这次校验再试，仍失败才改用 `npm install -g pnpm@11.6.0`。
+6. `60-app.sh` 把已经打好的 `coflux-server.mjs` 和 `create-user.mjs` 放到 `/opt/coflux`。服务器不安装 pnpm，也不编译源码。Node 22 用物料包里的二进制。
 7. `70-env.sh` 生成 32 字节的 DERP 准入 token，写 `/etc/coflux/server.env` 和 `/etc/coflux/derp.env`，权限 `0600`。再次安装不换 token。`COFLUX_DERP_REGIONS` 用单引号包住，避免 `set -a; source` 把 JSON 拆碎。写完会 `JSON.parse` 一次。
 8. `80-caddy.sh` 优先装 Cloudsmith 上的 Caddy。连不上就用 Debian 仓库里的包。装完立刻停掉它自带的 `:80` 站点，把 `caddy` 用户加进 `coflux-tls`，校验 Caddyfile，再重启。必须重启，新的组成员身份要到下次启动才生效。Caddy 关掉了 HTTP/3，这样 UDP 8443 不会被打开。
 9. `90-services.sh` 安装 systemd 单元并启动。中心进程的用户是 `coflux`，只绑 `127.0.0.1:8787`。准入在 `127.0.0.1:8793`。`derper` 听 `:8444`，不是公网 IP：大陆云的公网地址一般是 NAT，网卡上没有这个地址，绑上去会 `cannot assign requested address`。STUN 跟着 `-a` 听 UDP `3478`。`-http-port -1` 让 derper 不要去绑 80。`-c` 不能不写，否则 derper 直接退出。`-verify-client-url-fail-open=false` 必须写，上游默认是问不到中心就给所有人中继。
@@ -234,7 +234,7 @@ node packages/cli/cofluxd.mjs up --bin-dir target/release
 
 ## 再跑一次安装
 
-`install.sh` 可以重放。它会重新解源码、重新 `pnpm install`、按当前物料包重写 Caddyfile 和环境文件。`/etc/coflux/pg-coflux.pass` 和 `/etc/coflux/derp-admission.token` 已存在就继续用。手改过的 `server.env` 会被模板盖掉。
+`install.sh` 可以重放。它会换上物料包里的中心程序，并按当前物料包重写 Caddyfile 和环境文件。`/etc/coflux/pg-coflux.pass` 和 `/etc/coflux/derp-admission.token` 已存在就继续用。手改过的 `server.env` 会被模板盖掉。
 
 以后检查：
 

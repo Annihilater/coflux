@@ -1,6 +1,7 @@
-Coflux 私有中心 2.19.1-private.1
+Coflux 私有中心 2.19.1-private.2
 
-这个包只装 Debian 上的中心。证书在安装时按这台机器的公网 IPv4 现签，包里没有私钥。
+这个包在 Debian 上直接安装。中心是已经打好的程序，derper 和 Node 也是二进制。服务器上不编译，也不装源码。
+证书在安装时按这台机器的公网 IPv4 现签，包里没有私钥。
 客户端要另外用同一把 CA 和这个地址编译，见 README.md 第 6 节。不要使用作者发布的桌面或 npm 上的 cofluxd。
 
 1. 云安全组放行 tcp/22、tcp/8443、tcp/8444、udp/3478。不要放行 80、443、5432、8787、8793。
@@ -8,7 +9,7 @@ Coflux 私有中心 2.19.1-private.1
 3. 在服务器上：
 
    umask 077
-   tar -xzf coflux-private-centre-2.19.1-private.1.tar.gz
+   tar -xzf coflux-private-centre-2.19.1-private.2.tar.gz
    cd coflux-private-centre
    sha256sum -c SHA256SUMS
    PUBLIC_IP=你的公网IP bash server/install.sh

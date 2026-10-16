@@ -6,7 +6,7 @@ BUNDLE=$(cd "$(dirname "$0")/.." && pwd)
 export BUNDLE
 cd "$BUNDLE"
 
-if [[ ! -f "$BUNDLE/src.tar.gz" || ! -f "$BUNDLE/site.conf" ]]; then
+if [[ ! -f "$BUNDLE/centre/coflux-server.mjs" || ! -f "$BUNDLE/site.conf" ]]; then
   printf '错误: 这不是打好的物料包。\n' >&2
   exit 1
 fi

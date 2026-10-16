@@ -11,5 +11,4 @@ set -a
 # shellcheck disable=SC1091
 source /etc/coflux/server.env
 set +a
-cd /opt/coflux
-"$node" --import tsx scripts/create-user.mjs --email "$COFLUX_USER_EMAIL" --password "$password"
+"$node" /opt/coflux/create-user.mjs --email "$COFLUX_USER_EMAIL" --password "$password"
