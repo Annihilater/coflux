@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { SCREEN_VIDEO_CREDIT_DIRECT_BYTES, SCREEN_VIDEO_CREDIT_RELAY_BYTES } from "@coflux/protocol";
+import { create, SCREEN_VIDEO_CREDIT_DIRECT_BYTES, SCREEN_VIDEO_CREDIT_RELAY_BYTES, ScreenSessionPhase, ScreenSessionStatusSchema } from "@coflux/protocol";
 
-import { displayRequest, initialCreditFor, modifierBits } from "./screen-session";
+import { displayRequest, initialCreditFor, modifierBits, screenPhaseFrom } from "./screen-session";
 
 test("modifier bits follow the wire contract (shift 1, control 2, option 4, command 8, caps lock 16)", () => {
   assert.equal(modifierBits({ shiftKey: false, ctrlKey: false, altKey: false, metaKey: false }), 0);
@@ -24,4 +24,15 @@ test("the initial video credit is lower on a relayed path", () => {
   assert.equal(initialCreditFor("direct"), SCREEN_VIDEO_CREDIT_DIRECT_BYTES);
   assert.equal(initialCreditFor("peer"), SCREEN_VIDEO_CREDIT_DIRECT_BYTES);
   assert.ok(SCREEN_VIDEO_CREDIT_RELAY_BYTES < SCREEN_VIDEO_CREDIT_DIRECT_BYTES);
+});
+
+test("a STARTING status carrying an error is the error state, and a clean status recovers", () => {
+  const status = (phase: ScreenSessionPhase, error?: string) => create(ScreenSessionStatusSchema, error === undefined ? { phase } : { phase, error });
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.STARTING, "display: virtual display did not come online"), true), "error");
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.STARTING, ""), true), "starting");
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.STARTING), true), "starting");
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.STREAMING, "capture: stale"), true), "streaming");
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.UNSPECIFIED, "anything"), true), "starting");
+  assert.equal(screenPhaseFrom(status(ScreenSessionPhase.PAUSED), false), "paused");
+  assert.equal(screenPhaseFrom(undefined, true), "starting");
 });

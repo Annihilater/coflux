@@ -41,6 +41,8 @@ do {
 }
 log("version \(version) listening on \(socketPath)")
 let helper = ScreenHelper(server: server, version: version, log: log)
+let reconfigurations = DisplayReconfigurationWitness(log: log)
+reconfigurations.start()
 
 signal(SIGPIPE, SIG_IGN)
 let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
@@ -59,4 +61,14 @@ interrupt.setEventHandler {
 }
 interrupt.resume()
 
-dispatchMain()
+// The main run loop, not `dispatchMain()`: CoreGraphics updates this process's view of the displays
+// (the online list, their modes) only while handling WindowServer's reconfiguration notifications
+// on the main run loop. Parked in `dispatchMain()` the helper saw its first virtual display and
+// none after it, for as long as it lived. The run loop drains the main queue too, so everything
+// else (the socket, timers, signal sources, ScreenCaptureKit's main-actor tasks) runs as before.
+// `run()` returns if the loop ever has nothing attached; the port keeps it attached and the loop
+// re-enters it regardless.
+RunLoop.main.add(NSMachPort(), forMode: .default)
+while true {
+    RunLoop.main.run()
+}

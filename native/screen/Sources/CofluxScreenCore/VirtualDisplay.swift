@@ -85,10 +85,16 @@ public final class CGVirtualDisplayProvider: VirtualDisplayProvider {
 public enum DisplayConfiguration {
     /// Wake sleeping displays (lid closed, monitor asleep) and wait until the main display reports
     /// awake, up to `timeout`. WindowServer applies deferred configuration the moment they wake.
-    public static func wakeDisplays(power: PowerAssertions, timeout: TimeInterval = 5, completion: @escaping () -> Void) {
+    ///
+    /// The waits below all take `cancelled`, evaluated before every poll and every attempt: once it
+    /// returns true the wait stops and never calls its completion, so a superseded configuration
+    /// neither touches the display again nor reports anything.
+    public static func wakeDisplays(power: PowerAssertions, timeout: TimeInterval = 5, cancelled: @escaping () -> Bool, completion: @escaping () -> Void) {
+        guard !cancelled() else { return }
         power.declareActivity()
         let deadline = Date().addingTimeInterval(timeout)
         func poll() {
+            guard !cancelled() else { return }
             if CGDisplayIsAsleep(CGMainDisplayID()) == 0 || Date() >= deadline {
                 completion()
             } else {
@@ -101,9 +107,10 @@ public enum DisplayConfiguration {
     /// Wait until the display `displayID()` names is in the online display list (the
     /// reconfiguration landed); the id is read on every poll, since it may change as it comes online.
     /// A display created while the others slept appears only after they wake, hence the margin.
-    public static func waitOnline(_ displayID: @escaping () -> CGDirectDisplayID, timeout: TimeInterval = 15, completion: @escaping (CGDirectDisplayID?) -> Void) {
+    public static func waitOnline(_ displayID: @escaping () -> CGDirectDisplayID, timeout: TimeInterval = 15, cancelled: @escaping () -> Bool, completion: @escaping (CGDirectDisplayID?) -> Void) {
         let deadline = Date().addingTimeInterval(timeout)
         func poll() {
+            guard !cancelled() else { return }
             let id = displayID()
             if id != 0, onlineDisplays().contains(id) {
                 completion(id)
@@ -120,9 +127,10 @@ public enum DisplayConfiguration {
     /// the last failure. A virtual display that just came online (or was just re-applied) is still
     /// being reconfigured: WindowServer refuses a mode change or a mirror with kCGErrorFailure until
     /// it settles, and accepts the same request a moment later (measured on macOS 27).
-    public static func settle(timeout: TimeInterval = 3, interval: TimeInterval = 0.2, _ attempt: @escaping () throws -> Void, completion: @escaping (Error?) -> Void) {
+    public static func settle(timeout: TimeInterval = 3, interval: TimeInterval = 0.2, cancelled: @escaping () -> Bool, _ attempt: @escaping () throws -> Void, completion: @escaping (Error?) -> Void) {
         let deadline = Date().addingTimeInterval(timeout)
         func poll() {
+            guard !cancelled() else { return }
             do {
                 try attempt()
                 completion(nil)
