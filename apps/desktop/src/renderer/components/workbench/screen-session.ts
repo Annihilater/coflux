@@ -125,7 +125,6 @@ export function displayRequest(width: number, height: number, devicePixelRatio: 
   return { widthPoints: Math.max(1, Math.round(width)), heightPoints: Math.max(1, Math.round(height)), scale: devicePixelRatio >= 1.5 ? 2 : 1 };
 }
 
-/** The initial video credit for a transport mode (see device.proto). */
 /**
  * The product phase a remote status maps to. The wire has no error phase: a failure after the
  * session opened (a resize, a capture start) arrives as STARTING with the error, and is shown as
@@ -150,6 +149,7 @@ export function screenPhaseFrom(status: ScreenSessionStatus | undefined, visible
   }
 }
 
+/** The initial video credit for a transport mode (see device.proto). */
 export function initialCreditFor(mode: string): number {
   return mode === "relay" || mode === "remote" ? SCREEN_VIDEO_CREDIT_RELAY_BYTES : SCREEN_VIDEO_CREDIT_DIRECT_BYTES;
 }

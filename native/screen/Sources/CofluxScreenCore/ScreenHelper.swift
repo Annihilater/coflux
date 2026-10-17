@@ -487,14 +487,15 @@ public final class ScreenHelper: HelperServerDelegate {
         let fail: (Error) -> Void = { [weak self] error in
             self?.displayFailed(session, reason: reason, geometry: geometry, error: error)
         }
+        // `self` is captured weakly once, here, and never held strongly along the chain.
         DisplayConfiguration.wakeDisplays(power: power, cancelled: cancelled) { [weak self] in
-            guard let self else { return }
+            guard let provider = self?.provider else { return }
             do {
-                try self.provider.apply(geometry)
+                try provider.apply(geometry)
             } catch {
                 return fail(error)
             }
-            DisplayConfiguration.waitOnline({ [weak self] in self?.provider.displayID ?? 0 }, cancelled: cancelled) { online in
+            DisplayConfiguration.waitOnline({ provider.displayID }, cancelled: cancelled) { online in
                 guard let displayID = online else {
                     // Sleeping displays are the cause only while they still sleep: WindowServer
                     // defers the display until they wake. Otherwise saying so misleads.
@@ -503,7 +504,7 @@ public final class ScreenHelper: HelperServerDelegate {
                 }
                 DisplayConfiguration.settle(cancelled: cancelled, { try DisplayConfiguration.selectMode(geometry, on: displayID) }) { error in
                     if let error { return fail(error) }
-                    DisplayConfiguration.settle(cancelled: cancelled, { try DisplayConfiguration.mirrorAll(onto: displayID) }) { [weak self] error in
+                    DisplayConfiguration.settle(cancelled: cancelled, { try DisplayConfiguration.mirrorAll(onto: displayID) }) { error in
                         if let error { return fail(error) }
                         self?.displayConfigured(session)
                     }
@@ -561,8 +562,8 @@ public final class ScreenHelper: HelperServerDelegate {
         // so a retry shows the spinner rather than the old error).
         session.lastError = nil
         updatePhase(session)
-        session.capture.start(displayID: provider.displayID, width: geometry.widthPixels, height: geometry.heightPixels, showsCursor: cursorInVideo) { [weak self] error in
-            guard let self, self.session === session else { return }
+        session.capture.start(displayID: provider.displayID, width: geometry.widthPixels, height: geometry.heightPixels, showsCursor: cursorInVideo) { [weak self, weak session] error in
+            guard let self, let session, self.session === session else { return }
             session.captureStarting = false
             if let error {
                 session.lastError = "\(error)"
