@@ -126,6 +126,30 @@ export function displayRequest(width: number, height: number, devicePixelRatio: 
 }
 
 /** The initial video credit for a transport mode (see device.proto). */
+/**
+ * The product phase a remote status maps to. The wire has no error phase: a failure after the
+ * session opened (a resize, a capture start) arrives as STARTING with the error, and is shown as
+ * the error state with 重试 rather than a spinner. A later status without an error (the retry's
+ * STARTING, then STREAMING) maps back to the normal phases.
+ */
+export function screenPhaseFrom(status: ScreenSessionStatus | undefined, visible: boolean): ScreenPhase {
+  if (!status) return "starting";
+  switch (status.phase) {
+    case ScreenSessionPhase.NO_PERMISSION:
+      return "no-permission";
+    case ScreenSessionPhase.LOCKED:
+      return "locked";
+    case ScreenSessionPhase.PAUSED:
+      return visible ? "streaming" : "paused";
+    case ScreenSessionPhase.STREAMING:
+      return "streaming";
+    case ScreenSessionPhase.STARTING:
+      return status.error ? "error" : "starting";
+    default:
+      return "starting";
+  }
+}
+
 export function initialCreditFor(mode: string): number {
   return mode === "relay" || mode === "remote" ? SCREEN_VIDEO_CREDIT_RELAY_BYTES : SCREEN_VIDEO_CREDIT_DIRECT_BYTES;
 }
@@ -578,7 +602,9 @@ export class ScreenSession {
         this.opened = true;
         this.holderEpoch = opened.holderEpoch;
         this.appliedSize = this.openSize;
-        this.update({ ...this.statusPatch(opened.status), phase: this.phaseFrom(opened.status), error: null, framesDrawn: 0 });
+        const phase = this.phaseFrom(opened.status);
+        // The error phase keeps the text it comes from, never the generic 「远端没有响应。」.
+        this.update({ ...this.statusPatch(opened.status), phase, error: phase === "error" ? (opened.status?.error ?? null) : null, framesDrawn: 0 });
         this.attachVideo();
         if (!this.visible) this.sendControl({ case: "screenSessionPause", value: { sessionId: this.sessionId, holderEpoch: this.holderEpoch } });
         else this.post({ type: "clipboard-watch", on: true });
@@ -679,19 +705,7 @@ export class ScreenSession {
   }
 
   private phaseFrom(status: ScreenSessionStatus | undefined): ScreenPhase {
-    if (!status) return "starting";
-    switch (status.phase) {
-      case ScreenSessionPhase.NO_PERMISSION:
-        return "no-permission";
-      case ScreenSessionPhase.LOCKED:
-        return "locked";
-      case ScreenSessionPhase.PAUSED:
-        return this.visible ? "streaming" : "paused";
-      case ScreenSessionPhase.STREAMING:
-        return "streaming";
-      default:
-        return "starting";
-    }
+    return screenPhaseFrom(status, this.visible);
   }
 
   // ---------------------------------------------------------------------------------------------
