@@ -128,12 +128,10 @@ public final class ScreenHelper: HelperServerDelegate {
             guard resize.resizeSeq > session.resizeSeq else { return }
             session.resizeSeq = resize.resizeSeq
             guard let geometry = DisplayModeSelection.requested(widthPoints: Int(resize.widthPoints), heightPoints: Int(resize.heightPoints), scale: Int(resize.scale)) else { return }
-            applyGeometry(geometry, to: session) { [weak self] error in
-                guard let self, self.session === session else { return }
-                if let error { session.lastError = "\(error)" }
-                self.sendState(session)
-                self.restartCapture(session)
-            }
+            // Already what the configuration in flight applies: its result covers this one too.
+            if session.configuring, session.geometry == geometry { return }
+            session.geometry = geometry
+            configureDisplay(session, reason: "resize")
         case .screenSessionPause(let pause)?:
             guard let session, arbiter.isCurrent(epoch: pause.holderEpoch), session.id == pause.sessionID else { return }
             session.paused = true
@@ -258,41 +256,57 @@ public final class ScreenHelper: HelperServerDelegate {
             session.epoch = epoch
             permissions = PermissionState.current()
             prompter.promptIfMissing(permissions)
+            // A takeover: the previous holder's opens still waiting on the display are answered
+            // now, as taken over, rather than later with a result that is no longer theirs.
+            let superseded = session.pendingOpens.filter { $0.epoch != epoch }
+            session.pendingOpens.removeAll { $0.epoch != epoch }
+            for pending in superseded { answerOpen(pending, session, failure: nil) }
+            session.pendingOpens.append(PendingOpen(requestID: open.requestID, lane: lane, epoch: epoch))
             let previous = session.geometry
             session.geometry = geometry
-            let needsApply = session.displayReady == false || previous != geometry
-            let finish: (Error?) -> Void = { [weak self] error in
-                guard let self, self.session === session, self.arbiter.isCurrent(epoch: epoch) else { return }
-                if let error {
-                    session.lastError = "\(error)"
-                    self.log("display failed: \(error)")
-                    var opened = Coflux_V1_ScreenSessionOpened()
-                    opened.requestID = open.requestID
-                    opened.sessionID = session.id
-                    opened.ok = false
-                    opened.code = "no_display"
-                    opened.error = "\(error)"
-                    opened.holderEpoch = epoch
-                    opened.status = self.statusMessage(session)
-                    self.send(lane, .screenSessionOpened(opened))
-                    return
-                }
-                var opened = Coflux_V1_ScreenSessionOpened()
-                opened.requestID = open.requestID
-                opened.sessionID = session.id
-                opened.ok = true
-                opened.holderEpoch = epoch
-                opened.codec = .h264
-                opened.status = self.statusMessage(session)
-                self.send(lane, .screenSessionOpened(opened))
-                self.startCaptureIfPossible(session)
+            if session.configuring, previous == geometry {
+                // The configuration in flight applies this geometry already and answers this open
+                // with its result (a retry that came while it was still waiting, say).
+                return
             }
-            if needsApply {
-                applyGeometry(geometry, to: session, completion: finish)
+            if session.configuring || !session.displayReady || previous != geometry {
+                configureDisplay(session, reason: "open")
             } else {
-                finish(nil)
+                answerOpens(session, failure: nil)
+                startCaptureIfPossible(session)
             }
         }
+    }
+
+    /// Answer every open waiting on the session's display: exactly one `ScreenSessionOpened` per
+    /// `ScreenSessionOpen`, whichever configuration ended up applying it. The desktop reports an
+    /// open left unanswered as an error after a while, and stops waiting the moment it is answered.
+    private func answerOpens(_ session: Session, failure: (code: String, message: String)?) {
+        let opens = session.pendingOpens
+        session.pendingOpens = []
+        for pending in opens { answerOpen(pending, session, failure: failure) }
+    }
+
+    private func answerOpen(_ pending: PendingOpen, _ session: Session, failure: (code: String, message: String)?) {
+        var opened = Coflux_V1_ScreenSessionOpened()
+        opened.requestID = pending.requestID
+        opened.sessionID = session.id
+        if !arbiter.isCurrent(epoch: pending.epoch) {
+            opened.ok = false
+            opened.code = "held"
+            opened.error = "another client holds this screen"
+        } else if let failure {
+            opened.ok = false
+            opened.code = failure.code
+            opened.error = failure.message
+            opened.holderEpoch = pending.epoch
+        } else {
+            opened.ok = true
+            opened.holderEpoch = pending.epoch
+            opened.codec = .h264
+        }
+        opened.status = statusMessage(session)
+        send(pending.lane, .screenSessionOpened(opened))
     }
 
     private func handleClose(_ close: Coflux_V1_ScreenSessionClose, lane: String) {
@@ -439,44 +453,70 @@ public final class ScreenHelper: HelperServerDelegate {
         session.bitrateTimer = tick
     }
 
-    /// Wake displays, create/resize the virtual display, select its HiDPI mode and mirror the
-    /// physical displays onto it; the callback carries the first failure.
-    private func applyGeometry(_ geometry: DisplayGeometry, to session: Session, completion: @escaping (Error?) -> Void) {
+    /// Wake displays, create/resize the virtual display to `session.geometry`, select its HiDPI
+    /// mode and mirror the physical displays onto it; then answer the opens waiting on it and
+    /// (re)start capture.
+    ///
+    /// Serialized per session, latest wins: at most one chain is effective. Starting one supersedes
+    /// the chain in flight, whose remaining steps see `cancelled` and stop there: they never touch
+    /// the provider or the display configuration again, never change the session and never reply.
+    /// The newest geometry restarts from the top rather than queueing behind the old chain, so it
+    /// gets its own full waits: a settle cut short by a newer request would fail a display that
+    /// only needed a moment longer. `reason` names what started the chain, for the log.
+    private func configureDisplay(_ session: Session, reason: String) {
+        session.displayGeneration += 1
+        let generation = session.displayGeneration
+        let geometry = session.geometry
+        session.configuring = true
+        // Not ready until this chain lands: nothing may start capturing a display mid-change.
+        session.displayReady = false
         session.phase = .starting
         stopCapture(session)
-        DisplayConfiguration.wakeDisplays(power: power) { [weak self] in
-            guard let self, self.session === session else { return }
+        let cancelled: () -> Bool = { [weak self, weak session] in
+            guard let self, let session else { return true }
+            return self.session !== session || session.displayGeneration != generation
+        }
+        let fail: (Error) -> Void = { [weak self] error in
+            self?.displayFailed(session, reason: reason, geometry: geometry, error: error)
+        }
+        DisplayConfiguration.wakeDisplays(power: power, cancelled: cancelled) { [weak self] in
+            guard let self else { return }
             do {
                 try self.provider.apply(geometry)
             } catch {
-                session.displayReady = false
-                completion(error)
-                return
+                return fail(error)
             }
-            DisplayConfiguration.waitOnline({ [weak self] in self?.provider.displayID ?? 0 }) { [weak self] online in
-                guard let self, self.session === session else { return }
+            DisplayConfiguration.waitOnline({ [weak self] in self?.provider.displayID ?? 0 }, cancelled: cancelled) { online in
                 guard let displayID = online else {
-                    session.displayReady = false
-                    completion(HelperError.display("virtual display did not come online (displays asleep?)"))
-                    return
+                    return fail(HelperError.display("virtual display did not come online (displays asleep?)"))
                 }
-                let fail: (Error) -> Void = { error in
-                    session.displayReady = false
-                    completion(error)
-                }
-                DisplayConfiguration.settle({ try DisplayConfiguration.selectMode(geometry, on: displayID) }) { [weak self] error in
-                    guard let self, self.session === session else { return }
+                DisplayConfiguration.settle(cancelled: cancelled, { try DisplayConfiguration.selectMode(geometry, on: displayID) }) { error in
                     if let error { return fail(error) }
-                    DisplayConfiguration.settle({ try DisplayConfiguration.mirrorAll(onto: displayID) }) { [weak self] error in
-                        guard let self, self.session === session else { return }
+                    DisplayConfiguration.settle(cancelled: cancelled, { try DisplayConfiguration.mirrorAll(onto: displayID) }) { [weak self] error in
                         if let error { return fail(error) }
-                        session.displayReady = true
-                        session.lastError = nil
-                        completion(nil)
+                        self?.displayConfigured(session)
                     }
                 }
             }
         }
+    }
+
+    private func displayConfigured(_ session: Session) {
+        session.configuring = false
+        session.displayReady = true
+        session.lastError = nil
+        answerOpens(session, failure: nil)
+        sendState(session)
+        restartCapture(session)
+    }
+
+    private func displayFailed(_ session: Session, reason: String, geometry: DisplayGeometry, error: Error) {
+        session.configuring = false
+        session.displayReady = false
+        session.lastError = "\(error)"
+        log("display failed: \(error)")
+        answerOpens(session, failure: ("no_display", "\(error)"))
+        sendState(session)
     }
 
     private func startCaptureIfPossible(_ session: Session) {
@@ -525,6 +565,9 @@ public final class ScreenHelper: HelperServerDelegate {
 
     private func stopCapture(_ session: Session) {
         session.capture.stop()
+        // A start in flight is abandoned by the stop: its completion never comes, so nothing else
+        // would clear this and every later start would wait on it forever.
+        session.captureStarting = false
         session.encoder?.invalidate()
         session.encoder = nil
         session.cursor.stop()
@@ -579,6 +622,10 @@ public final class ScreenHelper: HelperServerDelegate {
     }
 
     private func tearDown(_ session: Session, restore: Bool) {
+        // Whatever configuration is in flight stops here; the opens it would have answered hear now.
+        session.displayGeneration += 1
+        session.configuring = false
+        answerOpens(session, failure: ("ended", "the session ended before its display was ready"))
         stopCapture(session)
         session.bitrateTimer?.cancel()
         session.bitrateTimer = nil
@@ -736,6 +783,12 @@ final class Session {
     var videoLane: String?
     var geometry: DisplayGeometry
     var displayReady = false
+    /// A display configuration chain is in flight (see `ScreenHelper.configureDisplay`); bumping
+    /// the generation supersedes it.
+    var configuring = false
+    var displayGeneration = 0
+    /// Opens the display configuration in flight answers when it lands or fails.
+    var pendingOpens: [PendingOpen] = []
     var paused = false
     var phase: Coflux_V1_ScreenSessionPhase = .starting
     var reportedPermissions: PermissionState?
@@ -763,6 +816,13 @@ final class Session {
         self.controlLane = controlLane
         self.geometry = geometry
     }
+}
+
+/// A `ScreenSessionOpen` still waiting for its `ScreenSessionOpened`.
+struct PendingOpen {
+    let requestID: String
+    let lane: String
+    let epoch: UInt64
 }
 
 struct PipelineStats {
