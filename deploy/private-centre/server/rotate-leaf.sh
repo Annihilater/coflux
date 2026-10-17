@@ -23,5 +23,5 @@ if [[ "$old" != "$new" ]]; then
   grep -q "$old" /etc/coflux/server.env || { printf '错误: server.env 里找不到旧指纹\n' >&2; exit 1; }
   sed -i "s/${old}/${new}/g" /etc/coflux/server.env
 fi
-systemctl restart coflux-derp caddy coflux-server
+systemctl restart coflux-derp coflux-caddy coflux-server
 printf '叶子已换上。指纹 %s\n' "$new"

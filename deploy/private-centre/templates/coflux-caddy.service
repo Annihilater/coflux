@@ -1,0 +1,17 @@
+[Unit]
+Description=Coflux Caddy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=GODEBUG=tlsmlkem=0
+User=caddy
+Group=caddy
+SupplementaryGroups=coflux-tls
+ExecStart=/opt/coflux-caddy/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,8 @@
 }
 
 https://:{{CENTRE_PORT}} {
-	tls /etc/coflux/tls/server.crt /etc/coflux/tls/server.key
+	tls /etc/coflux/tls/server.crt /etc/coflux/tls/server.key {
+		protocols tls1.2 tls1.2
+	}
 	reverse_proxy 127.0.0.1:8787
 }

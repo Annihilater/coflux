@@ -11,6 +11,7 @@ CACHE_DIR=${CACHE_DIR:-$HOME/.coflux-private-ca/cache}
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 for arch in amd64 arm64; do
   [[ -f "$BIN_DIR/derper-$arch" ]] || die "缺少 $BIN_DIR/derper-$arch"
+  [[ -f "$BIN_DIR/caddy-$arch" ]] || die "缺少 $BIN_DIR/caddy-$arch"
 done
 [[ -f "$CACHE_DIR/node-v22.23.3-linux-x64.tar.xz" ]] || die "缺少 Node x64 包"
 [[ -f "$CACHE_DIR/node-v22.23.3-linux-arm64.tar.xz" ]] || die "缺少 Node arm64 包"
@@ -25,8 +26,8 @@ cp "$centre/coflux-server.mjs" "$centre/create-user.mjs" "$root/centre/"
 cp "$KIT_DIR/site.conf.example" "$root/site.conf"
 cp "$KIT_DIR/README.md" "$root/README.md"
 cp "$KIT_DIR/INSTALL.txt" "$root/INSTALL.txt"
-cp "$BIN_DIR/derper-amd64" "$BIN_DIR/derper-arm64" "$root/bin/"
-chmod 755 "$root/bin/derper-amd64" "$root/bin/derper-arm64"
+cp "$BIN_DIR/derper-amd64" "$BIN_DIR/derper-arm64" "$BIN_DIR/caddy-amd64" "$BIN_DIR/caddy-arm64" "$root/bin/"
+chmod 755 "$root/bin/derper-amd64" "$root/bin/derper-arm64" "$root/bin/caddy-amd64" "$root/bin/caddy-arm64"
 cp "$CACHE_DIR/node-v22.23.3-linux-x64.tar.xz" "$root/bin/node-x64.tar.xz"
 cp "$CACHE_DIR/node-v22.23.3-linux-arm64.tar.xz" "$root/bin/node-arm64.tar.xz"
 cp -R "$KIT_DIR/server/." "$root/server/"

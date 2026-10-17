@@ -32,6 +32,6 @@ done
 [[ "$ready" == 1 ]] || die "coflux-server 没有在 40 秒内通过 /health，看 journalctl -u coflux-server"
 
 systemctl restart coflux-derp
-systemctl restart caddy
+systemctl restart coflux-caddy
 systemctl start coflux-pg-backup.timer
 printf '服务已启动\n'

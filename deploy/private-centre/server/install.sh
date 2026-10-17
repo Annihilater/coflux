@@ -49,6 +49,10 @@ if [[ -f "$BUNDLE/bin/derper-$ARCH" ]]; then
   chmod 755 "$BUNDLE/bin/derper"
 fi
 [[ -f "$BUNDLE/bin/derper" ]] || { printf '错误: 物料包里没有 linux/%s 的 derper\n' "$ARCH" >&2; exit 1; }
+if [[ -f "$BUNDLE/bin/caddy-$ARCH" ]]; then
+  cp "$BUNDLE/bin/caddy-$ARCH" "$BUNDLE/bin/caddy"
+  chmod 755 "$BUNDLE/bin/caddy"
+fi
 
 if [[ ! -f "$BUNDLE/bin/node.tar.xz" && -f "$BUNDLE/bin/node-$NODE_ARCH.tar.xz" ]]; then
   cp "$BUNDLE/bin/node-$NODE_ARCH.tar.xz" "$BUNDLE/bin/node.tar.xz"
@@ -72,4 +76,4 @@ done
 printf '\n==> healthcheck\n'
 bash "$BUNDLE/server/healthcheck.sh"
 printf '\n安装完成。建号: COFLUX_USER_EMAIL=you@example.com /usr/local/sbin/coflux-create-user\n'
-printf '这把 CA 在 %s/ca.crt 。编译客户端时把它当作 COFLUX_BUILD_CA_FILE，地址用 https://%s:%s\n' "$BUNDLE/tls" "$PUBLIC_IP" "${CENTRE_PORT:-8443}"
+printf '这把 CA 在 %s/ca.crt 。编译客户端时把它当作 COFLUX_BUILD_CA_FILE，地址用 https://%s:%s\n' "$BUNDLE/tls" "$PUBLIC_IP" "${CENTRE_PORT:-40443}"

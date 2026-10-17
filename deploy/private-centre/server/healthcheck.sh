@@ -10,7 +10,7 @@ set -a
 source /etc/coflux/server.env
 set +a
 
-for unit in coflux-server coflux-derp caddy; do
+for unit in coflux-server coflux-derp coflux-caddy; do
   systemctl is-active --quiet "$unit" || die "$unit 没有在运行"
 done
 
