@@ -25,7 +25,7 @@ import { createExecutorHost, type ExecutorHost } from "./executor-host";
 import { createExecutorSettingsWriter } from "./executor-settings-writer";
 import { createBrowserLogin } from "./browser-login";
 import { createRendererResetListener } from "./renderer-reset";
-import { installChromiumTrust, installNodeTrust, privateOrigin } from "./private-build";
+import { installChromiumTrust, installNodeTrust, privateDaemonEnv, privateDaemonPaths, privateOrigin } from "./private-build";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
 import { createUpdater } from "./updater";
@@ -244,7 +244,7 @@ if (!app.requestSingleInstanceLock()) {
     // launcher（透传给 runtime），coflux 终端里的 claude 由 runtime 的 shell 集成翻成 --plugin-dir 自动带上；不带就什么都不注入。
     const claudePluginDir = locateClaudePluginDir(daemonBundleDir);
     log.info("内置 coflux 插件", claudePluginDir ? { dir: claudePluginDir } : { bundled: false });
-    const localPaths = daemonHomePaths(app.isPackaged && !process.env.COFLUX_HOME ? homedir() : app.getPath("userData"), app.isPackaged ? process.env : { ...process.env, COFLUX_HOME: join(app.getPath("userData"), "runtime") });
+    const localPaths = privateDaemonPaths(daemonHomePaths(app.isPackaged && !process.env.COFLUX_HOME ? homedir() : app.getPath("userData"), app.isPackaged ? privateDaemonEnv(process.env, homedir()) : { ...process.env, COFLUX_HOME: join(app.getPath("userData"), "runtime") }), homedir());
     mkdirSync(localPaths.home, { recursive: true, mode: 0o700 });
 
     // executor（plan 116；配置改由账号持有见 plan 20260918）：作业表、runner、模型运行时与凭据

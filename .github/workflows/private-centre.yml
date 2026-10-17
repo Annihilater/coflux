@@ -1,7 +1,8 @@
 name: private-centre
 
-# 私有中心的部署包。标签刻意不是 v*：release.yml 只接受打在 origin/main 尖上的 v*，
+# 私有中心的部署包和私有桌面端。标签刻意不是 v*：release.yml 只接受打在 origin/main 尖上的 v*，
 # 这个分支不能走那条正式发布。
+# 桌面端需要两个仓库变量：PRIVATE_ORIGIN（如 https://1.2.3.4:40443）和 PRIVATE_CA_PEM（服务器 /etc/coflux/tls/ca.crt 全文）。
 on:
   push:
     tags: ["private-centre-*"]
@@ -12,6 +13,9 @@ permissions:
 concurrency:
   group: private-centre-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  VERSION: 2.19.1-private.3
 
 jobs:
   bundle:
@@ -41,6 +45,9 @@ jobs:
           cd transport/tailcat
           GOOS=linux GOARCH=amd64 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/derper/derper-amd64" tailscale.com/cmd/derper
           GOOS=linux GOARCH=arm64 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/derper/derper-arm64" tailscale.com/cmd/derper
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/derper/caddy-amd64" "https://caddyserver.com/api/download?os=linux&arch=amd64"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/derper/caddy-arm64" "https://caddyserver.com/api/download?os=linux&arch=arm64"
+          chmod 755 "$RUNNER_TEMP/derper/caddy-amd64" "$RUNNER_TEMP/derper/caddy-arm64"
 
       - name: 下载 Node 22
         run: |
@@ -57,19 +64,130 @@ jobs:
 
       - name: 打包
         env:
-          VERSION: 2.19.1-private.2
           BIN_DIR: ${{ runner.temp }}/derper
           CACHE_DIR: ${{ runner.temp }}/node
         run: deploy/private-centre/mac/60-pack-server.sh
 
-      - name: 发布到 GitHub Release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-centre-bundle
+          if-no-files-found: error
+          path: |
+            deploy/private-centre/out/*.tar.gz
+            deploy/private-centre/out/*.sha256
+
+  desktop:
+    name: 构建私有桌面端（macOS arm64，未签名）
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      COFLUX_RELEASE_VERSION: v2.19.1
+      COFLUX_BUILD_PUBLIC_ORIGIN: ${{ vars.PRIVATE_ORIGIN }}
+      COFLUX_BUILD_CA_FILE: ${{ github.workspace }}/../private-ca.pem
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 写入私有中心地址与 CA
+        env:
+          PRIVATE_CA_PEM: ${{ vars.PRIVATE_CA_PEM }}
+        run: |
+          set -euo pipefail
+          if [ -z "$COFLUX_BUILD_PUBLIC_ORIGIN" ] || [ -z "$PRIVATE_CA_PEM" ]; then
+            echo "::error::缺少仓库变量 PRIVATE_ORIGIN 或 PRIVATE_CA_PEM"
+            exit 1
+          fi
+          printf '%s\n' "$PRIVATE_CA_PEM" > "$COFLUX_BUILD_CA_FILE"
+          openssl x509 -in "$COFLUX_BUILD_CA_FILE" -noout -subject -enddate
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: transport/tailcat/go.sum
+
+      - name: 编译内置 daemon
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          bin="target/aarch64-apple-darwin/release"
+          node scripts/build-transport.mjs aarch64-apple-darwin "$bin"
+          cargo build --release --target aarch64-apple-darwin -p coflux-launcher -p coflux-runtime -p coflux-cli -p coflux-ptyd
+          node scripts/build-screen-helper.mjs "$bin"
+          mkdir -p "$RUNNER_TEMP/daemon-bundle"
+          for name in coflux-launcher coflux-runtime coflux coflux-transport coflux-ptyd coflux-screen; do
+            test -x "$bin/$name"
+            cp "$bin/$name" "$RUNNER_TEMP/daemon-bundle/$name"
+          done
+          cp "$bin/TRANSPORT-NOTICES.txt" "$RUNNER_TEMP/daemon-bundle/"
+          printf '%s\n' "$COFLUX_RELEASE_VERSION" > "$RUNNER_TEMP/daemon-bundle/VERSION"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: 构建桌面端
+        env:
+          COFLUX_DESKTOP_DAEMON_DIR: ${{ runner.temp }}/daemon-bundle
+        run: |
+          set -euo pipefail
+          pnpm -C apps/desktop run stage-daemon
+          pnpm -C apps/desktop build
+          grep -q "$COFLUX_BUILD_PUBLIC_ORIGIN" apps/desktop/out/main/index.js
+
+      # 没有 Developer ID：只出 .app 目录，整体 ad-hoc 签名后自己打 zip / dmg。
+      - name: 打包（ad-hoc 签名）
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          cd apps/desktop
+          pnpm exec electron-builder --mac dir --arm64 --publish never \
+            -c.appId=dev.coflux.desktop.private \
+            -c.productName="Coflux Private" \
+            -c.extraMetadata.productName="Coflux Private" \
+            -c.mac.identity=null \
+            -c.mac.notarize=false
+          app="dist/mac-arm64/Coflux Private.app"
+          test -d "$app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          out="$GITHUB_WORKSPACE/desktop-out"
+          mkdir -p "$out"
+          ditto -c -k --keepParent "$app" "$out/coflux-private-${VERSION}-arm64.zip"
+          hdiutil create -volname "Coflux Private" -srcfolder "$app" -ov -format UDZO "$out/coflux-private-${VERSION}-arm64.dmg"
+          (cd "$out" && shasum -a 256 *.zip *.dmg > coflux-private-${VERSION}-desktop.sha256)
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-desktop
+          if-no-files-found: error
+          path: desktop-out/*
+
+  release:
+    name: 发布到 GitHub Release
+    needs: [bundle, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: assets
+          merge-multiple: true
+      - name: 创建 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          ls -la assets
           gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "Private centre ${GITHUB_REF_NAME}" \
-            --notes "Debian 部署包。服务器上解压后执行 PUBLIC_IP=<公网 IP> bash server/install.sh。这个标签不是上游 v* 发布。" \
-            deploy/private-centre/out/*.tar.gz \
-            deploy/private-centre/out/*.sha256
+            --notes "Debian 部署包：服务器上解压后执行 PUBLIC_IP=<公网 IP> bash server/install.sh。私有桌面端（macOS arm64，未签名）：解压后执行 xattr -dr com.apple.quarantine \"/Applications/Coflux Private.app\" 再打开。这个标签不是上游 v* 发布。" \
+            assets/*

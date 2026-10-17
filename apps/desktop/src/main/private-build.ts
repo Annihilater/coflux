@@ -1,8 +1,10 @@
 // Compile-time private centre. electron-vite replaces the two globalThis reads from
 // COFLUX_BUILD_PUBLIC_ORIGIN and COFLUX_BUILD_CA_FILE. Unit tests leave them unset.
 import { X509Certificate } from "node:crypto";
+import { join } from "node:path";
 import tls from "node:tls";
 import type { Session } from "electron";
+import type { DaemonHomePaths } from "./daemon-paths";
 
 declare global {
   var __COFLUX_BUILD_ORIGIN__: string | undefined;
@@ -29,6 +31,20 @@ export function privateClientUrl(): string | undefined {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+/**
+ * A private build keeps its daemon in ~/.coflux-private so it never adopts or stops a public
+ * install's ~/.coflux and com.coflux.daemon LaunchAgent on the same Mac. An explicit COFLUX_HOME wins.
+ */
+export function privateDaemonEnv(env: NodeJS.ProcessEnv, homeDir: string): NodeJS.ProcessEnv {
+  if (!privateOrigin() || env.COFLUX_HOME?.trim()) return env;
+  return { ...env, COFLUX_HOME: join(homeDir, ".coflux-private") };
+}
+
+export function privateDaemonPaths(paths: DaemonHomePaths, homeDir: string): DaemonHomePaths {
+  if (!privateOrigin()) return paths;
+  return { ...paths, plist: join(homeDir, "Library", "LaunchAgents", "com.coflux.private.daemon.plist") };
 }
 
 export function wsCaOption(): { ca?: string[] } {
