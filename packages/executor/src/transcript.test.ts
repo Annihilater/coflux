@@ -88,6 +88,18 @@ test("the salient argument follows the tool: command, path, pattern", () => {
   assert.equal(salientArgument("bash", undefined), "");
 });
 
+test("a codemode row names the script by its first line of code", () => {
+  assert.equal(
+    salientArgument("codemode", {
+      code: '// @options: {"timeout_ms": 60000}\n\nconst files = await tools.find({ pattern: "*.ts" });\nreturn files;',
+    }),
+    'const files = await tools.find({ pattern: "*.ts" });',
+  );
+  assert.equal(salientArgument("codemode", { code: "  return 1;  " }), "return 1;");
+  assert.equal(salientArgument("codemode", { code: "\n\n" }), "");
+  assert.equal(salientArgument("codemode", {}), "");
+});
+
 test("tool results of every shape pi uses become text", () => {
   assert.equal(toolResultText("plain"), "plain");
   assert.equal(toolResultText({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }), "a\nb");

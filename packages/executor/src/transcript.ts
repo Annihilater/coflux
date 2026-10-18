@@ -54,7 +54,8 @@ export function capToolOutput(text: string): string {
 }
 
 /** The one argument worth showing on a tool row: the command for bash, the path for the file
- * tools, the pattern for the search tools. Anything unknown falls back to a compact JSON. */
+ * tools, the pattern for the search tools, the script's first real line for codemode. Anything
+ * unknown falls back to a compact JSON. */
 export function salientArgument(toolName: string, args: unknown): string {
   const input = (args ?? {}) as Record<string, unknown>;
   const pick = (...keys: string[]): string => {
@@ -77,6 +78,18 @@ export function salientArgument(toolName: string, args: unknown): string {
       const pattern = pick("pattern", "query", "regex", "glob");
       const path = pick("path", "directory");
       return path ? `${pattern} ${path}`.trim() : pattern;
+    }
+    case "codemode": {
+      // The whole script would not fit a row, and its `// @options:` header says nothing about what
+      // it does; the first line of actual code names it. Long lines are left whole: the card
+      // ellipsises them.
+      const code = input.code;
+      if (typeof code !== "string") return "";
+      for (const line of code.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("// @options:")) return trimmed;
+      }
+      return "";
     }
     default: {
       const direct = pick("command", "path", "pattern", "query");
