@@ -1,0 +1,10 @@
+[Unit]
+Description=Coflux clock sync from HTTPS Date every 10 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
