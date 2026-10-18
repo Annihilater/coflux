@@ -608,15 +608,42 @@ pub fn render_executor_failure(status: &Value) -> (String, &'static str) {
         reason = "no reason given".to_string();
     }
     let files = changed_files(status);
-    let (tail, next) = if files.is_empty() {
-        (String::new(), "Adjust the prompt and send a new run.")
+    let next = executor_next_step(terminal, !files.is_empty());
+    let tail = if files.is_empty() {
+        String::new()
     } else {
-        (
-            format!(". Files already changed ({}): {}", files.len(), files.join(" ")),
-            "Review the changes it left, then send a new run.",
-        )
+        format!(". Files already changed ({}): {}", files.len(), files.join(" "))
     };
     (format!("Executor run ended as {terminal}: {reason}{tail}"), next)
+}
+
+/// The next step for a run that ended as `terminal`, depending on whether it left changed files
+/// behind. Each state calls for something different: a rejected run never started, a cancelled one
+/// was stopped on purpose, and an `unknown` one lost its host, so its file list may be short.
+/// `packages/cli/coflux.mjs` prints the same strings.
+fn executor_next_step(terminal: &str, left_files: bool) -> &'static str {
+    match (terminal, left_files) {
+        ("rejected", _) => "Nothing ran. Send this run again once the reason above is resolved.",
+        ("model_error", false) => {
+            "Send the run again. If the reason points at the provider, key or model, tell the user to fix the executor settings instead."
+        }
+        ("model_error", true) => {
+            "Review the changes it left, then send the run again. If the reason points at the provider, key or model, tell the user to fix the executor settings instead."
+        }
+        ("tool_failed", false) => "Send the run again. If it fails the same way, tell the user.",
+        ("tool_failed", true) => {
+            "Review the changes it left, then send the run again. If it fails the same way, tell the user."
+        }
+        ("cancelled", false) => {
+            "It was stopped before it finished, by the user, a timeout or its host going away. Find out why before sending it again."
+        }
+        ("cancelled", true) => {
+            "It was stopped before it finished, by the user, a timeout or its host going away. Review the changes it left and find out why before sending it again."
+        }
+        _ => {
+            "Its host went away mid-run, so the list of changed files may be incomplete. Check the workspace before sending it again."
+        }
+    }
 }
 
 pub fn render_executor_timeout(timeout_secs: f64, run_id: &str, phase: &str) -> String {
