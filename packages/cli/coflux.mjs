@@ -536,11 +536,38 @@ function renderExecutorFailure(status) {
   const terminal = String(status?.terminal ?? "") || "unknown";
   const reason = String(status?.error ?? "").trim() || String(status?.note ?? "").trim() || "no reason given";
   const files = executorChangedFiles(status);
-  const tail = files.length ? `. Files already changed (${files.length}): ${files.join(" ")}` : "";
+  // A reason that already ends a sentence (the executor's incomplete-list note does) takes no second
+  // period.
+  const stop = /[.!?]$/.test(reason) ? "" : ".";
+  const tail = files.length ? `${stop} Files already changed (${files.length}): ${files.join(" ")}` : "";
   return {
     message: `Executor run ended as ${terminal}: ${reason}${tail}`,
-    next: files.length ? "Review the changes it left, then send a new run." : "Adjust the prompt and send a new run.",
+    next: executorNextStep(terminal, files.length > 0),
   };
+}
+
+/** The next step for a run that ended as `terminal`, depending on whether it left changed files
+ * behind. A rejected run never started, a cancelled one was stopped on purpose, and an `unknown` one
+ * lost its host, so its file list may be short. The Rust CLI prints the same strings. */
+function executorNextStep(terminal, leftFiles) {
+  switch (terminal) {
+    case "rejected":
+      return "Nothing ran. Send this run again once the reason above is resolved.";
+    case "model_error":
+      return leftFiles
+        ? "Review the changes it left, then send the run again. If the reason points at the provider, key or model, tell the user to fix the executor settings instead."
+        : "Send the run again. If the reason points at the provider, key or model, tell the user to fix the executor settings instead.";
+    case "tool_failed":
+      return leftFiles
+        ? "Review the changes it left, then send the run again. If it fails the same way, tell the user."
+        : "Send the run again. If it fails the same way, tell the user.";
+    case "cancelled":
+      return leftFiles
+        ? "It was stopped before it finished, by the user, a timeout or its host going away. Review the changes it left and find out why before sending it again."
+        : "It was stopped before it finished, by the user, a timeout or its host going away. Find out why before sending it again.";
+    default:
+      return "Its host went away mid-run, so the list of changed files may be incomplete. Check the workspace before sending it again.";
+  }
 }
 
 function renderExecutorTimeout(timeoutSec, runId, phase) {

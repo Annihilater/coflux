@@ -49,7 +49,7 @@ test("写模式同一工作区互斥：第二个写请求当场拒，且不起�
   assert.equal(starts(effects).length, 0);
   const report = reports(effects)[0];
   assert.equal(report.kind === "report" && report.state, "rejected");
-  assert.match(report.kind === "report" ? report.note : "", /写模式同一工作区只能有一个/);
+  assert.match(report.kind === "report" ? report.note : "", /one write run at a time/);
 });
 
 test("不同工作区的写模式互不影响", () => {
@@ -81,7 +81,7 @@ test("总数封顶：超过上限一律拒，与读写无关", () => {
   const effects = t.assign(assignment({ runId: "r3", write: false }));
   assert.equal(starts(effects).length, 0);
   const report = reports(effects)[0];
-  assert.match(report.kind === "report" ? report.note : "", /已达上限 2/);
+  assert.match(report.kind === "report" ? report.note : "", /already running 2 executor runs/);
 });
 
 test("未配置 provider/模型时一律拒，理由透传给 agent", () => {

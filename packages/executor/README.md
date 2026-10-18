@@ -29,6 +29,7 @@ sandbox tier is "against mistakes, not adversaries" — see `src/sandbox.ts`.
 | `jobs.ts` | the job table: concurrency, the per-workspace write lock, terminal states, reconciliation. Pure. |
 | `manager.ts` | the side effects the job table asks for: spawning runners, killing process groups, writing sandbox profiles. |
 | `runner.ts` | one task, one process: pi, the guard extension, the sandboxed bash backend. |
+| `changes.ts` | what a write run changed in its workspace: git's dirty set before and after, or a bounded walk outside git. Pure. |
 | `sandbox.ts` / `workspace.ts` | the Seatbelt profile text and the git facts it needs. Pure. |
 | `guard.ts` | the path guard for pi's structured file tools. Pure. |
 | `config.ts` / `settings-cache.ts` | the account-held configuration as the local daemon last wrote it. |

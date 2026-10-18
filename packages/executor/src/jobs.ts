@@ -190,11 +190,11 @@ export class ExecutorJobTable {
     if (assignment.write) {
       const writer = this.writerOf(assignment.workspaceId);
       if (writer) {
-        return `该工作区已有一个写模式 executor 任务在跑（${writer.assignment.runId}）；写模式同一工作区只能有一个，等它结束再发`;
+        return `Another write run (${writer.assignment.runId}) is already working in this workspace, and a workspace takes one write run at a time. Wait for it to finish.`;
       }
     }
     if (this.activeCount() >= this.limits.maxConcurrent) {
-      return `本机同时在跑的 executor 任务已达上限 ${this.limits.maxConcurrent}，等一个结束再发`;
+      return `This machine is already running ${this.limits.maxConcurrent} executor runs, the most it runs at once. Wait for one of them to finish.`;
     }
     return null;
   }

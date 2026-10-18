@@ -45,7 +45,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
+import { posix } from "node:path";
 
+import {
+  ABORTING_SCAN_BUDGET_MS,
+  FINAL_SCAN_BUDGET_MS,
+  changesSince,
+  takeChangeBaseline,
+  type ChangeBaseline,
+} from "./changes.js";
 import { guardToolCall } from "./guard.js";
 import { sandboxArgv } from "./sandbox.js";
 import {
@@ -259,8 +267,64 @@ function memoryCredentialStore() {
 /** The files this task changed; the guard extension records them as it lets write/edit through. */
 const changedFiles = new Set<string>();
 
+/**
+ * A file tool's path relative to the root, in the form changes.ts reports. The guard lets only
+ * absolute paths inside the root through, but they may still carry `.` or `..` segments: listed raw,
+ * `/root/sub/../a.txt` would show `a.txt` twice.
+ */
 function relativeToWorkspace(root: string, absolute: string): string {
-  return absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : absolute;
+  const relative = posix.relative(root, posix.normalize(absolute));
+  return relative && relative !== ".." && !relative.startsWith("../") ? relative : absolute;
+}
+
+/** The workspace just before the prompt of a write run; null in a read-only run and until then.
+ * Module state so the abort branch reaches it too. */
+let changeBaseline: ChangeBaseline | null = null;
+
+/** The most paths one `done` message lists; the rest are counted in the incomplete-list sentence. */
+const MAX_REPORTED_FILES = 500;
+
+/**
+ * What a terminal `done` message reports as changed: the workspace's net change since the baseline
+ * (whatever made it, bash included) united with the paths the file tools wrote, which also covers
+ * files the repository ignores. `note` is the sentence to add when that list is not the whole story;
+ * there is none without a baseline. Call it only once `stopAllGroups()` has returned, so no tool
+ * process is still writing.
+ */
+function reportChanges(): { files: string[]; note: string | null } {
+  // Once an abort has arrived the host force-kills this process 8 seconds later, so the scan gets
+  // less time; `aborting` also covers run()'s own exit paths, which the abort does not stop.
+  const scanned = changeBaseline
+    ? changesSince(changeBaseline, aborting ? ABORTING_SCAN_BUDGET_MS : FINAL_SCAN_BUDGET_MS)
+    : { files: [], incomplete: null };
+  const all = [...new Set([...scanned.files, ...changedFiles])].sort();
+  const reasons: string[] = [];
+  if (scanned.incomplete) reasons.push(scanned.incomplete);
+  if (all.length > MAX_REPORTED_FILES) reasons.push(`${all.length - MAX_REPORTED_FILES} more changed files are not listed`);
+  const note =
+    changeBaseline && reasons.length > 0
+      ? `Changed-file list incomplete: ${reasons.join("; ")}. Check the workspace yourself.`
+      : null;
+  return { files: all.slice(0, MAX_REPORTED_FILES), note };
+}
+
+type DoneMessage = Extract<ExecutorRunnerOutbound, { type: "done" }>;
+
+/**
+ * Every terminal `done` message goes through here, so each one reports changes the same way. The
+ * incomplete-list sentence is appended to the summary of a success and to the error of anything
+ * else: those are the fields the CLI prints for each.
+ */
+function doneMessage(outcome: DoneMessage["outcome"], summary: string, error?: string): DoneMessage {
+  const { files, note } = reportChanges();
+  if (note && outcome === "succeeded") {
+    // Its own paragraph: the summary is the model's markdown and may end in a list or a code block.
+    summary = summary.trim() ? `${summary.trimEnd()}\n\n${note}` : note;
+  } else if (note) {
+    const text = (error ?? "").trimEnd();
+    error = !text ? note : /[.!?。！？]$/.test(text) ? `${text} ${note}` : `${text}. ${note}`;
+  }
+  return { type: "done", outcome, summary, changedFiles: files, ...(error !== undefined ? { error } : {}) };
 }
 
 async function run(start: ExecutorRunnerStart): Promise<void> {
@@ -470,6 +534,11 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     recorder.onEvent(event as Parameters<TranscriptRecorder["onEvent"]>[0]);
   });
 
+  // A write run's changed-file list is the workspace's net change, so the baseline is taken here:
+  // after the session exists, before the prompt can start any tool, and before the task's timer
+  // starts, so a slow scan does not eat into the task's time. Read-only runs cannot write.
+  if (start.write) changeBaseline = takeChangeBaseline(start.workspaceRoot);
+
   const timeout = setTimeout(() => void session.abort(), start.timeoutMs);
   try {
     await session.prompt(start.prompt);
@@ -478,50 +547,28 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   }
 
   // Stop cleanly before recording the terminal state: the write lock holds the next writer off by
-  // virtue of this run not being finished, so finishing early releases the lock early.
+  // virtue of this run not being finished, so finishing early releases the lock early. The final
+  // scan in doneMessage() also waits for this: a tool process still writing would be missed.
   await stopAllGroups();
 
   const { reason: lastStopReason, errorMessage: lastErrorMessage } = recorder.lastStop();
   const lastAssistantText = recorder.lastAssistantText();
   if (lastStopReason === "error") {
     recorder.error(lastErrorMessage || "模型调用失败");
-    send({
-      type: "done",
-      outcome: "model_error",
-      summary: lastAssistantText,
-      changedFiles: [...changedFiles],
-      error: lastErrorMessage || "模型调用失败，且未给出原因",
-    });
+    send(doneMessage("model_error", lastAssistantText, lastErrorMessage || "模型调用失败，且未给出原因"));
     return;
   }
   if (lastStopReason === "aborted") {
-    send({
-      type: "done",
-      outcome: "cancelled",
-      summary: lastAssistantText,
-      changedFiles: [...changedFiles],
-      error: lastErrorMessage || "任务被中断",
-    });
+    send(doneMessage("cancelled", lastAssistantText, lastErrorMessage || "任务被中断"));
     return;
   }
   // Returning without a single event (the model produced no message at all) is not success either —
   // it usually means the session never really started.
   if (!lastStopReason) {
-    send({
-      type: "done",
-      outcome: "model_error",
-      summary: "",
-      changedFiles: [...changedFiles],
-      error: "executor 没有产出任何模型回复；检查桌面里配的 provider 与模型是否可用",
-    });
+    send(doneMessage("model_error", "", "executor 没有产出任何模型回复；检查桌面里配的 provider 与模型是否可用"));
     return;
   }
-  send({
-    type: "done",
-    outcome: "succeeded",
-    summary: lastAssistantText,
-    changedFiles: [...changedFiles],
-  });
+  send(doneMessage("succeeded", lastAssistantText));
 }
 
 let aborting = false;
@@ -530,7 +577,7 @@ onHostMessage((message) => {
   if (message?.type === "abort") {
     aborting = true;
     void stopAllGroups().then(() => {
-      send({ type: "done", outcome: "cancelled", summary: "", changedFiles: [...changedFiles], error: "已被停止" });
+      send(doneMessage("cancelled", "", "已被停止"));
       process.exit(EXECUTOR_RUNNER_EXIT.aborted);
     });
     return;
@@ -550,13 +597,7 @@ onHostMessage((message) => {
       await stopAllGroups();
       const text = error instanceof Error ? error.message : String(error);
       recorder.error(text);
-      send({
-        type: "done",
-        outcome: text.includes("模型") || text.includes("model") ? "model_error" : "tool_failed",
-        summary: "",
-        changedFiles: [...changedFiles],
-        error: text,
-      });
+      send(doneMessage(text.includes("模型") || text.includes("model") ? "model_error" : "tool_failed", "", text));
     })
     .finally(() => {
       if (!aborting) process.exit(EXECUTOR_RUNNER_EXIT.ok);
