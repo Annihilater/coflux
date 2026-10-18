@@ -15,6 +15,10 @@
  * This runs in the runner, outside the sandbox, possibly while the delegating agent is using git in
  * the same repository. Every git command therefore carries `GIT_OPTIONAL_LOCKS=0` (without it
  * `git status` may refresh and rewrite `.git/index`), and none of them writes the repository.
+ * `git status` also runs with the git directory and work tree recorded before the prompt, fsmonitor
+ * off and submodules ignored: the final scan runs outside the sandbox after the model's commands,
+ * and a linked worktree's `.git` file and a submodule's `.git` are writable from inside it, so left
+ * to discover its repository, that git could load config (fsmonitor, filter drivers) the run wrote.
  *
  * Synchronous on purpose: the final scan sits between stopping the run's tool processes and
  * reporting its terminal state, and nothing else may run in between. Budgets keep it short. Git and
@@ -112,13 +116,42 @@ export const FINAL_SCAN_BUDGET_MS = 5_000;
  * asking it to stop, and stopping the tool processes takes up to about 2.2 of them first. */
 export const ABORTING_SCAN_BUDGET_MS = 4_000;
 
-/** Run at the root, so the pathspec `.` keeps a subdirectory workspace to itself. Renames off: a
- * rename is two changed paths, and the extra source field would complicate parsing for nothing. */
-const STATUS_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", "."] as const;
+/** The repository a git-mode baseline pinned before the prompt. */
+type PinnedRepository = {
+  /** `git rev-parse --absolute-git-dir` at the root. */
+  gitDir: string;
+  /** `git rev-parse --show-toplevel` at the root. */
+  workTree: string;
+};
+
+/**
+ * `git status` against the pinned repository, run at the root so the pathspec `.` keeps a
+ * subdirectory workspace to itself. The explicit git directory and work tree mean no `.git` file
+ * the run may have rewritten is ever read; fsmonitor off and submodules ignored mean no hook or
+ * submodule repository runs either (see the header). Renames off: a rename is two changed paths,
+ * and the extra source field would complicate parsing for nothing.
+ */
+function statusArgs(repository: PinnedRepository): string[] {
+  return [
+    `--git-dir=${repository.gitDir}`,
+    `--work-tree=${repository.workTree}`,
+    "-c",
+    "core.fsmonitor=false",
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--no-renames",
+    "--ignore-submodules=all",
+    "--",
+    ".",
+  ];
+}
 
 type GitBaseline = {
   mode: "git";
   root: string;
+  repository: PinnedRepository;
   /** The root's path below the repository's top level (`sub/`), or empty at the top level. */
   prefix: string;
   /** Every path dirty at baseline, root-relative, with its signature then (null = absent). */
@@ -157,7 +190,13 @@ export function takeChangeBaseline(root: string, overrides: Partial<ChangesDeps>
   if (ignored.status === 0) return walkBaseline(root, deps, "is ignored by its git repository");
   if (ignored.status !== 1) return unavailable("git check-ignore failed before the run started");
 
-  const status = deps.runGit(STATUS_ARGS, root, BASELINE_GIT_TIMEOUT_MS);
+  // Recorded now, while the model has not yet run a command: this is the real `.git`.
+  const gitDir = readGitLine(deps, root, ["rev-parse", "--absolute-git-dir"]);
+  const workTree = readGitLine(deps, root, ["rev-parse", "--show-toplevel"]);
+  if (!gitDir || !workTree) return unavailable("git rev-parse failed before the run started");
+  const repository: PinnedRepository = { gitDir, workTree };
+
+  const status = deps.runGit(statusArgs(repository), root, BASELINE_GIT_TIMEOUT_MS);
   if (!status.ok) return unavailable("git status failed before the run started");
 
   const deadline = deps.now() + BASELINE_SCAN_MS;
@@ -169,7 +208,14 @@ export function takeChangeBaseline(root: string, overrides: Partial<ChangesDeps>
     }
     dirty.set(path, deps.signature(absolute(root, path)));
   }
-  return { mode: "git", root, prefix: rootPrefix, dirty, deps };
+  return { mode: "git", root, repository, prefix: rootPrefix, dirty, deps };
+}
+
+/** One line of a baseline git command's output; null when it failed or printed nothing. */
+function readGitLine(deps: ChangesDeps, root: string, args: string[]): string | null {
+  const result = deps.runGit(args, root, BASELINE_GIT_TIMEOUT_MS);
+  const line = result.ok ? result.stdout.replace(/\n$/, "") : "";
+  return line ? line : null;
 }
 
 function walkBaseline(root: string, deps: ChangesDeps, why: string): ChangeBaseline {
@@ -195,7 +241,7 @@ export function changesSince(baseline: ChangeBaseline, budgetMs: number): Change
   const changed = new Set<string>();
 
   if (baseline.mode === "git") {
-    const status = deps.runGit(STATUS_ARGS, root, budgetMs);
+    const status = deps.runGit(statusArgs(baseline.repository), root, budgetMs);
     if (!status.ok) return { files: [], incomplete: "git status failed after the run" };
     for (const path of dirtyPaths(status.stdout, baseline.prefix)) {
       if (!baseline.dirty.has(path)) changed.add(path);

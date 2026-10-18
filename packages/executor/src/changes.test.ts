@@ -12,28 +12,47 @@ const REPO = "/Users/alice/repo";
 type FakeRepo = {
   /** `rev-parse --show-prefix` output without the newline; null = not a git repository. */
   prefix: string | null;
+  /** `rev-parse --absolute-git-dir` output; null = it fails. */
+  gitDir: string | null;
+  /** `rev-parse --show-toplevel` output; null = it fails. */
+  toplevel: string | null;
   /** `check-ignore -q .` exit status. */
   ignoreStatus: number;
   /** Porcelain entries (`XY path`, top-level relative); null = `git status` fails. */
   dirty: string[] | null;
-  calls: string[];
+  /** Every call's full argument list, global options included. */
+  calls: string[][];
 };
 
 function fakeRepo(init: Partial<FakeRepo> = {}): FakeRepo {
-  return { prefix: "", ignoreStatus: 1, dirty: [], calls: [], ...init };
+  return { prefix: "", gitDir: `${REPO}/.git`, toplevel: REPO, ignoreStatus: 1, dirty: [], calls: [], ...init };
+}
+
+/** The arguments after git's global options (`--git-dir=…`, `--work-tree=…`, `-c <setting>`). */
+function subcommand(args: readonly string[]): string[] {
+  let index = 0;
+  while (index < args.length) {
+    if (args[index] === "-c") index += 2;
+    else if (args[index].startsWith("--git-dir=") || args[index].startsWith("--work-tree=")) index += 1;
+    else break;
+  }
+  return args.slice(index);
 }
 
 function fakeGit(repo: FakeRepo): ChangesGitRunner {
+  const line = (value: string | null) =>
+    value === null ? { stdout: "", ok: false, status: 128 } : { stdout: `${value}\n`, ok: true, status: 0 };
   return (args) => {
-    const key = args.join(" ");
-    repo.calls.push(key);
-    if (key === "rev-parse --show-prefix") {
-      return repo.prefix === null ? { stdout: "", ok: false, status: 128 } : { stdout: `${repo.prefix}\n`, ok: true, status: 0 };
-    }
+    repo.calls.push([...args]);
+    const command = subcommand(args);
+    const key = command.join(" ");
+    if (key === "rev-parse --show-prefix") return line(repo.prefix);
+    if (key === "rev-parse --absolute-git-dir") return line(repo.gitDir);
+    if (key === "rev-parse --show-toplevel") return line(repo.toplevel);
     if (key === "check-ignore -q .") {
       return { stdout: "", ok: repo.ignoreStatus === 0, status: repo.ignoreStatus };
     }
-    if (args[0] === "status") {
+    if (command[0] === "status") {
       if (repo.dirty === null) return { stdout: "", ok: false, status: 128 };
       return { stdout: repo.dirty.map((entry) => `${entry}\0`).join(""), ok: true, status: 0 };
     }
@@ -94,7 +113,26 @@ test("git: a root its repository ignores is walked instead", () => {
   const repo = fakeRepo({ ignoreStatus: 0 });
   const baseline = takeChangeBaseline(REPO, { runGit: fakeGit(repo), listDir: () => [] });
   assert.equal(baseline.mode, "walk");
-  assert.ok(!repo.calls.some((call) => call.startsWith("status")), "git status must not run for an ignored root");
+  assert.ok(!repo.calls.some((call) => subcommand(call)[0] === "status"), "git status must not run for an ignored root");
+});
+
+test("git: the final status is pinned to the repository recorded before the run, fsmonitor off, submodules ignored", () => {
+  const root = `${REPO}/.claude/worktrees/wt`;
+  const gitDir = `${REPO}/.git/worktrees/wt`;
+  const repo = fakeRepo({ gitDir, toplevel: root });
+  const baseline = takeChangeBaseline(root, gitDeps(repo, new Map()));
+
+  // What the run's rewritten `.git` file would now point git at; the final scan must not ask.
+  repo.gitDir = "/planted/.git";
+  repo.toplevel = "/planted";
+  const before = repo.calls.length;
+  changesSince(baseline, 5_000);
+
+  const finalCalls = repo.calls.slice(before);
+  assert.equal(finalCalls.length, 1);
+  const [call] = finalCalls;
+  assert.deepEqual(call.slice(0, 5), [`--git-dir=${gitDir}`, `--work-tree=${root}`, "-c", "core.fsmonitor=false", "status"]);
+  assert.ok(call.includes("--ignore-submodules=all"));
 });
 
 test("git: a subdirectory workspace reports paths relative to itself, not to the repository", () => {
