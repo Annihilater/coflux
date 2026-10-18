@@ -11,8 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod codex;
 mod workspace;
+mod worktree_guard;
 
 pub use workspace::enter as enter_workspace;
+pub(crate) use worktree_guard::deny_decision as worktree_guard_decision;
 
 const SKILL: &str = include_str!("../../../packages/cli/skills/coflux/SKILL.md");
 const SECRET_SKILL: &str = include_str!("../../../packages/cli/skills/coflux-secret/SKILL.md");
@@ -148,6 +150,15 @@ fn local(action: &str, path: Option<&str>) -> Result<Value, String> {
     local_at(action, path, &crate::gateway::caller_cwd())
 }
 fn local_at(action: &str, path: Option<&str>, cwd: &str) -> Result<Value, String> {
+    local_within(action, path, cwd, Duration::from_millis(1800))
+}
+/// [`local_at`] with the caller's own time budget for the whole exchange.
+fn local_within(
+    action: &str,
+    path: Option<&str>,
+    cwd: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
     // Identity is the transport's business (`gateway::local_post`): the kernel's on the agent
     // socket, pid/ppid added only on the TCP fallback.
     let mut body = serde_json::Map::new();
@@ -156,7 +167,7 @@ fn local_at(action: &str, path: Option<&str>, cwd: &str) -> Result<Value, String
     if let Some(path) = path {
         body.insert("path".into(), Value::from(path));
     }
-    let response = crate::gateway::local_post("/agent", body, Duration::from_millis(1800))
+    let response = crate::gateway::local_post("/agent", body, timeout)
         .map_err(|error| error.message())?;
     let value: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
     if !response.ok() || value["ok"] != true {
@@ -314,27 +325,10 @@ fn hook(host: &str) {
         .and_then(|p| p.parent().map(Path::to_owned))
         .unwrap_or_default();
     let event = event.as_str();
-    if event == "PreToolUse"
-        && host == "claude"
-        && !env("COFLUX_PROJECT_ID").is_empty()
-        && payload["tool_name"] == "Bash"
-    {
-        let guarded = regex::Regex::new(
-            r"\bgit\b(?:\s+-{1,2}[\w-]+(?:=\S+|\s+\S+)?)*\s+worktree\s+(remove|move)\b",
-        )
-        .unwrap();
-        if guarded.is_match(
-            payload["tool_input"]["command"]
-                .as_str()
-                .unwrap_or_default(),
-        ) {
-            println!(
-                "{}",
-                json!({"hookSpecificOutput":{
-                    "hookEventName":"PreToolUse", "permissionDecision":"deny",
-                    "permissionDecisionReason":"Use coflux workspace list and coflux workspace remove <workspaceId> to remove a managed worktree and its sidebar record. Moving worktrees is unsupported; remove and recreate instead. Claude Code may clean up its own worktrees normally."
-                }})
-            );
+    // On PreToolUse the guard's deny decision is the only stdout (see `worktree_guard`).
+    if host == "claude" {
+        if let Some(decision) = worktree_guard::deny_decision(&payload) {
+            println!("{decision}");
         }
     }
     if host == "codex" && workspace::hook(&root, &payload) {

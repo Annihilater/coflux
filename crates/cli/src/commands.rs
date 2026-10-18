@@ -721,12 +721,15 @@ pub fn run_executor(args: &ParsedArgs) {
 }
 
 /* ---------------------------------- hook --------------------------------- */
-// `coflux hook <claude|codex>`：信使。读 stdin/argv 的 hook 事件 JSON，只取事件名与进程坐标转发到
-// `/hook`——payload 里的 prompt / 回答原文 / 通知正文一律不出机（隐私边界）。
+// `coflux hook <claude|codex>`: the messenger. It reads the hook event JSON from stdin/argv and
+// forwards only the event name and process coordinates to `/hook`; the prompt, answer text and
+// notification body in the payload never leave the machine (privacy boundary).
 //
-// 纪律：绝不能干扰 agent 本体——任何失败都静默退出 0（claude 把 Stop hook 的非零退出码解释为
-// "阻止收尾"）；绝不写 stdout（claude 会把 hook 的 stdout 当决策 JSON 解析），调试信息走 stderr
-// （COFLUX_HOOK_DEBUG=1 开启）。请求保持到收到响应才退出——worker 处理期间用 pid 反查进程树。
+// Discipline: never disturb the agent itself. Every failure exits 0 silently (claude reads a
+// non-zero exit of a Stop hook as "block the stop"). stdout stays empty (claude parses a hook's
+// stdout as a decision JSON) except for the worktree guard's deny decision on a Claude Code
+// PreToolUse; debug output goes to stderr (COFLUX_HOOK_DEBUG=1). The request is held until its
+// response arrives: the worker walks the process tree from this pid while it handles it.
 
 /// stdin 没有数据时不能干等（notify 形态下 stdin 是继承的 TTY/空管道）。
 const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(300);
@@ -814,7 +817,9 @@ pub fn build_hook_body(agent: &str, payload: &Value, pid: i64, ppid: i64) -> Opt
     Some(map)
 }
 
-/// 永远以 0 退出、永不写 stdout。
+/// Always exits 0 and writes nothing to stdout, with one exception: on a Claude Code `PreToolUse`
+/// event it prints the worktree guard's deny decision, one JSON object on one line, when the guard
+/// has one (`integration::worktree_guard_decision`).
 pub fn run_hook(args: &ParsedArgs) {
     let debug = hook_debug_enabled();
     let agent = match args.positional(1) {
@@ -834,6 +839,12 @@ pub fn run_hook(args: &ParsedArgs) {
         hook_debug(debug, "no valid payload; ignored");
         return;
     };
+    if agent == "claude" {
+        if let Some(decision) = crate::integration::worktree_guard_decision(&payload) {
+            hook_debug(debug, "PreToolUse: denied a worktree removal or move of a coflux workspace");
+            println!("{decision}");
+        }
+    }
     let Some(request) = build_hook_body(agent, &payload, gateway::pid(), gateway::ppid()) else {
         hook_debug(debug, "payload has no event name; ignored");
         return;
