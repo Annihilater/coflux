@@ -13,7 +13,7 @@
  * access. The bash children that actually run the user's commands are wrapped in `sandbox-exec`, and
  * that side has no network and can only write the workspace (see sandbox.ts).
  *
- * Four key integration points with pi, each matching a recorded decision:
+ * Six key integration points with pi, each matching a recorded decision:
  *   1. **A closed ResourceLoader**: `noExtensions/noSkills/noPromptTemplates/noThemes/noContextFiles`
  *      all off, with coflux's own prompt supplied through `systemPrompt`. Leave them on and a `.pi/`
  *      directory dropped into a workspace can execute arbitrary code.
@@ -22,18 +22,29 @@
  *      extension discovery is off, so this one is in-process and trusted.
  *   3. **A replaced bash backend**: `createBashToolDefinition(cwd, { operations })` wraps every
  *      command in sandbox-exec and kills by process group — pi's own backend uses `detached: true`,
- *      and killing the pid does not kill the group it spawned.
+ *      and killing the pid does not kill the group it spawned. It arrives through `customTools`
+ *      and must also be named in `tools` to exist at all: that list is an allowlist over custom
+ *      tools too.
  *   4. **No session on disk**: `SessionManager.inMemory()`, leaving the user's existing `~/.pi` state
  *      untouched.
  *   5. **A fully private pi configuration**: auth, models, settings and the `getAgentDir()` fallback
  *      all point into this task's scratch dir, and settings are in-memory defaults. The executor
  *      never shares a byte of configuration with a pi the user installed themselves, and a
  *      workspace's `.pi/` directory cannot reconfigure it either.
+ *   6. **codemode**: `createCodemodeExtension` adds pi's `codemode` tool, which lets the model write
+ *      one JavaScript script that calls the other tools as `tools.*` instead of one model turn per
+ *      call. It is an inline extension like the guard, so on-disk discovery stays off. Every call a
+ *      script makes goes through pi's normal tool pipeline, so the guard's `tool_call` hook and the
+ *      sandboxed bash see it exactly as they see a direct call; the guard needs no codemode branch.
+ *      Mode `on` keeps the direct tools callable alongside it. `models` is off: that namespace lets a
+ *      script pick other models and run classifier and image-generation requests on the user's
+ *      credential — provider requests beyond the task's one configured model, which no `tool_call`
+ *      hook sees.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 
 import { guardToolCall } from "./guard.js";
 import { sandboxArgv } from "./sandbox.js";
@@ -110,11 +121,22 @@ async function stopAllGroups(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 
+/** The longest delay a Node timer honours; anything longer fires after 1 ms instead. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * The sandboxed bash execution backend, replacing pi's own.
  *
  * The command is passed **verbatim** as the shell's `-c` argument and never concatenated into an
  * outer string — concatenation would let model-generated text rewrite our own command line.
+ *
+ * `options.timeout` is in **seconds**: pi hands the bash tool's own `timeout` parameter to `exec`
+ * unconverted, and converting it is the backend's job (pi's local backend multiplies by 1000).
+ * Reading it as milliseconds killed every command the model gave a timeout almost at once, which
+ * pi then reported as "terminated without an exit code". How a command ended is reported the way
+ * pi's backend reports it, because pi words the tool result from it: an abort rejects with
+ * `aborted`, our timeout with `timeout:<seconds>`, and a shell killed by any other signal exits
+ * with 128 + the signal number, so it is never mistaken for an exit-code-less success.
  */
 function sandboxedBashOperations(start: ExecutorRunnerStart) {
   return {
@@ -123,6 +145,12 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
       cwd: string,
       options: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv },
     ): Promise<{ exitCode: number | null }> => {
+      const timeoutMs = options.timeout && options.timeout > 0 ? options.timeout * 1000 : undefined;
+      // A timeout past the timer limit would fire after 1 ms, the same bug again for a very large
+      // value. It is refused before spawning, with pi's own wording, rather than silently capped.
+      if (timeoutMs !== undefined && timeoutMs > MAX_TIMER_MS) {
+        return Promise.reject(new Error(`Invalid timeout: maximum is ${MAX_TIMER_MS / 1000} seconds`));
+      }
       const [file, ...args] = sandboxArgv(start.sandboxProfilePath, start.shell, command);
       // cwd is always forced back to the workspace root: pi may pass something else based on its own
       // session state, but this task's boundary was pinned at submit time.
@@ -148,24 +176,39 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
       child.stdout?.on("data", (chunk: Buffer) => options.onData(chunk));
       child.stderr?.on("data", (chunk: Buffer) => options.onData(chunk));
 
+      // Which of our two kills ended the command, if either: the result has to say so.
+      let aborted = false;
+      let timedOut = false;
+
       const onAbort = () => {
+        aborted = true;
         if (typeof pgid === "number") killGroup(pgid, "SIGTERM");
       };
       options.signal?.addEventListener("abort", onAbort, { once: true });
 
       const timer =
-        options.timeout && options.timeout > 0
+        timeoutMs !== undefined
           ? setTimeout(() => {
+              timedOut = true;
               if (typeof pgid === "number") killGroup(pgid, "SIGKILL");
-            }, options.timeout)
+            }, timeoutMs)
           : undefined;
 
-      return new Promise((resolve) => {
-        child.on("close", (code) => {
+      return new Promise((resolve, reject) => {
+        child.on("close", (code, signal) => {
           if (timer) clearTimeout(timer);
           options.signal?.removeEventListener("abort", onAbort);
           if (typeof pgid === "number") liveGroups.delete(pgid);
-          resolve({ exitCode: code });
+          // Abort is checked first, as pi's backend does: a stop outranks a timer that also fired.
+          if (aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          if (timedOut) {
+            reject(new Error(`timeout:${options.timeout}`));
+            return;
+          }
+          resolve({ exitCode: code ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : null) });
         });
         child.on("error", () => {
           if (timer) clearTimeout(timer);
@@ -238,6 +281,16 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
    */
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_CODING_AGENT_SESSION_DIR = `${agentDir}/sessions`;
+  // pi's install telemetry setting also gates the attribution headers it adds to every provider
+  // request (`createAgentSession` merges them in). The executor's pi is not the user's pi and
+  // reports nothing about itself to anyone, so it is off here, where the session is built. The
+  // environment variable outranks any setting; the in-memory settings below say the same thing.
+  process.env.PI_TELEMETRY = "0";
+  // This process's own temp directory is the scratch dir too, not only its tool children's. pi
+  // writes model-controlled files to `os.tmpdir()` (codemode's overflow output, a script's
+  // `image()`), and this process is outside the sandbox: left alone they would land in the shared
+  // system temp directory and outlive the task. In the scratch dir they are deleted with it.
+  process.env.TMPDIR = start.scratchDir;
 
   // pi is loaded here and not earlier: a load failure has to be reportable as startupFailed instead
   // of killing the whole process silently.
@@ -249,9 +302,10 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
    * `.pi/settings.json`** over the global one — so a file dropped into the workspace could change the
    * executor's thinking level, transport, retry policy or provider headers. The executor's behaviour
    * is coflux's to define, not the workspace's, and the model itself is fixed by the desktop
-   * configuration; nothing in a settings file is wanted.
+   * configuration; nothing in a settings file is wanted. The one value set is install telemetry
+   * off, matching `PI_TELEMETRY` above, so the intent does not rest on the environment alone.
    */
-  const settingsManager = pi.SettingsManager.inMemory();
+  const settingsManager = pi.SettingsManager.inMemory({ enableInstallTelemetry: false });
 
   /**
    * ModelRuntime must be pointed **explicitly** at this task's isolated directory.
@@ -367,7 +421,10 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     noThemes: true,
     noContextFiles: true,
     systemPrompt: start.systemPrompt,
-    extensionFactories: [guardExtension],
+    // codemode is built into pi but loaded here explicitly, in-process, like the guard: on-disk
+    // discovery stays off. Mode `on` keeps the direct tools callable; `models: false` withholds the
+    // scripts' model namespace (see the header, point 6).
+    extensionFactories: [guardExtension, pi.createCodemodeExtension({ mode: "on", models: false })],
   });
   await resourceLoader.reload();
 
@@ -378,8 +435,14 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     modelRuntime: runtime,
     model,
     sessionManager: pi.SessionManager.inMemory(start.workspaceRoot),
-    // Only the read-oriented built-in tools; bash is ours (same name, arriving through customTools).
-    tools: start.write ? ["read", "edit", "write", "grep", "find", "ls"] : ["read", "grep", "find", "ls"],
+    // One list for both modes. pi's `tools` is an allowlist that also filters `customTools`: a
+    // custom tool it does not name is dropped without a warning, which is how leaving `bash` out
+    // silently removed the executor's shell. `bash` here resolves to ours (a custom tool overwrites
+    // the built-in of the same name), so every command still runs under sandbox-exec. Read-only
+    // mode is not enforced by hiding tools: the guard refuses `write`/`edit`, and the Seatbelt
+    // profile keeps `bash` from writing the workspace. `codemode` registers inactive; naming it here
+    // is what activates it (with a plain list pi ignores `defaultTools`).
+    tools: ["read", "edit", "write", "grep", "find", "ls", "bash", "codemode"],
     // This one assertion works around a variance problem in pi's own types: createBashToolDefinition
     // returns a ToolDefinition<TObject<...>> with a concrete schema, while customTools takes
     // ToolDefinition<TSchema>, and the two are not covariant. Let this single known point through and
