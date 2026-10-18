@@ -420,3 +420,35 @@ Each payload is also forwarded to `/hook` and marks this terminal's agent as act
   only for coflux-registered worktrees.
 - No runtime, server, migration or protocol change; release order does not matter.
 - Rollback: revert the commit; the old guard returns with the next release.
+
+## Outcome
+
+- Status: APPROVE — 2026-10-18
+- Mode: subagent(opus), one package, no revision round
+- Commits: `a9bf07b6..d4e13121` (`94d60bd3` CLI guard, `d4e13121` plugin)
+- Evidence: zero-warning `cargo build -p coflux-cli`; `cargo test -p coflux-cli` 56/56 (8 new guard tests);
+  hooks.json parses; no `guard-git-worktree` left under `integrations`; skills mirror check passes. Both entry
+  points of `target/debug/coflux` were fed live payloads against the running daemon, 9/9 as expected. Silent:
+  an unmanaged worktree, the ambiguous suffix `coflux`, the command inside a commit message, a Read tool
+  payload, the main worktree. Denied with the right workspace id: the registered path, its suffix form with
+  `--force`, a `cd`-prefixed `move`, and this plan's own worktree (with the "this terminal belongs to it"
+  sentence). A blocked case completes in 39 ms.
+- Deviations (accepted at review):
+  - `local_at` delegates to a new `local_within(…, timeout)`, so the guard keeps its response checks under
+    its own budget.
+  - Every dash word after `remove`/`move` is skipped as an option, because git accepts bundled and
+    abbreviated forms.
+  - A target that resolves to the main worktree (listed first) gives no opinion: git refuses that command
+    itself.
+  - More forms give no opinion: brace expansion, a `GIT_*=` assignment in front of `git`, global options
+    that print and exit, `cd` in a pipeline, in the background or outside command position, and unterminated
+    quoting. Heredoc bodies are skipped.
+  - `--git-dir`, `--work-tree` and `--bare` make a candidate uncertain.
+  - The hook section comment in `commands.rs` was rewritten in English.
+  - The plugin README says only the Rust `coflux` guards.
+- Follow-ups:
+  - A `v*` release is needed before agents see this; the plugin 0.23.0 ships with it.
+  - The Node `coflux hook` (npm) has no guard, so a plugin session whose `coflux` resolves to it has no
+    worktree guard at all now (out of scope by decision).
+  - The case-only mismatch fails open on macOS.
+  - Daemon-side reconciliation of orphaned records remains a separate idea.
