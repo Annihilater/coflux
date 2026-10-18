@@ -254,6 +254,11 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
   // reports nothing about itself to anyone, so it is off here, where the session is built. The
   // environment variable outranks any setting; the in-memory settings below say the same thing.
   process.env.PI_TELEMETRY = "0";
+  // This process's own temp directory is the scratch dir too, not only its tool children's. pi
+  // writes model-controlled files to `os.tmpdir()` (codemode's overflow output, a script's
+  // `image()`), and this process is outside the sandbox: left alone they would land in the shared
+  // system temp directory and outlive the task. In the scratch dir they are deleted with it.
+  process.env.TMPDIR = start.scratchDir;
 
   // pi is loaded here and not earlier: a load failure has to be reportable as startupFailed instead
   // of killing the whole process silently.
