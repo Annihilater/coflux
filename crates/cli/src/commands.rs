@@ -612,7 +612,14 @@ pub fn render_executor_failure(status: &Value) -> (String, &'static str) {
     let tail = if files.is_empty() {
         String::new()
     } else {
-        format!(". Files already changed ({}): {}", files.len(), files.join(" "))
+        // A reason that already ends a sentence (the executor's incomplete-list note does) takes no
+        // second period.
+        let stop = if reason.ends_with(|c: char| matches!(c, '.' | '!' | '?')) {
+            ""
+        } else {
+            "."
+        };
+        format!("{stop} Files already changed ({}): {}", files.len(), files.join(" "))
     };
     (format!("Executor run ended as {terminal}: {reason}{tail}"), next)
 }

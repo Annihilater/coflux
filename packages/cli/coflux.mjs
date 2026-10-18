@@ -536,7 +536,10 @@ function renderExecutorFailure(status) {
   const terminal = String(status?.terminal ?? "") || "unknown";
   const reason = String(status?.error ?? "").trim() || String(status?.note ?? "").trim() || "no reason given";
   const files = executorChangedFiles(status);
-  const tail = files.length ? `. Files already changed (${files.length}): ${files.join(" ")}` : "";
+  // A reason that already ends a sentence (the executor's incomplete-list note does) takes no second
+  // period.
+  const stop = /[.!?]$/.test(reason) ? "" : ".";
+  const tail = files.length ? `${stop} Files already changed (${files.length}): ${files.join(" ")}` : "";
   return {
     message: `Executor run ended as ${terminal}: ${reason}${tail}`,
     next: executorNextStep(terminal, files.length > 0),
