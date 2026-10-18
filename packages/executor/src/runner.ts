@@ -22,7 +22,9 @@
  *      extension discovery is off, so this one is in-process and trusted.
  *   3. **A replaced bash backend**: `createBashToolDefinition(cwd, { operations })` wraps every
  *      command in sandbox-exec and kills by process group — pi's own backend uses `detached: true`,
- *      and killing the pid does not kill the group it spawned.
+ *      and killing the pid does not kill the group it spawned. It arrives through `customTools`
+ *      and must also be named in `tools` to exist at all: that list is an allowlist over custom
+ *      tools too.
  *   4. **No session on disk**: `SessionManager.inMemory()`, leaving the user's existing `~/.pi` state
  *      untouched.
  *   5. **A fully private pi configuration**: auth, models, settings and the `getAgentDir()` fallback
@@ -384,8 +386,13 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     modelRuntime: runtime,
     model,
     sessionManager: pi.SessionManager.inMemory(start.workspaceRoot),
-    // Only the read-oriented built-in tools; bash is ours (same name, arriving through customTools).
-    tools: start.write ? ["read", "edit", "write", "grep", "find", "ls"] : ["read", "grep", "find", "ls"],
+    // One list for both modes. pi's `tools` is an allowlist that also filters `customTools`: a
+    // custom tool it does not name is dropped without a warning, which is how leaving `bash` out
+    // silently removed the executor's shell. `bash` here resolves to ours (a custom tool overwrites
+    // the built-in of the same name), so every command still runs under sandbox-exec. Read-only
+    // mode is not enforced by hiding tools: the guard refuses `write`/`edit`, and the Seatbelt
+    // profile keeps `bash` from writing the workspace.
+    tools: ["read", "edit", "write", "grep", "find", "ls", "bash"],
     // This one assertion works around a variance problem in pi's own types: createBashToolDefinition
     // returns a ToolDefinition<TObject<...>> with a concrete schema, while customTools takes
     // ToolDefinition<TSchema>, and the two are not covariant. Let this single known point through and
