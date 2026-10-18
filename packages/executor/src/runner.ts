@@ -44,7 +44,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 
 import { guardToolCall } from "./guard.js";
 import { sandboxArgv } from "./sandbox.js";
@@ -121,11 +121,22 @@ async function stopAllGroups(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 
+/** The longest delay a Node timer honours; anything longer fires after 1 ms instead. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * The sandboxed bash execution backend, replacing pi's own.
  *
  * The command is passed **verbatim** as the shell's `-c` argument and never concatenated into an
  * outer string — concatenation would let model-generated text rewrite our own command line.
+ *
+ * `options.timeout` is in **seconds**: pi hands the bash tool's own `timeout` parameter to `exec`
+ * unconverted, and converting it is the backend's job (pi's local backend multiplies by 1000).
+ * Reading it as milliseconds killed every command the model gave a timeout almost at once, which
+ * pi then reported as "terminated without an exit code". How a command ended is reported the way
+ * pi's backend reports it, because pi words the tool result from it: an abort rejects with
+ * `aborted`, our timeout with `timeout:<seconds>`, and a shell killed by any other signal exits
+ * with 128 + the signal number, so it is never mistaken for an exit-code-less success.
  */
 function sandboxedBashOperations(start: ExecutorRunnerStart) {
   return {
@@ -134,6 +145,12 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
       cwd: string,
       options: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv },
     ): Promise<{ exitCode: number | null }> => {
+      const timeoutMs = options.timeout && options.timeout > 0 ? options.timeout * 1000 : undefined;
+      // A timeout past the timer limit would fire after 1 ms, the same bug again for a very large
+      // value. It is refused before spawning, with pi's own wording, rather than silently capped.
+      if (timeoutMs !== undefined && timeoutMs > MAX_TIMER_MS) {
+        return Promise.reject(new Error(`Invalid timeout: maximum is ${MAX_TIMER_MS / 1000} seconds`));
+      }
       const [file, ...args] = sandboxArgv(start.sandboxProfilePath, start.shell, command);
       // cwd is always forced back to the workspace root: pi may pass something else based on its own
       // session state, but this task's boundary was pinned at submit time.
@@ -159,24 +176,39 @@ function sandboxedBashOperations(start: ExecutorRunnerStart) {
       child.stdout?.on("data", (chunk: Buffer) => options.onData(chunk));
       child.stderr?.on("data", (chunk: Buffer) => options.onData(chunk));
 
+      // Which of our two kills ended the command, if either: the result has to say so.
+      let aborted = false;
+      let timedOut = false;
+
       const onAbort = () => {
+        aborted = true;
         if (typeof pgid === "number") killGroup(pgid, "SIGTERM");
       };
       options.signal?.addEventListener("abort", onAbort, { once: true });
 
       const timer =
-        options.timeout && options.timeout > 0
+        timeoutMs !== undefined
           ? setTimeout(() => {
+              timedOut = true;
               if (typeof pgid === "number") killGroup(pgid, "SIGKILL");
-            }, options.timeout)
+            }, timeoutMs)
           : undefined;
 
-      return new Promise((resolve) => {
-        child.on("close", (code) => {
+      return new Promise((resolve, reject) => {
+        child.on("close", (code, signal) => {
           if (timer) clearTimeout(timer);
           options.signal?.removeEventListener("abort", onAbort);
           if (typeof pgid === "number") liveGroups.delete(pgid);
-          resolve({ exitCode: code });
+          // Abort is checked first, as pi's backend does: a stop outranks a timer that also fired.
+          if (aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          if (timedOut) {
+            reject(new Error(`timeout:${options.timeout}`));
+            return;
+          }
+          resolve({ exitCode: code ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : null) });
         });
         child.on("error", () => {
           if (timer) clearTimeout(timer);
