@@ -26,11 +26,18 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
 
 ## Components
 
-- **hooks/** — four kinds of hooks in one file:
+- **hooks/** — three kinds of hooks in one file:
   - `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `Stop`, `StopFailure`
     and `Notification` are forwarded to the `coflux hook claude` messenger, which relays them to the local daemon;
     the daemon maps events to turn states (active / approval / question / done) shown in the coflux sidebar. When
     `coflux` is not installed or the daemon is down, the messenger exits silently and never disturbs the agent.
+    On `PreToolUse` the messenger (the Rust `coflux` CLI; the Node one from the npm package only forwards events)
+    also guards worktree removal: inside a coflux terminal it denies `git worktree remove|move` only when the
+    target is a worktree coflux has registered as a workspace on this device, and points the agent to
+    `coflux workspace remove <workspaceId>`, which closes that workspace's terminals and then removes the worktree
+    and its sidebar record (removing it by hand would leave an orphan record behind). For any other worktree, a
+    command it cannot read with certainty, or a daemon that does not answer in time, it stays silent; `add`,
+    `list`, `prune` and the other subcommands always pass.
   - `SessionStart` runs `scripts/session-context.sh`: inside a coflux terminal (`COFLUX_WORKSPACE_ID` set) it asks
     the daemon to locate the session's directory (see the worktree hooks below — resuming a session that had entered
     a worktree lands back in it without any tool call, and this is the only moment that can notice), then prints a
@@ -49,11 +56,6 @@ This directory is the plugin's **delivery directory**: self-contained and loadab
     is usually the worktree that just went away. The terminal, its PTY and the conversation are untouched. After a move it returns the new coordinates as
     `additionalContext` so the agent sees them in the same turn. Anything unusual (not inside coflux, another
     repository, no daemon, a daemon too old for the command) is a silent no-op.
-  - `PreToolUse` with `matcher: "Bash"` runs `scripts/guard-git-worktree.mjs`: when `COFLUX_PROJECT_ID` is set it
-    denies `git worktree remove|move` and points the agent to `coflux workspace remove <workspaceId>` (removing a worktree by
-    hand leaves an orphan workspace record in the sidebar). `add`, `list`, `prune` and the other subcommands pass —
-    creating a worktree is fine now that coflux follows the agent into it; outside a coflux project it never
-    intervenes; without `node` it stays silent.
 - **skills/coflux/** — documents, for an agent running inside a coflux terminal, the terminals the user can see and
   take over, the progress / notify channels and preview URLs, and when each is worth using. One rule for the split: **anything
   that closes locally uses the zero-credential local commands** (`coflux terminal/progress/notify/ports`); only
