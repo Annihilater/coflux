@@ -262,3 +262,20 @@ Then, for the CLI copy, render a `rejected` status through each CLI's function b
 - The executor change ships in the desktop app (Coflux.app hosts the executor) and in the npm `cofluxd` package (which vendors `packages/executor` at prepack); the CLI copy ships in the `coflux` binary and the npm CLI. All of them go out together with the next `v*` release; no server, protocol or configuration change.
 - The plugin goes to 0.24.0 and is distributed with the release.
 - The next release note should replace 2.20.0's "a file created by a shell command is not listed" with the new behaviour.
+
+## Outcome
+
+- Status: APPROVE — 2026-10-18
+- Mode: subagent(opus), one package (Milestone 2 too small to pay for its own worktree); one revision round (R1, R2, added during verification)
+- Commits: `f6c3cf95..c100cc4b` (`38824efd` changes.ts, `8df5cab4` runner wiring, `62f8e2dc` README, `14193e73` English rejections, `a6c890b3` per-state next steps, `95b72def` SKILL + plugin 0.24.0, `8154adcc` pinned git status, `c100cc4b` one period before the file list)
+- Verification: executor `tsc --noEmit` exit 0; `pnpm -C apps/desktop test` 559/559; `cargo build -p coflux-cli` zero warnings; `cargo test -p coflux-cli` 56/56; `node scripts/sync-claude-plugin.mjs --check` exit 0; no "Adjust the prompt" left in either CLI; `git check-ignore -q .` confirmed to exit 1 at a top level and in a tracked subdirectory, 0 inside an ignored directory. Standalone smoke against the real executor settings, daemon-host shape: (1) git workspace → `a.txt`, `b.txt`, `shell-written.txt`, without the pre-dirty `dirty.txt` or ignored `build/out.txt`; (2) non-git → those plus `build/out.txt`; (3) `rm b.txt` → `b.txt`; (4) second writer → `rejected` with the English reason naming the running run; (5) abort mid-`sleep` → `cancelled` 2.2 s after the cancel, no force-kill, `before-abort.txt` listed. No credential printed; no smoke scratch left behind.
+- Deviations:
+  - R1 (added in verification, beyond the brief): the baseline also records `rev-parse --absolute-git-dir` / `--show-toplevel`, and every `git status` runs with `--git-dir`/`--work-tree` pinned to them, `-c core.fsmonitor=false` and `--ignore-submodules=all`. The final scan runs outside the sandbox after the model's commands, and a linked worktree's `.git` file and a submodule's `.git` are writable from inside it, so an unpinned `git status` could load config (fsmonitor, filter drivers) the run planted. Consequence: changes inside submodules are not listed.
+  - R2 (added in verification): T5 said the CLI message line stays unchanged; it now drops the extra period before `Files already changed` when the reason already ends a sentence, because the incomplete-list note always does.
+  - Under Your call: the git runner type also returns the exit status (for `check-ignore`); the baseline's lstat pass over the dirty set is bounded by the same 20 s; a cut-short scan still lists the real changes it found, and a walk reports deletions only when complete; the incomplete note is its own paragraph on a success summary.
+- Follow-ups:
+  - Release note: replace 2.20.0's "a file created by a shell command is not listed" with the new behaviour.
+  - Only the daemon-host shape (plain `fork`) was exercised; Coflux.app's `utilityProcess` path runs the same runner and was not.
+  - The cancelled error text (`已被停止`) and the readiness reason are still Chinese (D6 left them out of scope).
+  - Pre-existing: `manager.ts` `defaultRunGit` lets git print `fatal: not a git repository` to stderr for a non-git workspace; `manager.test.ts` still leaks a scratch dir per fake run when TMPDIR is outside `/tmp` (this run's 16 were deleted).
+  - Pre-existing race: when an abort meets `run()`'s own ending, both scan back to back; the first `done` still lands well inside the 8 s force-kill.
