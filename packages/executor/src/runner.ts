@@ -13,7 +13,7 @@
  * access. The bash children that actually run the user's commands are wrapped in `sandbox-exec`, and
  * that side has no network and can only write the workspace (see sandbox.ts).
  *
- * Four key integration points with pi, each matching a recorded decision:
+ * Six key integration points with pi, each matching a recorded decision:
  *   1. **A closed ResourceLoader**: `noExtensions/noSkills/noPromptTemplates/noThemes/noContextFiles`
  *      all off, with coflux's own prompt supplied through `systemPrompt`. Leave them on and a `.pi/`
  *      directory dropped into a workspace can execute arbitrary code.
@@ -31,6 +31,15 @@
  *      all point into this task's scratch dir, and settings are in-memory defaults. The executor
  *      never shares a byte of configuration with a pi the user installed themselves, and a
  *      workspace's `.pi/` directory cannot reconfigure it either.
+ *   6. **codemode**: `createCodemodeExtension` adds pi's `codemode` tool, which lets the model write
+ *      one JavaScript script that calls the other tools as `tools.*` instead of one model turn per
+ *      call. It is an inline extension like the guard, so on-disk discovery stays off. Every call a
+ *      script makes goes through pi's normal tool pipeline, so the guard's `tool_call` hook and the
+ *      sandboxed bash see it exactly as they see a direct call; the guard needs no codemode branch.
+ *      Mode `on` keeps the direct tools callable alongside it. `models` is off: that namespace lets a
+ *      script pick other models and run classifier and image-generation requests on the user's
+ *      credential — provider requests beyond the task's one configured model, which no `tool_call`
+ *      hook sees.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -375,7 +384,10 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     noThemes: true,
     noContextFiles: true,
     systemPrompt: start.systemPrompt,
-    extensionFactories: [guardExtension],
+    // codemode is built into pi but loaded here explicitly, in-process, like the guard: on-disk
+    // discovery stays off. Mode `on` keeps the direct tools callable; `models: false` withholds the
+    // scripts' model namespace (see the header, point 6).
+    extensionFactories: [guardExtension, pi.createCodemodeExtension({ mode: "on", models: false })],
   });
   await resourceLoader.reload();
 
@@ -391,8 +403,9 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
     // silently removed the executor's shell. `bash` here resolves to ours (a custom tool overwrites
     // the built-in of the same name), so every command still runs under sandbox-exec. Read-only
     // mode is not enforced by hiding tools: the guard refuses `write`/`edit`, and the Seatbelt
-    // profile keeps `bash` from writing the workspace.
-    tools: ["read", "edit", "write", "grep", "find", "ls", "bash"],
+    // profile keeps `bash` from writing the workspace. `codemode` registers inactive; naming it here
+    // is what activates it (with a plain list pi ignores `defaultTools`).
+    tools: ["read", "edit", "write", "grep", "find", "ls", "bash", "codemode"],
     // This one assertion works around a variance problem in pi's own types: createBashToolDefinition
     // returns a ToolDefinition<TObject<...>> with a concrete schema, while customTools takes
     // ToolDefinition<TSchema>, and the two are not covariant. Let this single known point through and
