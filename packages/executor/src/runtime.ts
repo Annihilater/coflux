@@ -139,6 +139,11 @@ export function createExecutorRuntime(options: ExecutorRuntimeOptions): Executor
       // `getAgentDir()`, which otherwise lands in the user's real `~/.pi/agent`.
       process.env.PI_CODING_AGENT_DIR = options.agentDir;
       process.env.PI_CODING_AGENT_SESSION_DIR = `${options.agentDir}/sessions`;
+      // pi's telemetry is consulted where a session is built (the runner, where it gates provider
+      // attribution headers); the bare ModelRuntime this file creates does not read it in pi 1.3.0,
+      // so this line has no effect today. It is here so a future pi that consults it from the
+      // runtime finds it off too; it is not dead code, but it is not the switch that matters either.
+      process.env.PI_TELEMETRY = "0";
       const pi = options.loadPi ? await options.loadPi() : ((await import("@earendil-works/pi-coding-agent")) as unknown as PiModule);
       return pi.ModelRuntime.create({
         allowModelNetwork: false,

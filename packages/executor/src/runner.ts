@@ -238,6 +238,11 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
    */
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_CODING_AGENT_SESSION_DIR = `${agentDir}/sessions`;
+  // pi's install telemetry setting also gates the attribution headers it adds to every provider
+  // request (`createAgentSession` merges them in). The executor's pi is not the user's pi and
+  // reports nothing about itself to anyone, so it is off here, where the session is built. The
+  // environment variable outranks any setting; the in-memory settings below say the same thing.
+  process.env.PI_TELEMETRY = "0";
 
   // pi is loaded here and not earlier: a load failure has to be reportable as startupFailed instead
   // of killing the whole process silently.
@@ -249,9 +254,10 @@ async function run(start: ExecutorRunnerStart): Promise<void> {
    * `.pi/settings.json`** over the global one — so a file dropped into the workspace could change the
    * executor's thinking level, transport, retry policy or provider headers. The executor's behaviour
    * is coflux's to define, not the workspace's, and the model itself is fixed by the desktop
-   * configuration; nothing in a settings file is wanted.
+   * configuration; nothing in a settings file is wanted. The one value set is install telemetry
+   * off, matching `PI_TELEMETRY` above, so the intent does not rest on the environment alone.
    */
-  const settingsManager = pi.SettingsManager.inMemory();
+  const settingsManager = pi.SettingsManager.inMemory({ enableInstallTelemetry: false });
 
   /**
    * ModelRuntime must be pointed **explicitly** at this task's isolated directory.
