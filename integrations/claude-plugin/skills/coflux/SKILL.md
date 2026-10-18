@@ -428,7 +428,13 @@ coflux executor run --title="Why does the relay test flake" --prompt="Find why t
 
 The executor is a small agent built into coflux. Give it one self-contained job and it works in
 **the workspace your cwd is in** while you keep your own context for the main thread. The command
-blocks until the job ends, then prints the executor's final report and the files it changed.
+blocks until the job ends, then prints the executor's final report and the files that changed in
+the workspace during the run, whatever changed them, shell commands included. In a git workspace,
+git-ignored files are left out unless the executor wrote them with its file tools, and files already
+modified before the run appear only if the run changed them again. The list cannot tell who made a
+change, so anything else writing to the workspace during the run (the user, another agent) shows up
+too. When the workspace could not be scanned completely the output says so, and then you check the
+workspace yourself.
 
 **Always pass `--title`**: a few words naming the job. While the run is going, the user sees a
 small card on this terminal (on every desktop of the account) with that title, the run's live
@@ -462,7 +468,8 @@ Its boundaries, enforced by that kernel sandbox — count on them, and tell it w
 - **Its tool processes have no network.** `npm install`, `cargo fetch` and friends fail. Install
   what the job needs before handing it over.
 - **One writing executor per workspace at a time.** A second `--write` in the same workspace is
-  refused outright rather than queued; read-only runs may go in parallel up to a small cap.
+  refused outright rather than queued, and nothing runs: wait for the running one to finish, then
+  send yours again. Read-only runs may still go in parallel up to a small cap.
 
 A run ends if the host it is on goes away — the user quits the desktop app, signs out, or stops the
 machine's terminals — and you get a definite failure, never a hang. The user can also stop it from
