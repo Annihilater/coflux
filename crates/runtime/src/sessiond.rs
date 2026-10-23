@@ -24,6 +24,14 @@ const VTE_CSI_PARAM_LIMIT: u8 = 32;
 /// identity 仍可迁移 transport、提交在途 input 并推进 cursor。
 const LOGICAL_CLIENT_LIMIT: usize = 256;
 
+/// Prefix of the synthetic identities through which agents write to a PTY (plan 088): both their
+/// channel ids and their client instance ids start with it. A holder with such an identity never
+/// answers terminal queries, so sessiond answers them itself (see [`SessionState::feed`]).
+pub(crate) const AGENT_IDENTITY_PREFIX: &str = "__coflux-agent-";
+
+/// sessiond's reply to a DA1 query, the same one xterm.js gives: a VT100 with Advanced Video Option.
+const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AltEvent {
     Enter,
@@ -37,11 +45,18 @@ enum AltEvent {
 /// 暴露的正是 mark 校验用的 session secret；切在多字节字符中间，新建的 parser 会吐一个坏字。
 /// PTY 安静与否只决定 supervisor 什么时候来问，从来不是边界条件本身：shell 完全可以把一条 OSC
 /// 分两次 `write(2)`，中间隔得比合帧窗口还长。
+///
+/// It answers a third question too: did this byte complete a DA1 query (`CSI c` / `CSI 0 c`)?
+/// sessiond answers the query itself when no client receives the raw bytes (see
+/// [`SessionState::feed`]), so the answer must follow vte's states exactly — a `[c` inside an
+/// OSC/DCS payload or after an intermediate is not a query.
 #[derive(Debug, Default)]
 struct DecModeScanner {
     state: ScanState,
     /// Ground 态里尚未收齐的 UTF-8 续字节数。
     utf8_pending: u8,
+    /// The byte last fed completed a DA1 query.
+    da1_query: bool,
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +68,10 @@ enum ScanState {
     Csi {
         phase: CsiPhase,
         private: bool,
+        /// A private-marker byte (`0x3c..=0x3f`) opened the sequence; `private` only records `?`.
+        marked: bool,
+        /// A retained parameter has a non-zero value (digits vte drops past its limit don't count).
+        nonzero_param: bool,
         retained_params: u8,
         in_subparams: bool,
         alt_param_seen: bool,
@@ -98,7 +117,15 @@ impl DecModeScanner {
         matches!(self.state, ScanState::Ground) && self.utf8_pending == 0
     }
 
+    /// Whether the byte last passed to [`DecModeScanner::feed`] was the final byte of a DA1 query:
+    /// the CSI that vt100 hands to `unhandled_csi` with no intermediate, final `c` and all-zero
+    /// parameters.
+    fn completed_da1_query(&self) -> bool {
+        self.da1_query
+    }
+
     fn feed(&mut self, byte: u8) -> Option<AltEvent> {
+        self.da1_query = false;
         match &mut self.state {
             ScanState::Ground => {
                 if byte == 0x1b {
@@ -121,6 +148,8 @@ impl DecModeScanner {
                     b'[' => ScanState::Csi {
                         phase: CsiPhase::Entry,
                         private: false,
+                        marked: false,
+                        nonzero_param: false,
                         retained_params: 0,
                         in_subparams: false,
                         alt_param_seen: false,
@@ -175,6 +204,8 @@ impl DecModeScanner {
             ScanState::Csi {
                 phase,
                 private,
+                marked,
+                nonzero_param,
                 retained_params,
                 in_subparams,
                 alt_param_seen,
@@ -204,6 +235,9 @@ impl DecModeScanner {
                                     .saturating_mul(10)
                                     .saturating_add(u16::from(byte - b'0'));
                                 *has_digit = true;
+                                if byte != b'0' {
+                                    *nonzero_param = true;
+                                }
                             }
                         }
                         CsiPhase::Intermediate => *phase = CsiPhase::Ignore,
@@ -233,6 +267,7 @@ impl DecModeScanner {
                         CsiPhase::Entry => {
                             // vt100 只把第一个 intermediate 为 '?' 的 CSI 交给 DEC mode。
                             *private = byte == b'?';
+                            *marked = true;
                             *phase = CsiPhase::Parameter;
                         }
                         CsiPhase::Parameter | CsiPhase::Intermediate => {
@@ -255,7 +290,14 @@ impl DecModeScanner {
                         } else {
                             None
                         };
+                        // An intermediate (or a marker, which vte collects as one) makes vt100
+                        // dispatch the CSI as something other than DA1; ignore never dispatches.
+                        let da1 = byte == b'c'
+                            && matches!(*phase, CsiPhase::Entry | CsiPhase::Parameter)
+                            && !*marked
+                            && !*nonzero_param;
                         self.state = ScanState::Ground;
+                        self.da1_query = da1;
                         return event;
                     }
                     _ => {}
@@ -418,6 +460,12 @@ pub struct TerminalState {
     mode_scanner: DecModeScanner,
     /// 进入 alt screen 前的完整主屏 snapshot；退出 alt 后由 vt100 内部主 grid 接回。
     normal_before_alt: Option<Vec<u8>>,
+    /// Output seqs of the final bytes of the DA1 queries completed by the last `feed`.
+    da1_queries: Vec<u64>,
+    /// Output seq of the final byte of the last terminal query sessiond answered itself; 0 = none.
+    /// A client resuming below it would receive that query raw and answer it a second time, so
+    /// such a resume gets a snapshot instead. Carried in checkpoints across sessiond rebuilds.
+    answered_query_seq: u64,
 }
 
 impl TerminalState {
@@ -443,6 +491,8 @@ impl TerminalState {
             retransmit_bytes: 0,
             mode_scanner: DecModeScanner::default(),
             normal_before_alt: None,
+            da1_queries: Vec::new(),
+            answered_query_seq: 0,
         }
     }
 
@@ -455,14 +505,22 @@ impl TerminalState {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Delta> {
+        self.da1_queries.clear();
         if bytes.is_empty() {
             return None;
         }
+        let from_seq = self.output_seq.saturating_add(1);
 
         // 只在 alt mode 边界拆 chunk；其余仍批量交给 vte，避免逐 byte clone/dispatch。
         let mut start = 0;
         for (index, byte) in bytes.iter().copied().enumerate() {
-            let Some(event) = self.mode_scanner.feed(byte) else {
+            let event = self.mode_scanner.feed(byte);
+            // A DA1 query only records its offset; it never splits the chunk for the parser.
+            if self.mode_scanner.completed_da1_query() {
+                self.da1_queries
+                    .push(from_seq.saturating_add(index as u64));
+            }
+            let Some(event) = event else {
                 continue;
             };
             if start < index {
@@ -497,7 +555,6 @@ impl TerminalState {
             self.command.apply(mark);
         }
 
-        let from_seq = self.output_seq.saturating_add(1);
         self.output_seq = self.output_seq.saturating_add(bytes.len() as u64);
         let delta = Delta {
             from_seq,
@@ -511,6 +568,22 @@ impl TerminalState {
     /// checkpoint 只能落在两条序列之间（见 [`DecModeScanner::between_sequences`]）。
     pub fn checkpoint_eligible(&self) -> bool {
         self.mode_scanner.between_sequences()
+    }
+
+    /// Output seqs of the final bytes of the DA1 queries the last `feed` completed, in order.
+    /// Only `feed` records them: `resize` and `restore` replay canonical snapshots, never queries.
+    pub fn take_da1_queries(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.da1_queries)
+    }
+
+    /// See `answered_query_seq`.
+    pub fn answered_query_seq(&self) -> u64 {
+        self.answered_query_seq
+    }
+
+    /// Raise the answered-query marker to `seq`; it never moves down.
+    pub fn raise_answered_query_seq(&mut self, seq: u64) {
+        self.answered_query_seq = self.answered_query_seq.max(seq);
     }
 
     /// 从 checkpoint 重建：把规范 snapshot 喂给新 parser，再装回 snapshot 编码不了的那些状态。
@@ -549,6 +622,8 @@ impl TerminalState {
             retransmit_bytes: 0,
             mode_scanner: DecModeScanner::default(),
             normal_before_alt: checkpoint.normal_before_alt.clone(),
+            da1_queries: Vec::new(),
+            answered_query_seq: checkpoint.answered_query_seq,
         }
     }
 
@@ -580,6 +655,7 @@ impl TerminalState {
                 cols: self.cols,
                 title: self.title.clone(),
                 command: self.command.state,
+                answered_query_seq: self.answered_query_seq,
                 normal_before_alt,
                 snapshot,
             };
@@ -771,6 +847,8 @@ pub struct Checkpoint {
     pub cols: u16,
     pub title: String,
     pub command: CommandStateInfo,
+    /// See `TerminalState::answered_query_seq`; 0 in checkpoints written before it existed.
+    pub answered_query_seq: u64,
     /// alt screen 激活时进入 alt 前的主屏 snapshot；否则 None。
     pub normal_before_alt: Option<Vec<u8>>,
     /// 规范 snapshot（alt 激活时已含 `?1049h` 与 alt 网格）。
@@ -790,6 +868,9 @@ struct CheckpointHeader {
     command: CommandStateInfo,
     alt: bool,
     normal_len: u32,
+    /// Additive: older runtimes ignore it, and headers written by them decode to 0.
+    #[serde(default)]
+    answered_query_seq: u64,
 }
 
 impl Checkpoint {
@@ -801,6 +882,7 @@ impl Checkpoint {
             cols: self.cols,
             title: self.title.clone(),
             command: self.command,
+            answered_query_seq: self.answered_query_seq,
             alt: self.normal_before_alt.is_some(),
             normal_len: self.normal_before_alt.as_ref().map_or(0, |normal| normal.len() as u32),
         }
@@ -849,6 +931,7 @@ impl Checkpoint {
             cols: header.cols,
             title: header.title,
             command: header.command,
+            answered_query_seq: header.answered_query_seq,
             normal_before_alt: header.alt.then(|| normal.to_vec()),
             snapshot: snapshot.to_vec(),
         })
@@ -989,6 +1072,9 @@ pub struct SessionState {
     /// seq 为起点接纳，重复 / 跳号交给 ptyd 那边的游标裁决——否则回来的 client 一律被判 `input_seq_gap`，
     /// 一个能力缺失就变成了死 ack。
     cursorless_rebuild: bool,
+    /// Replies sessiond must write into the PTY for the queries the last `feed` completed;
+    /// replaced by every `feed`. See [`SessionState::take_query_replies`].
+    query_replies: Vec<Vec<u8>>,
 }
 
 impl SessionState {
@@ -1004,6 +1090,7 @@ impl SessionState {
             input_failure: None,
             resize_cursors: HashMap::new(),
             cursorless_rebuild: false,
+            query_replies: Vec::new(),
         }
     }
 
@@ -1027,6 +1114,7 @@ impl SessionState {
             input_failure: None,
             resize_cursors: HashMap::new(),
             cursorless_rebuild: false,
+            query_replies: Vec::new(),
         }
     }
 
@@ -1107,7 +1195,14 @@ impl SessionState {
         self.terminal.take_title_change()
     }
 
+    /// Feed PTY output and return the deltas owed to subscribers. When the output completes a DA1
+    /// query that no human client receives raw — no holder, an agent holder, or a holder whose
+    /// subscription is gapped or behind — sessiond becomes the answerer: one reply per query is
+    /// left for [`SessionState::take_query_replies`] and the answered-query marker moves to the
+    /// last such query. A human holder receiving these bytes answers through xterm.js instead.
+    /// `feed` itself never writes anything.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<PendingDelta> {
+        self.query_replies.clear();
         let Some(delta) = self.terminal.feed(bytes) else {
             return Vec::new();
         };
@@ -1126,7 +1221,39 @@ impl SessionState {
                 delta: delta.clone(),
             });
         }
+        let queries = self.terminal.take_da1_queries();
+        if let Some(&last_query) = queries.last() {
+            // Agent channels stay subscribed after their write, so a subscription alone is not an
+            // answerer: only the human holder's own raw stream is.
+            let human_receives_raw = self.holder.as_ref().is_some_and(|holder| {
+                !holder.client_instance_id.starts_with(AGENT_IDENTITY_PREFIX)
+                    && pending
+                        .iter()
+                        .any(|delivery| delivery.channel_id == holder.channel_id)
+            });
+            if !human_receives_raw {
+                self.query_replies = vec![DA1_REPLY.to_vec(); queries.len()];
+                self.terminal.raise_answered_query_seq(last_query);
+            }
+        }
         pending
+    }
+
+    /// The replies the last `feed` decided sessiond must write into the PTY, in order. The caller
+    /// enqueues them on the session's input writer under the same lock as the `feed`; whatever is
+    /// not taken is discarded by the next `feed`.
+    pub fn take_query_replies(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.query_replies)
+    }
+
+    /// Output seq of the final byte of the last query sessiond answered itself (0 = none).
+    pub fn answered_query_seq(&self) -> u64 {
+        self.terminal.answered_query_seq()
+    }
+
+    /// Carry the answered-query marker over from a state being replaced; it never moves down.
+    pub fn raise_answered_query_seq(&mut self, seq: u64) {
+        self.terminal.raise_answered_query_seq(seq);
     }
 
     /// 单测便利：没有 ring 的 attach（生产只走 [`SessionState::attach_with_ring`]，本地重发缓冲之外由 ptyd 的 ring 补）。
@@ -1184,6 +1311,10 @@ impl SessionState {
             },
         );
 
+        // A resume below the answered-query marker would hand the client raw bytes containing a
+        // query sessiond already answered, and xterm.js would answer it again: snapshot instead.
+        let answered_through = self.terminal.answered_query_seq();
+        let resume_from_seq = resume_from_seq.filter(|seq| *seq >= answered_through);
         let local = resume_from_seq
             .and_then(|seq| self.terminal.deltas_after(seq).map(|deltas| (seq, deltas)));
         // 本地缓冲够不到、但 ring 仍覆盖：从 ptyd 取 `[seq+1, output_seq]` 一整段当作一条 delta。
@@ -3114,5 +3245,301 @@ mod tests {
         let mut fresh = SessionState::restore(TerminalState::new(3, 12, 4));
         let epoch = fresh.attach("channel-a", "client-a", 2, None).unwrap().holder_epoch;
         assert_eq!(fresh.admit_input("channel-a", "r", epoch, 5, b"five".to_vec()).unwrap_err().code, "input_seq_gap");
+    }
+
+    /// Stream offsets (0-based) of the bytes the scanner reports as completing a DA1 query, with
+    /// the stream fed one byte at a time across `chunks`.
+    fn scanner_da1_positions(chunks: &[&[u8]]) -> Vec<usize> {
+        let mut scanner = DecModeScanner::default();
+        let mut positions = Vec::new();
+        let mut offset = 0;
+        for chunk in chunks {
+            for byte in *chunk {
+                scanner.feed(*byte);
+                if scanner.completed_da1_query() {
+                    positions.push(offset);
+                }
+                offset += 1;
+            }
+        }
+        positions
+    }
+
+    /// Oracle: the CSI sequences vt100 hands to `unhandled_csi` with no intermediate, final `c` and
+    /// all-zero parameters — exactly what the scanner must call a DA1 query.
+    #[derive(Default)]
+    struct Da1Oracle {
+        queries: usize,
+    }
+
+    impl vt100::Callbacks for Da1Oracle {
+        fn unhandled_csi(
+            &mut self,
+            _: &mut Screen,
+            i1: Option<u8>,
+            i2: Option<u8>,
+            params: &[&[u16]],
+            c: char,
+        ) {
+            if i1.is_none()
+                && i2.is_none()
+                && c == 'c'
+                && params.iter().all(|param| param.iter().all(|value| *value == 0))
+            {
+                self.queries += 1;
+            }
+        }
+    }
+
+    fn assert_da1_scanner_matches_vt100(chunks: &[&[u8]]) {
+        let mut oracle = vt100::Parser::new_with_callbacks(4, 12, 0, Da1Oracle::default());
+        for chunk in chunks {
+            oracle.process(chunk);
+        }
+        assert_eq!(
+            scanner_da1_positions(chunks).len(),
+            oracle.callbacks().queries,
+            "DA1 count differs from vt100/VTE for {chunks:?}"
+        );
+    }
+
+    const DA1_CASES: &[(&[u8], usize)] = &[
+        (b"\x1b[c", 1),
+        (b"\x1b[0c", 1),
+        (b"\x1b[0;0c", 1),
+        (b"\x1b[c\x1b[0c", 2),
+        (b"\x1b[?1;2c", 0),
+        (b"\x1b[>c", 0),
+        (b"\x1b[>0c", 0),
+        (b"\x1b[=c", 0),
+        (b"\x1b[1c", 0),
+        (b"\x1b[ c", 0),
+        (b"\x1bc", 0),
+        (b"\x1b]0;[c\x07", 0),
+        (b"\x1bP[c\x1b\\", 0),
+    ];
+
+    #[test]
+    fn dec_mode_scanner_recognises_completed_da1_queries_only() {
+        for &(input, expected) in DA1_CASES {
+            assert_eq!(
+                scanner_da1_positions(&[input]).len(),
+                expected,
+                "DA1 completions for {input:?}"
+            );
+        }
+        // The completion is reported at the final `c`, not earlier.
+        assert_eq!(scanner_da1_positions(&[b"\x1b[c"]), vec![2]);
+        assert_eq!(scanner_da1_positions(&[b"\x1b[c\x1b[0c"]), vec![2, 6]);
+        // Split across chunk boundaries the state carries over.
+        assert_eq!(scanner_da1_positions(&[b"\x1b[", b"c"]), vec![2]);
+        assert_eq!(scanner_da1_positions(&[b"\x1b", b"[0", b"c"]), vec![3]);
+        // Recognising DA1 changes neither the alt events nor the sequence-boundary answer.
+        let mut scanner = DecModeScanner::default();
+        for byte in b"\x1b[?1049h\x1b[c" {
+            scanner.feed(*byte);
+        }
+        assert!(scanner.completed_da1_query());
+        assert!(scanner.between_sequences());
+        scanner.feed(b'x');
+        assert!(!scanner.completed_da1_query(), "the flag describes the last byte only");
+    }
+
+    #[test]
+    fn dec_mode_scanner_da1_matches_vt100_including_chunk_splits() {
+        for &(input, expected) in DA1_CASES {
+            let mut oracle = vt100::Parser::new_with_callbacks(4, 12, 0, Da1Oracle::default());
+            oracle.process(input);
+            assert_eq!(oracle.callbacks().queries, expected, "oracle sanity for {input:?}");
+            assert_da1_scanner_matches_vt100(&[input]);
+            for cut in 0..=input.len() {
+                assert_da1_scanner_matches_vt100(&[&input[..cut], &input[cut..]]);
+            }
+            let bytes: Vec<&[u8]> = input.chunks(1).collect();
+            assert_da1_scanner_matches_vt100(&bytes);
+        }
+        let stream: Vec<u8> = DA1_CASES.iter().flat_map(|(input, _)| input.iter().copied()).collect();
+        let total: usize = DA1_CASES.iter().map(|(_, expected)| expected).sum();
+        assert_eq!(scanner_da1_positions(&[&stream]).len(), total);
+        for cut in 0..=stream.len() {
+            assert_da1_scanner_matches_vt100(&[&stream[..cut], &stream[cut..]]);
+        }
+        // Edge shapes the scanner must agree on even though the tasks do not list them.
+        for extra in [
+            &b"\x1b[;c"[..],
+            b"\x1b[00c",
+            b"\x1b[0:0c",
+            b"\x1b[0:1c",
+            b"\x1b[10c",
+            b"\x1b[0\x18c",
+            b"\x1b[0\x07c",
+            b"\x1b[0;?c",
+            b"\x1b[ 0c",
+        ] {
+            assert_da1_scanner_matches_vt100(&[extra]);
+        }
+    }
+
+    #[test]
+    fn terminal_feed_records_the_offset_of_every_da1_query() {
+        let mut state = TerminalState::new(4, 12, 8);
+        state.feed(b"x\x1b[cyyyy");
+        assert_eq!(state.take_da1_queries(), vec![4]);
+        assert!(state.take_da1_queries().is_empty(), "drained");
+
+        state.feed(b"\x1b[c\x1b[0c");
+        assert_eq!(state.take_da1_queries(), vec![12, 16]);
+
+        // A query split across two feeds is recorded by the feed that completes it.
+        state.feed(b"\x1b[");
+        assert!(state.take_da1_queries().is_empty());
+        state.feed(b"c");
+        assert_eq!(state.take_da1_queries(), vec![19]);
+
+        // The query never splits the chunk for the parser: the screen is what vt100 shows.
+        let mut plain = TerminalState::new(4, 12, 8);
+        plain.feed(b"ab\x1b[cd");
+        assert_eq!(plain.parser.screen().contents(), "abd");
+
+        // resize and restore replay canonical snapshots and record nothing.
+        plain.feed(b"\x1b[c");
+        assert_eq!(plain.take_da1_queries().len(), 1);
+        plain.resize(5, 20);
+        assert!(plain.take_da1_queries().is_empty());
+        let mut restored = TerminalState::restore(&plain.checkpoint(usize::MAX).unwrap(), 8, String::new());
+        assert!(restored.take_da1_queries().is_empty());
+        plain.feed(b"\x1b[c");
+        plain.feed(b"z");
+        assert!(plain.take_da1_queries().is_empty(), "a later feed replaces an undrained record");
+    }
+
+    #[test]
+    fn session_answers_da1_when_no_holder_receives_the_raw_output() {
+        let mut state = SessionState::new(3, 12, 4);
+        let pending = state.feed(b"\x1b[c");
+        assert!(pending.is_empty());
+        assert_eq!(state.take_query_replies(), vec![b"\x1b[?1;2c".to_vec()]);
+        assert!(state.take_query_replies().is_empty(), "drained");
+        assert_eq!(state.answered_query_seq(), 3, "the `c` is the chunk's last byte");
+
+        let mut two = SessionState::new(3, 12, 4);
+        two.feed(b"\x1b[c\x1b[0c");
+        assert_eq!(two.take_query_replies(), vec![b"\x1b[?1;2c".to_vec(); 2]);
+        assert_eq!(two.answered_query_seq(), 7);
+
+        let mut tail = SessionState::new(3, 12, 4);
+        tail.feed(b"x\x1b[cyyyy");
+        assert_eq!(tail.take_query_replies().len(), 1);
+        assert_eq!(tail.answered_query_seq(), 4, "marker at the `c`, not the chunk's to_seq (8)");
+
+        // A feed without a query replaces a reply buffer nobody took and leaves the marker alone.
+        let mut stale = SessionState::new(3, 12, 4);
+        stale.feed(b"\x1b[c");
+        stale.feed(b"hello");
+        assert!(stale.take_query_replies().is_empty());
+        assert_eq!(stale.answered_query_seq(), 3);
+    }
+
+    #[test]
+    fn session_leaves_da1_to_a_human_holder_that_receives_the_raw_output() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.attach("channel-1", "client-1", 1, None).unwrap();
+        let pending = state.feed(b"\x1b[c");
+        assert_eq!(pending.len(), 1);
+        assert!(state.take_query_replies().is_empty(), "xterm.js answers it");
+        assert_eq!(state.answered_query_seq(), 0);
+
+        // A gapped holder does not receive the bytes, so sessiond answers.
+        let mut gapped = SessionState::new(3, 12, 4);
+        gapped.attach("channel-1", "client-1", 1, None).unwrap();
+        let pending = gapped.feed(b"a");
+        gapped.delivery_result("channel-1", pending[0].delta.to_seq, false);
+        assert!(gapped.feed(b"\x1b[c").is_empty());
+        assert_eq!(gapped.take_query_replies().len(), 1);
+        assert_eq!(gapped.answered_query_seq(), 4);
+
+        // An agent holder stays subscribed but never answers.
+        let mut agent = SessionState::new(3, 12, 4);
+        agent
+            .attach("__coflux-agent-client-1-g1", "__coflux-agent-client-1", 1, None)
+            .unwrap();
+        let pending = agent.feed(b"\x1b[c");
+        assert_eq!(pending.len(), 1, "the agent channel still receives the delta");
+        assert_eq!(agent.take_query_replies().len(), 1);
+        assert_eq!(agent.answered_query_seq(), 3);
+    }
+
+    #[test]
+    fn resume_below_an_answered_query_falls_back_to_a_snapshot() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.feed(b"a");
+        state.feed(b"\x1b[c");
+        assert_eq!(state.answered_query_seq(), 4);
+
+        let below = state.attach("channel-1", "client-1", 1, Some(1)).unwrap();
+        assert!(below.ansi_snapshot.is_some());
+        assert!(below.replay.is_empty());
+        assert_eq!(below.snapshot_seq, 4);
+
+        // The client holds `ESC [` but not the `c`: replaying the `c` would complete the query.
+        let inside = state.attach("channel-2", "client-1", 2, Some(3)).unwrap();
+        assert!(inside.ansi_snapshot.is_some());
+        assert!(inside.replay.is_empty());
+
+        let after = state.attach("channel-3", "client-1", 3, Some(4)).unwrap();
+        assert_eq!(after.ansi_snapshot, None);
+        assert!(after.replay.is_empty());
+        assert_eq!(after.snapshot_seq, 4);
+
+        // The ring is not consulted either.
+        let mut ringed = SessionState::new(3, 12, 4);
+        ringed.feed(b"a");
+        ringed.feed(b"\x1b[c");
+        ringed.terminal.retransmit.clear();
+        ringed.terminal.retransmit_bytes = 0;
+        let mut asked = Vec::new();
+        let outcome = ringed
+            .attach_with_ring("channel-1", "client-1", 1, Some(1), &mut |from, to| {
+                asked.push((from, to));
+                Some(b"\x1b[c".to_vec())
+            })
+            .unwrap();
+        assert!(asked.is_empty());
+        assert!(outcome.ansi_snapshot.is_some());
+        assert!(outcome.replay.is_empty());
+    }
+
+    #[test]
+    fn answered_query_marker_survives_a_checkpoint_and_never_moves_down() {
+        let mut state = SessionState::new(3, 12, 4);
+        state.feed(b"\x1b[c");
+        assert_eq!(state.answered_query_seq(), 3);
+        state.raise_answered_query_seq(2);
+        assert_eq!(state.answered_query_seq(), 3, "never lowered");
+
+        let checkpoint = state.checkpoint(usize::MAX).unwrap();
+        assert_eq!(checkpoint.answered_query_seq, 3);
+        let encoded = checkpoint.encode();
+        assert_eq!(encoded.len(), checkpoint.encoded_len());
+        let decoded = Checkpoint::decode(&encoded).unwrap();
+        assert_eq!(decoded, checkpoint);
+        let restored = SessionState::restore(TerminalState::restore(&decoded, 4, String::new()));
+        assert_eq!(restored.answered_query_seq(), 3);
+
+        let mut carried = SessionState::new(3, 12, 4);
+        carried.raise_answered_query_seq(restored.answered_query_seq());
+        assert_eq!(carried.answered_query_seq(), 3);
+
+        // A header written before the field existed still decodes, with marker 0.
+        let header_len = u32::from_be_bytes(encoded[..4].try_into().unwrap()) as usize;
+        let mut header: serde_json::Value = serde_json::from_slice(&encoded[4..4 + header_len]).unwrap();
+        assert!(header.as_object_mut().unwrap().remove("answered_query_seq").is_some());
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut legacy = (header.len() as u32).to_be_bytes().to_vec();
+        legacy.extend_from_slice(&header);
+        legacy.extend_from_slice(&encoded[4 + header_len..]);
+        let legacy = Checkpoint::decode(&legacy).expect("an older header must still decode");
+        assert_eq!(legacy.answered_query_seq, 0);
+        assert_eq!(legacy.output_seq, 3);
     }
 }
