@@ -1,62 +1,47 @@
 ---
 name: coflux
-description: Use coflux to enter workspaces, open terminals the user can see and take over, run commands in them, wait for those commands, read their scrollback, type into them, run one-shot commands on another device in the account and get their output, report progress, notify the user, obtain preview URLs, pick up the elements the user annotated in Coflux's built-in browser and the comments they wrote on lines of the diff, and mark them done, and hand a bounded mechanical sub-task to the built-in executor instead of spending your own context on it. Prefer zero-credential local commands in the current workspace; use the account CLI across workspaces and devices. Coordinates arrive through coflux-session or COFLUX_* variables.
+description: Works inside a Coflux terminal and across the devices of the account. Locates the session (coflux-session block, COFLUX_* variables, coflux workspace), opens terminals the user can see and take over, runs commands in them, waits, reads scrollback, types into them, reports progress, notifies the user, lists preview URLs, hands a bounded sub-task to the built-in executor, implements the user's browser annotations and diff comments, and reaches other workspaces and devices through the account CLI (worktrees, remote terminals, one-shot device exec, project import). Use when running in a Coflux terminal, or when a task involves coflux, a workspace or worktree the user watches, a step only a human can type (password, confirmation, TUI), a dev server or test run the user should see, progress or notifications, preview URLs, annotations, the executor, or another machine in the account. Prefers zero-credential local commands in the current workspace; uses the account CLI across workspaces and devices.
 ---
 
 # Working inside coflux
 
-You may be running inside a coflux terminal. coflux lets the user watch agents working on many
-machines from a browser or a phone and take over at any time. This skill gives you terminals the
-user can see and take over, a progress line and a call button on the workspace card, preview URLs,
-and a way to operate the other workspaces and devices under the account when you need to.
-
-**Use local commands in this workspace and account CLI commands across workspaces and devices.**
+coflux lets the user watch agents working on many machines from a browser or a phone and take over
+at any time. This skill gives you terminals the user can see and take over, a progress line and a
+call button on the workspace card, preview URLs, and a way to operate the other workspaces and
+devices under the account. **Use local commands in this workspace and account CLI commands across
+workspaces and devices.**
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, implement the user's browser annotations and code comments, hand a bounded sub-task to the built-in executor: the default; some actions require a server connection |
-| Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces and remote terminals; JSON output |
+| Local commands `coflux terminal/progress/notify/ports/executor/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, the user's browser annotations and code comments, a bounded sub-task for the built-in executor: the default |
+| Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces, remote terminals, one-shot commands on another device; JSON output |
 
-Of the local commands, `run`/`wait`/`read`/`send`/`close`/`progress`/`executor`/`annotations` complete
-entirely inside the local daemon and never touch the center; `new`/`list`/`ports`/`notify` are relayed to the
-center by the daemon on your behalf (terminals and notification history are persisted centrally; preview URLs are
-minted by the center). You only ever talk to the local daemon.
-
-## Managed terminal integration
-
-Coflux terminals automatically load this capability for Claude Code and Codex. Use
-`coflux agent status` to inspect this terminal's integration acknowledgements; an
-unconfirmed run has not successfully executed its context hook. It does not prove
-that approval is pending. Codex asks for native hook review when needed; use `/hooks`
-to review it. Do not edit trust hashes or the user's global configuration.
-
-Each agent keeps its own immutable CLI and skill files. Relaunching the agent selects
-the installed device version, including from an already-open supported shell. Use
-`COFLUX_AGENT_INTEGRATION=off claude` or `COFLUX_AGENT_INTEGRATION=off codex` to bypass
-managed integration for one invocation. Use `coflux agent run <claude|codex> -- ...`
-when a custom shell alias takes precedence over automatic integration.
+You only ever talk to the local daemon. `run`/`wait`/`read`/`send`/`close`/`progress`/`executor`/
+`annotations` complete inside it and never touch the center. `new`/`list`/`ports`/`notify` and the
+account commands need the daemon connected to the center (terminals and notification history are
+persisted centrally, preview URLs are minted by the center; "letting the user see" is their whole
+point) and fail loudly rather than degrade silently when it is not.
 
 ## Figure out where you are first
 
 With the coflux plugin installed, Claude Code and Codex receive a `<coflux-session>` block at
-session start (and again after context compaction). Your coordinates are in it; use them
-directly. Without that block (no plugin, hand-wired hooks, hook not trusted yet), read the
-environment:
+session start (and again after context compaction). Your coordinates are in it; use them directly.
+Without that block (no plugin, hand-wired hooks, hook not trusted yet), read the environment:
 
 ```sh
 env | grep '^COFLUX_'
 ```
 
-- **`COFLUX_WORKSPACE_ID` is non-empty** (or the `<coflux-session>` block is present) → you are in
-  a coflux terminal with an up-to-date daemon. The variables below are your coordinates; pass
-  these ids to account CLI commands directly instead of guessing from `list_*`:
+- **`COFLUX_WORKSPACE_ID` is non-empty** (or the `<coflux-session>` block is present) → you are in a
+  coflux terminal with an up-to-date daemon. Pass these ids to account CLI commands directly
+  instead of guessing from the list commands:
 
   | Variable | Meaning |
   |---|---|
-  | `COFLUX_DEVICE_ID` | id of the device you run on (the id in `list_devices`) |
+  | `COFLUX_DEVICE_ID` | id of the device you run on (the id in `coflux device list`) |
   | `COFLUX_PROJECT_ID` | owning project id; empty string for a directory workspace without a repository |
-  | `COFLUX_WORKSPACE_ID` | the workspace this terminal was **opened** in (the id in `list_workspaces`). The variable is frozen when the terminal starts; the workspace the terminal *belongs to* can still change — see below. `coflux workspace` is the authority |
-  | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId used by local commands and `read_terminal`) |
+  | `COFLUX_WORKSPACE_ID` | the workspace this terminal was **opened** in (the id in `coflux workspace list`). Frozen when the terminal starts; the workspace the terminal *belongs to* can still change — `coflux workspace` is the authority |
+  | `COFLUX_TASK_ID` | id of this terminal (the taskId / terminalId the terminal commands take) |
   | `COFLUX_SESSION_ID` | id of this PTY session |
 
   Under those id lines the `<coflux-session>` block prints a `<Kind> handle:` line for the device,
@@ -66,94 +51,14 @@ env | grep '^COFLUX_'
 
 - **Variables empty or absent**: there is no local terminal context. Use `coflux whoami` to check
   account access and the account CLI to discover workspaces. Ask the user to log in when needed;
-  never fabricate COFLUX_* coordinates.
-
-### Two workspaces to keep apart: owning and effective
-
-- **Owning workspace** = the workspace this terminal **belongs to**: what the user's sidebar shows it
-  under, what its turn state, branch and diff stats are attributed to. It starts out as
-  `COFLUX_WORKSPACE_ID` and moves with you when you enter or leave a git worktree (below).
-- **Effective workspace** = the workspace **your current working directory is inside**. This is what
-  every local command acts on.
-
-They are the same until your cwd wanders off. A coflux child workspace is a normal registered Git
-worktree. Running a command with cwd B (or `cd <path>` inside that command) changes that command's
-effective workspace, but does not move the terminal or change later tools' default cwd. In B:
-
-- `coflux terminal new` opens the terminal **in B**, under B in the user's sidebar, running in B's
-  directory, counting against B's terminal cap;
-- `coflux terminal list` lists B's terminals, and A's terminals answer `read` / `wait` / `send`
-  with "not in this workspace or does not exist" (`cd` back to A to reach them again);
-- Account CLI calls need **B's** id as `workspaceId`;
-- the terminal itself stays under A, and `progress`, `notify` and `ports` still belong to it,
-  whatever your cwd is; `COFLUX_TASK_ID` and `COFLUX_SESSION_ID` never change.
-
-If your cwd is outside every coflux workspace (say `/tmp`), local commands fall back to the owning
-workspace.
-
-A terminal opened before the daemon was upgraded is the one case with no owning workspace at all:
-its local commands are refused with "predates the daemon upgrade" whatever your cwd is, because the
-daemon never guesses ownership from a directory. Open a new terminal.
-
-### Explicitly enter a workspace
-
-Use this workflow when the task should move into another worktree, particularly in Codex, which
-does not provide Claude's `EnterWorktree` tool:
-
-1. Select an existing worktree from `coflux workspace list --device <deviceId>`, or create one with
-   `coflux workspace new --project <projectId> --branch <branch>`. Use the returned workspace path.
-2. Run `coflux workspace enter <path>`. This uses the existing workspace-locate operation: the
-   daemon verifies the same Git repository, registers an unknown worktree, and moves the current
-   terminal's owning workspace. The terminal, PTY and conversation continue without restarting.
-3. Use the returned absolute `path` explicitly as `workdir`/`cwd` for subsequent task commands,
-   including local `coflux` commands. Use absolute file paths for tools with no working-directory
-   argument. Read the target directory's applicable `AGENTS.md` before editing. Run `coflux workspace`
-   **in that directory** and use its workspace ID for account operations.
-
-`hostCwdChanged: false` is intentional: neither this command nor a one-off shell `cd` can change
-Codex's default directory or sandbox permissions. A successful terminal move is not proof that
-later tools operate there. Keep the selected path in task context and verify it before editing.
-Use the same enter command with the original path to return; returning does not delete a worktree.
-Temporary reads, checks or commands elsewhere do not change the explicit selection.
-
-For a device-managed Codex session, `resumeSupported: true` means the selection is saved by native
-conversation ID. Hooks inject the selected path after the switch and restore it after compaction
-or resume, including resume in another Coflux terminal of the same project and device. A new
-conversation does not inherit the selection. If the saved path is missing or cannot be verified,
-the hook reports it; do not silently resume edits in the original directory. Select a valid
-workspace explicitly, or retry after connectivity returns. Plain terminals and Claude receive
-`resumeSupported: false`; Claude's native directory tools provide its session directory behavior.
-
-The enter command requires the current native CLI. The npm CLI delegates it to the pinned native
-integration, or the installed device CLI outside a managed agent. If unavailable, update the
-device; do not claim that a shell `cd` supplied the missing persistence behavior.
-
-### Claude: coflux follows you into a git worktree
-
-`EnterWorktree` switches this live session into a git worktree (its own, or an existing one you point
-it at), `ExitWorktree` switches back, and resuming a session that had entered one puts you straight
-back in it. **coflux comes along**: the terminal's *owning* workspace moves to the workspace that
-worktree is, and if coflux has never seen that worktree it registers it as a child workspace of this
-project first — a new card appears in the user's sidebar, with its branch and diff stats. Nothing is
-interrupted: same terminal, same PTY, same conversation, and the user keeps watching it where it now
-lives. When Claude Code cleans up its own worktree on exit, that workspace's terminals move back to
-the project's main workspace and the record disappears by itself.
-
-So, after entering or leaving a worktree, owning **and** effective are both the new workspace: pass
-its id to account CLI commands and everything local already acts on it. The plugin drops the new id next to the
-tool result, and `coflux workspace` always tells you. Two things stay behind on purpose:
-
-- `COFLUX_WORKSPACE_ID` (and the workspace id and handle in the `<coflux-session>` block from
-  earlier in this session) still names where the terminal was *opened*; it is frozen when the PTY
-  starts and cannot be rewritten. Never reuse either form after a move.
-- The shell inside this terminal keeps its own directory. That is only about the shell; it does not
-  affect where your work is attributed.
-
-Nothing happens when coflux cannot follow, and nothing is blocked either: another repository, a
-directory that is not a git repository, a terminal opened in a directory workspace (no project), or
-a daemon that is down or too old — the session just carries on with the ownership it had.
+  never fabricate `COFLUX_*` coordinates.
 
 ### Ask where you are
+
+Two workspaces matter: the **owning** workspace is the one this terminal belongs to (the user's
+sidebar, turn state, branch and diff stats); it starts as `COFLUX_WORKSPACE_ID` and moves with you
+into a git worktree. The **effective** workspace is the one your cwd is inside; every local command
+acts on it. They differ once your cwd wanders into another worktree.
 
 ```sh
 coflux workspace
@@ -163,86 +68,36 @@ coflux workspace
 One line of JSON: `workspaceId` (+ `path`) is the **effective** workspace, `owningWorkspaceId` is the
 workspace this terminal belongs to right now, `ref` and `owningRef` are those two workspaces'
 handles (a daemon too old to send them leaves both keys out), and `moved` says whether they differ.
-With the plugin installed you also get a `<coflux-session-moved>` block at the start of every prompt
-while the two differ — but that block only arrives with the **next** user prompt. **About to call an
-account command right after a `cd`? Run `coflux workspace` first** and use the `workspaceId` it
-prints; do not reuse `COFLUX_WORKSPACE_ID`.
+**About to call an account command right after a `cd`? Run `coflux workspace` first** and use the
+`workspaceId` it prints; do not reuse `COFLUX_WORKSPACE_ID`.
+
+Read [references/workspaces.md](references/workspaces.md) when your cwd leaves the workspace the
+terminal was opened in, before moving the task into another worktree (`coflux workspace enter`,
+Claude's `EnterWorktree`), or when a local command answers "not in this workspace or does not
+exist" or "predates the daemon upgrade".
 
 ## Entity handles: ids you can paste
 
-Every coflux entity also has a **handle**: one short string that says both "this is coflux" and
-"this is a device / project / workspace / terminal".
-
-```
-coflux:device:b6767697
-coflux:project:7a83f21e
-coflux:workspace:3f2a1b7c
-coflux:terminal:9e21c4d0
-```
-
-The grammar is `coflux:<kind>:<short>`. `<kind>` is one of `device`, `project`, `workspace` and
-`terminal`. `<short>` is the first 8 hexadecimal characters of the entity's UUID — its first
-dash-delimited group. Handles are always generated in lowercase and are read case-insensitively.
-There is nothing else encoded in one: no name, no timestamp, no device. UUIDs stay canonical; a
-handle is another way to *write* an id, not a replacement for it.
-
-**Anywhere an id is accepted, a handle is accepted.** That covers every account CLI command taking
-a device, project, workspace or terminal id, the `--device` / `--workspace` filters of the list
-commands, and every local terminal command taking a terminal id. `coflux terminal read
-coflux:terminal:9e21c4d0` and `coflux terminal read <that terminal's full UUID>` are the same call.
-
-**Anywhere an entity is returned, its handle comes back too**, in a `ref` field beside the
-entity's unchanged id field. The ids in JSON — `taskId`, `workspaceId`, `deviceId` — are still full
-UUIDs, and `ref` is the handle next to them; where one payload carries two ids of the same kind it
-gets two keys, as `coflux workspace` does with `ref` and `owningRef`. Local terminal results carry
-both as well, and their `taskId` is always the **resolved** UUID — never the handle you passed in,
-so it is safe to feed onward. The local `coflux terminal list` text rows lead with the handle, so
-the next command can be typed straight from what you just read.
-
-So when the user pastes you a `coflux:` string, you already know what kind of thing it names and
-can use it as-is — no listing, no guessing. Handles are made to be pasted rather than displayed:
-the desktop and iOS clients offer "copy handle" on the entity (right-click in the desktop sidebar
-and terminal tabs, long-press on iOS rows and terminal chips) and show no handle text otherwise.
-
-### When a handle does not resolve
-
-A handle is a prefix, so resolving one can fail in three distinct ways — and there is a fourth case
-that is not a resolution failure at all. Each is one readable sentence; what matters is which of the
-four you got:
-
-- **Nothing matches** — no entity of that kind, within the scope that command can see, starts with
-  that short id. The handle belongs to another account, to a workspace you are not in, or to
-  something that no longer exists. List and pick again; re-running the same string cannot help.
-- **More than one matches** — two entities of that kind share the short id, so nothing is acted on.
-  Use the full UUID instead. There is no "first match" fallback, and picking one yourself is
-  exactly what the error exists to prevent.
-- **Wrong kind** — the handle is well-formed but names a different kind than the command expects
-  (a workspace handle where a terminal id goes). The command fails rather than act on an adjacent
-  entity; the fix is a handle of the expected kind, never a retry.
-- **It was never a handle** — the `coflux:<kind>:` prefix is **mandatory**. `b6767697` on its own is
-  not a handle, however faithfully it copies the first 8 characters of a real UUID. Nothing rejects
-  it as malformed: it is forwarded untouched as a literal id and fails wherever that id is looked
-  up, **with a message that says nothing about id syntax** — for a device it reads
-  `设备 b6767697 不存在或不属于当前账号`. The three errors above cannot warn you here, because the
-  string never reached the resolver. Write `coflux:device:b6767697`, never `b6767697`.
-
-The scopes differ on purpose: account CLI commands resolve a handle among **the requesting
-account's** entities, while local terminal commands resolve it among the terminals of **the
-workspace your cwd is in** — the same boundary that already makes another workspace's terminal
-indistinguishable from one that does not exist.
-
-Handles need a daemon and a CLI new enough to know about them. An older one rejects a handle the
-way it rejects any unrecognised id; there, use the full UUID and tell the user to upgrade.
+Every entity also has a **handle**, `coflux:<kind>:<short>`: `<kind>` is `device`, `project`,
+`workspace` or `terminal`, `<short>` the first 8 hex characters of its UUID
+(`coflux:terminal:9e21c4d0`; lowercase, read case-insensitively). **Anywhere an id is accepted, a
+handle is accepted** — account commands, the `--device` / `--workspace` filters, local terminal
+commands — and **anywhere an entity is returned its handle comes back** in a `ref` field beside the
+unchanged UUID (local results' `taskId` is always the resolved UUID). When the user pastes a
+`coflux:` string, use it as-is. The prefix is **mandatory**: a bare `b6767697` is forwarded as a
+literal id and fails with a message that says nothing about syntax. Read
+[references/handles.md](references/handles.md) when a handle does not resolve (nothing matches,
+more than one, wrong kind, never a handle), for the `ref` fields of each command, or on an older
+daemon.
 
 ## When to open a terminal
 
 A coflux terminal is a real, persistent shell the user can see: a titled entry in their sidebar
-that they can open, take over and type into, whose scrollback you can read back at any time. It is
-modelled on Terminal.app's scripting surface: you open a shell, you *do script* into it, you ask
-whether it is busy, you read its contents, you close it.
-
-Whether a command runs in your own Bash or in a coflux terminal is your call; a coflux terminal is
-worth it when the user's view of the process, or the user's hands, matter:
+that they can open, take over and type into, whose scrollback you can read back at any time,
+modelled on Terminal.app's scripting surface (open a shell, *do script* into it, ask whether it is
+busy, read its contents, close it). Whether a command runs in your own Bash or in a coflux terminal
+is your call; a coflux terminal is worth it when the user's view of the process, or the user's
+hands, matter:
 
 - **a step only the human can do**: typing a password (`ssh -t user@host "su - root -c '...'"`,
   `sudo`), confirming a prompt, driving a TUI, picking an option in an installer
@@ -263,23 +118,18 @@ coflux terminal new --title="Debug shell"                          # open a shel
 ```
 
 Every terminal is the same thing: the workspace's default login shell on a real tty (stdin **and**
-stdout), started in the directory of the workspace your cwd is in (which is not always the one this
-terminal was opened in; see "owning and effective"), alive until `exit` is typed into it or you
-`close` it. It runs nothing by itself and never exits on its own.
+stdout), started in the directory of the workspace your cwd is in (not always the one this terminal
+was opened in), alive until `exit` is typed into it or you `close` it. It runs nothing by itself and
+never exits on its own. The new terminal has the same `COFLUX_*` variables (pointing at its own
+task/session ids, same workspace as you).
 
 `--title` is the name the user sees in the sidebar; **name it properly**: "Run unit tests",
-"Root ssh", never "terminal 1".
-
-`--cmd=...` is *do script*: the command is typed into the shell **after the shell has signalled that
-its prompt is ready**, then the shell keeps living. It is exactly `new` followed by `run`. The
-command line is capped at 64 KB. Always write `--cmd=<value>` and `--title=<value>` with the `=`,
-never separated by a space: a value that starts with `-` is otherwise taken for another option.
-
-`new` prints the terminal id on its first line whatever happens next; when the command could not
-be typed it says so in an error on stderr (see "Errors").
-
-The new terminal has the same `COFLUX_*` variables (pointing at its own task/session ids, same
-workspace as you).
+"Root ssh", never "terminal 1". `--cmd=...` is *do script*: the command is typed into the shell
+**after the shell has signalled that its prompt is ready**, then the shell keeps living — exactly
+`new` followed by `run`. The command line is capped at 64 KB. Always write `--cmd=<value>` and
+`--title=<value>` with the `=`, never separated by a space: a value that starts with `-` is
+otherwise taken for another option. `new` prints the terminal id on its first line whatever happens
+next; when the command could not be typed it says so in an error on stderr (see "Errors").
 
 ### Run a command in it
 
@@ -339,12 +189,12 @@ coflux terminal read <taskId> --lines=50
 ```
 
 `list` rows are `<handle>  <state>[ exit=<code>][ busy|idle][ last=<code>]  <title>`: the first
-column is the terminal's handle (see "Entity handles"), which every other terminal command accepts
-as its id; `running` / `exited` / `idle` is the terminal, `busy` or `idle` says whether a command is
-running in it right now, and `last=<code>` is the exit code of the last command that finished. `read` returns the tail
-of the terminal's **full scrollback** (well beyond one screen, up to the daemon's history limit),
-ANSI stripped, with a `# running` / `# exited exit=<code>` header. A freshly opened terminal can
-read back empty for a moment while the shell starts. Once the shell has exited only the last
+column is the terminal's handle, which every other terminal command accepts as its id;
+`running` / `exited` / `idle` is the terminal, `busy` or `idle` says whether a command is running in
+it right now, and `last=<code>` is the exit code of the last command that finished. `read` returns
+the tail of the terminal's **full scrollback** (well beyond one screen, up to the daemon's history
+limit), ANSI stripped, with a `# running` / `# exited exit=<code>` header. A freshly opened terminal
+can read back empty for a moment while the shell starts. Once the shell has exited only the last
 screen the center cached remains.
 
 ### Type into a terminal
@@ -396,19 +246,16 @@ If unsure: when the user does not have to do anything, use `progress`.
 coflux notify "Both approaches work; I need you to pick one"
 ```
 
-This creates an unread notification in the account inbox, with this terminal and its owning
-workspace as the source. It works from any owned Coflux shell, even without an agent process.
-The desktop shows an in-app hint while foregrounded, including when the source workspace is
-already selected; when backgrounded it also requests a system notification. Clicking opens the
-source terminal and marks the notification read. History remains after reading, hooks, agent
-exit, or source deletion. An application that is fully quit syncs history on next launch.
-
-Success means the server has saved the notification. A disconnected daemon, unsupported server,
-or timeout reports failure rather than silently falling back to workspace state. A transport retry
-of the same request is deduplicated; a separate invocation is a new notification. Keep the message
-concise (at most 2000 characters). Use this for decisions, blocked work, or review requests; use
-`progress` for updates that need no response. Automatic approval/question indicators remain
-separate and do not create inbox entries.
+Creates an unread notification in the account inbox with this terminal and its owning workspace as
+the source; works from any owned Coflux shell, even without an agent process. The desktop shows an
+in-app hint while foregrounded (also when the source workspace is already selected) and requests a
+system notification when backgrounded; clicking opens the source terminal and marks it read. History
+remains after reading, hooks, agent exit or source deletion, and a fully quit app syncs it on next
+launch. Success means the server has saved it: a disconnected daemon, unsupported server or timeout
+reports failure rather than silently falling back to workspace state. A transport retry of the same
+request is deduplicated; a separate invocation is a new notification. Keep it concise (at most 2000
+characters); use it for decisions, blocked work or review requests. Automatic approval/question
+indicators are separate and create no inbox entries.
 
 ### Hand the user a clickable preview
 
@@ -423,63 +270,13 @@ server, use it to get the URL and tell the user directly; they click it and nobo
 
 ```sh
 coflux executor run --title="Fix clippy in worker" --prompt="Fix every clippy warning in crates/worker" --write
-coflux executor run --title="Why does the relay test flake" --prompt="Find why the relay reconnect test flakes and report back"
 ```
 
-The executor is a small agent built into coflux. Give it one self-contained job and it works in
-**the workspace your cwd is in** while you keep your own context for the main thread. The command
-blocks until the job ends, then prints the executor's final report and the files that changed in
-the workspace during the run, whatever changed them, shell commands included. In a git workspace,
-git-ignored files are left out unless the executor wrote them with its file tools, and files already
-modified before the run appear only if the run changed them again. The list cannot tell who made a
-change, so anything else writing to the workspace during the run (the user, another agent) shows up
-too. When the workspace could not be scanned completely the output says so, and then you check the
-workspace yourself.
-
-**Always pass `--title`**: a few words naming the job. While the run is going, the user sees a
-small card on this terminal (on every desktop of the account) with that title, the run's live
-progress and a stop button; they can expand it to read everything the executor did. Without a
-title the card shows the prompt's first line, which is rarely a good name. The card is read-only
-and disappears when the run ends — the result comes back to you, not to the user.
-
-Reach for it when a job is mechanical, bounded and verbose — chasing a failing test suite, a
-repetitive refactor across many files, a search that would cost you many tool calls. Keep the work
-yourself when it needs the conversation's context, the user's judgment, or decisions the prompt
-cannot carry.
-
-**One-shot: there is no session and no follow-up.** Each run starts clean and ends when it ends;
-to change something, send a new run with a new prompt. So **write the prompt as a brief, not a
-hint**: the executor gets that one string and nothing else — no conversation history, no way to ask
-you what you meant. Say what done looks like and how to check it.
-
-**Where it exists: macOS only.** Its boundaries are enforced by the macOS kernel sandbox, and there
-is no equivalent on Linux yet, so a Linux machine has no executor and the command says so. On macOS
-it is hosted either by the daemon the user installed from npm or by the desktop app, whichever that
-machine has — you do not choose, and nothing about the command changes either way.
-
-Its boundaries, enforced by that kernel sandbox — count on them, and tell it what it needs up front:
-
-- **Only the originating workspace is writable.** Writes anywhere outside it are refused by the
-  kernel. Reads are not restricted, so it can still see system files, toolchains and the rest of the
-  machine — the sandbox stops it from changing things, not from looking. Without `--write` even that
-  workspace is read-only, which is the right mode for investigations.
-- **Git metadata is read-only, so it never commits.** It leaves changes in the working tree;
-  reviewing and committing them is yours. `git status` and `git diff` work fine for it.
-- **Its tool processes have no network.** `npm install`, `cargo fetch` and friends fail. Install
-  what the job needs before handing it over.
-- **One writing executor per workspace at a time.** A second `--write` in the same workspace is
-  refused outright rather than queued, and nothing runs: wait for the running one to finish, then
-  send yours again. Read-only runs may still go in parallel up to a small cap.
-
-A run ends if the host it is on goes away — the user quits the desktop app, signs out, or stops the
-machine's terminals — and you get a definite failure, never a hang. The user can also stop it from
-the card, which comes back to you as `cancelled`. `--timeout <seconds>` caps how long you wait; the
-default is 30 minutes and a timeout cancels the run before failing. The model
-comes from the user's account-wide executor settings; if they have not configured one, the command
-says so in one line — relay that to the user instead of retrying.
-
-**Images and other files are not an input.** The prompt is a task description with a size cap, not a
-file channel: point at paths inside the workspace instead of trying to hand anything over.
+A small agent built into coflux (macOS only) that works one self-contained, mechanical job in the
+workspace your cwd is in while you keep your own context; the command blocks and prints its report
+plus the files that changed. Read [references/executor.md](references/executor.md) before using it:
+its sandbox (workspace-only writes, no commits, no network, one writer per workspace), how to write
+the prompt, `--title`, `--timeout`, and what comes back.
 
 ### Get a secret from the user
 
@@ -492,62 +289,20 @@ private key, connection string…), use the `coflux-secret` skill
 ```sh
 coflux annotations list
 coflux annotations resolve 3 --note "Primary button now uses the brand token; spacing from the 8px scale"
-coflux annotations watch
 ```
 
-Annotations come in two kinds that share one numbered list (#1, #2…):
-
-- **Browser annotations**: the user points at elements of a page in Coflux's built-in browser tab
-  ("this element — change it like so").
-- **Code comments**: the user reviews this workspace's diff in Coflux's changes view and comments
-  on a line or a range of lines ("rename this", "this breaks when the list is empty").
-
-The user hands them to you from the desktop, which types an instruction into your terminal, or
-simply asks you to handle the annotations. They belong to the workspace your cwd is in and live on
-this machine, so they are there whether or not a desktop is open.
-
-- `list` prints the pending ones, both kinds, as markdown: the user's comment (and, for a reopened
-  one, your earlier note and what the user answered), then where it points. It always names the
-  workspace it resolved: an empty list in the wrong workspace means you moved (`coflux workspace`).
-  Add `--json` for structured output (`kind` is `page` or `code`).
-- A **code comment** gives the file, the line range and the side of the diff, then the commented
-  lines in a fenced block. `in the working tree` means the current file; `on the base side` means
-  the version the changes are compared against (with its commit), typically lines the change
-  removed or replaced — read that version with `git show <commit>:<path>` if you need more context.
-  The line numbers are where the lines were when the comment was written: if the file has changed
-  since, find the commented lines by their text. The comment is about those lines, but the fix may
-  belong elsewhere (a caller, a test); make the change the comment asks for.
-- A **browser annotation** gives the page, the component chain and source location when the page
-  exposed them, the element's selector, DOM path and key computed styles, and the paths of its
-  images.
-- A browser annotation is not always one element. When the user selected several elements together, it
-  lists each one with its own component chain and context under "Element 1 of n": the comment
-  applies to all of them, so change them consistently and resolve the annotation once. When the user
-  dragged a **region**, it gives the region's size and offset, the *container* (the innermost
-  element holding it — usually the component to edit) and the components inside the region; the
-  comment is about that area as a whole, and the screenshot shows exactly the region.
-- Find the code from the most specific lead: a source location first, then the component names,
-  then text and selectors (`rg` for them). Treat the computed styles as the current state, not as
-  the target: map colors, sizes and spacing onto the project's design system (its tokens, theme and
-  components) instead of hard-coding raw values.
-- The images are local files: read them. A *screenshot of the current state* shows the element as
-  the user saw it; a *reference image* is what the user wants or pointed at.
-- After implementing each annotation, run `resolve <id or number> --note "<what you changed>"`.
-  The note is what the user reads to review the change; the pin on their page (or the comment card
-  under the diff line) turns into a check.
-  They confirm it (it disappears) or reopen it with a comment, and it comes back in `list`. Resolve
-  only what you actually changed; if you cannot or should not do one, resolve it with a note that
-  says why rather than leaving it pending silently.
-- `watch` blocks until the workspace has pending annotations and then prints them like `list`
-  (default budget 30 minutes, `--timeout <seconds>`). Use it only when the user asked you to keep
-  handling annotations hands-free: loop list → implement → resolve → `watch`.
+The user points at elements of a page in Coflux's built-in browser, or comments on lines of this
+workspace's diff in its changes view; both land in one numbered list for the workspace your cwd is
+in. The desktop types an instruction into your terminal, or the user simply asks you to handle the
+annotations. Read [references/annotations.md](references/annotations.md) then: how to read each
+kind, find the code, resolve with a note, and `watch` hands-free.
 
 ### Errors from local commands
 
 Errors go to stderr as `✗ Error: <what happened>` followed by an indented line saying what to do
 next; the sentences below come from the daemon and appear after `Error:`. Do what they say: "not
-inside a coflux terminal" = you are not
-in a coflux session; "terminal is not in this workspace or does not exist" = check the id with
+inside a coflux terminal" = you are not in a coflux session; "terminal is not in this workspace or
+does not exist" = check the id with
 `list`, and if you moved into another workspace that is exactly what a terminal of the other one
 looks like (`coflux workspace` to confirm, `cd` back to reach it); "predates the daemon upgrade" =
 that terminal was opened before the daemon upgrade, open a new one; "never signalled prompt
@@ -559,108 +314,34 @@ machine's daemon is older than the CLI, tell the user to run `cofluxd update && 
 (the terminal was opened as a plain shell, nothing was run); "daemon is not connected to the
 center" only appears on `new`/`list`/`ports`/`notify`, retry once it reconnects. A terminal handle
 that names the wrong kind, or whose prefix matches more than one terminal in this workspace, has
-its own sentence each — see "When a handle does not resolve"; an unknown handle shares the
-"not in this workspace or does not exist" sentence above, on purpose.
+its own sentence each — see "When a handle does not resolve" in `references/handles.md`; an unknown
+handle shares the "not in this workspace or does not exist" sentence above, on purpose.
 
 ## Account CLI: across workspaces and devices
 
-The bundled CLI can use the desktop app's login without receiving its token. For a standalone CLI,
-use `coflux login --username <account> --password-stdin`; the user supplies the password safely,
-never as a command argument. Account commands return JSON. A workspace ID identifies its device.
+Account commands return JSON; they use the desktop app's login (the bundled CLI never receives its
+token) or `coflux login --username <account> --password-stdin`. A workspace ID identifies its
+device; `--remote` selects account access, including other workspaces on this machine, with the
+same semantics as the local commands (`stop` is `close`).
 
 ```sh
 coflux device list
-coflux device exec <deviceId> --cmd="<command>" [--cwd=<dir>] [--timeout=<seconds>]
+coflux device exec <deviceId> --cmd="<command>" [--cwd=<dir>] [--timeout=<seconds>]   # ssh-style one-shot, not a terminal
 coflux project list --device <deviceId>
-coflux project import <path> [--device <deviceId>] [--name <name>]
+coflux project import <path> [--device <deviceId>] [--name <name>]                      # repository → project
 coflux workspace list --device <deviceId>
 coflux workspace new --project <projectId> --branch <branch>
 coflux terminal new --workspace <workspaceId> --title <title> [--cmd <command>]
-coflux terminal run <terminalId> --remote --cmd <command>
+coflux terminal run|read|send|wait|stop|remove <terminalId> --remote ...
 coflux terminal list --workspace <workspaceId>
-coflux terminal read <terminalId> --remote
-coflux terminal send <terminalId> --remote --text <text> [--enter]
-coflux terminal wait <terminalId> --remote --timeout 30
-coflux terminal stop <terminalId> --remote
-coflux terminal remove <terminalId> --remote
-coflux workspace rename <workspaceId> --name <name>
-coflux workspace remove <workspaceId>
+coflux workspace rename|remove <workspaceId> ...
 coflux ports --remote --device <deviceId>
 ```
 
-`--remote` selects account access, including other workspaces on this machine. The semantics are the
-same as the local commands: `--cmd` and `run` type a command in after the prompt is ready, `wait`
-returns `finished` with the command's exit code (or `exited` with the shell's) and `timedOut` on the
-deadline, `list` shows `busy` and `lastCommandExitCode` for live terminals (fed by the device's
-checkpoints, so this view lags a couple of seconds behind reality; the local `coflux terminal list`
-is immediate), and `stop` is `close`.
-Read before sending; stop immediately when the user takes over. If a write times out, inspect the
-result before retrying. Exiting the CLI does not stop its terminals. Delete workspaces through
-`coflux workspace remove` so the filesystem and workspace records stay consistent.
-
-### Turn a repository into a project
-
-```sh
-coflux project import "$PWD"
-coflux project import /srv/checkouts/api --device <deviceId> --name api
-```
-
-A repository that is not a project yet has no workspaces, so nothing else in this skill can reach
-it: `workspace new` needs a `projectId`. This is the command that creates one, without the user
-having to click Import in the desktop app.
-
-`<path>` is required and must be **absolute or start with `~/`** — it is resolved on the target
-device, so importing the current directory is written explicitly as `"$PWD"`. Any path inside the
-repository imports the repository root. `--device` selects the machine and defaults to
-`COFLUX_DEVICE_ID`; with neither, the command fails rather than guessing. `--name` overrides the
-project name, which otherwise comes from the git remote and falls back to the directory name.
-
-Success is one line of JSON: `projectId`, `name`, `repoPath`, `defaultBranch`, the main workspace's
-`workspaceId` and `path`, and `alreadyImported`. A repository root on a device has exactly one
-project, so importing the same repository twice returns the existing one with
-`alreadyImported: true` and creates nothing — re-running it is safe. Failures are one sentence and a
-non-zero exit: "不是 git 仓库" (the path is not inside a repository), "设备离线，无法执行该操作"
-(that device exists but is not connected), "设备 <id> 不存在或不属于当前账号" (no device of this
-account has that id — fix what you typed rather than go looking at the machine; a bare `b6767697`
-with no `coflux:device:` prefix lands here), and a submitted-but-unfinished import tells you to check
-`coflux project list`.
-
-### Run one command on another machine
-
-```sh
-coflux device exec <deviceId> --cmd="cd /opt/app && git rev-parse HEAD"
-coflux device exec <deviceId> --cmd="systemctl is-active caddy" --cwd=/etc --timeout=10
-```
-
-This is `ssh host "cmd"` for the devices in this account, and it is **not a Terminal**: no PTY on
-the device, nothing in the user's sidebar, no draw on any workspace's terminal cap, and no workspace
-required — a device whose directories were never registered as coflux workspaces is still reachable.
-The command string is handed to the remote `sh -c`, so pipes, `&&`, redirection, globs and `$VAR` all
-work, and quoting is yours to get right.
-
-Its output is not JSON: stdout goes to stdout, stderr goes to stderr (always separate, and each one
-carries an explicit marker if it had to be truncated), and the last line is `# exit=<code>`. **The
-CLI's exit code is the remote command's**, so an ordinary shell test around it works. The CLI's own
-failures — device offline (it exists and is not connected), no device of this account with that id
-(`设备 <id> 不存在或不属于当前账号`: a mistyped or bare-prefix id, **not** an outage to investigate),
-that device's daemon too old (`cofluxd update && cofluxd restart` there), `--cwd` missing or not a
-directory, the timeout elapsing — are reported as `✗ Error:` with a next step and exit **255**, so a
-remote exit 1 is never confused with "it never ran".
-
-`--cwd` is the only addressing: an absolute path or a `~` prefix, defaulting to the daemon user's
-HOME. To run inside a workspace, pass the `path` from `coflux workspace list --device <deviceId>`.
-There is no `--workspace`, and there is **no stdin**.
-
-**`device exec` or a terminal?** A division of labour, not a limitation:
-
-- **`device exec`** when the command is short and what you want is its result: a version check, a
-  config grep, a service status, a one-line remote fix. `--timeout` defaults to 60 seconds and is
-  capped at 600; a timeout kills the remote process and is a definite failure, never a partial
-  answer. Output is buffered, so nothing appears until the command ends.
-- **`coflux terminal new --workspace <workspaceId>`** when the job is long, when the user should be
-  able to watch it and take it over, or when a human has to type something into it (a `sudo`
-  password, a confirmation, a TUI). That is what a Terminal is for, and exec deliberately cannot do
-  it.
+Read [references/account-cli.md](references/account-cli.md) before using any of them: the full
+argument forms, how `wait` / `list` / `stop` behave remotely, `project import` (path rules, JSON
+result, its error sentences), `device exec` (output format, exit codes, `--cwd`, `--timeout`) and
+when to prefer it over a terminal.
 
 ## Boundaries
 
@@ -673,11 +354,18 @@ There is no `--workspace`, and there is **no stdin**.
 - A workspace has a cap on concurrently live terminals (default 8, including the user's own).
   On hitting the cap, `list` first: usually some finished terminals were never collected. If the
   user really filled it up, `notify` them instead of forcing it.
-- `new`/`list`/`ports`/`notify` and account commands need the daemon connected to the center; "letting the
-  user see" is their whole point. `run`/`wait`/`read`/`send`/`close`/`progress` do not
-  depend on the center. When disconnected they fail loudly rather than degrade silently.
 - `COFLUX_*` variables exist only in PTYs opened by coflux; exporting or changing them yourself
-  has no effect, the center only trusts the ids it issued. `COFLUX_WORKSPACE_ID` always means the
-  workspace this terminal was **opened** in and goes stale the moment coflux follows you into a
-  worktree; both "where does this terminal belong now" and "where am I acting" come from
-  `coflux workspace`.
+  has no effect, the center only trusts the ids it issued. `COFLUX_WORKSPACE_ID` goes stale the
+  moment coflux follows you into a worktree; "where does this terminal belong now" and "where am I
+  acting" both come from `coflux workspace`.
+
+## Managed terminal integration
+
+Coflux terminals load this capability for Claude Code and Codex automatically. `coflux agent status`
+shows this terminal's integration acknowledgements (an unconfirmed run has not successfully executed
+its context hook; it does not prove that approval is pending). Codex asks for native hook review
+when needed: use `/hooks`. Do not edit trust hashes or the user's global configuration. Each agent
+keeps its own immutable CLI and skill files; relaunching the agent selects the installed device
+version, including from an already-open supported shell. `COFLUX_AGENT_INTEGRATION=off claude` (or
+`codex`) bypasses managed integration for one invocation; `coflux agent run <claude|codex> -- ...`
+launches explicitly when a custom shell alias takes precedence over automatic integration.
