@@ -18,6 +18,31 @@ pub(crate) use worktree_guard::deny_decision as worktree_guard_decision;
 
 const SKILL: &str = include_str!("../../../packages/cli/skills/coflux/SKILL.md");
 const SECRET_SKILL: &str = include_str!("../../../packages/cli/skills/coflux-secret/SKILL.md");
+/// The reference files the `coflux` skill links as `references/<topic>.md`: agents read them on
+/// demand, so every one must be installed beside `SKILL.md` or the links point at nothing.
+/// Adding a reference file is adding one row here (a test pins the list to the links in SKILL.md).
+const SKILL_REFERENCES: &[(&str, &str)] = &[
+    (
+        "skills/coflux/references/account-cli.md",
+        include_str!("../../../packages/cli/skills/coflux/references/account-cli.md"),
+    ),
+    (
+        "skills/coflux/references/annotations.md",
+        include_str!("../../../packages/cli/skills/coflux/references/annotations.md"),
+    ),
+    (
+        "skills/coflux/references/executor.md",
+        include_str!("../../../packages/cli/skills/coflux/references/executor.md"),
+    ),
+    (
+        "skills/coflux/references/handles.md",
+        include_str!("../../../packages/cli/skills/coflux/references/handles.md"),
+    ),
+    (
+        "skills/coflux/references/workspaces.md",
+        include_str!("../../../packages/cli/skills/coflux/references/workspaces.md"),
+    ),
+];
 const EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -70,13 +95,18 @@ fn prepare() -> Result<PathBuf, String> {
     let parent = home().join("agent-integrations");
     private_dir(&parent).map_err(|e| e.to_string())?;
     let root = parent.join(&id);
-    let assets = [
+    let mut assets = vec![
         ("skills/coflux/SKILL.md", SKILL.to_string()),
         ("skills/coflux-secret/SKILL.md", SECRET_SKILL.to_string()),
         (".claude-plugin/plugin.json", json!({"name":"coflux", "version":env!("CARGO_PKG_VERSION"), "description":"Coflux terminal integration"}).to_string()),
         ("hooks/hooks.json", claude_hooks(&root).to_string()),
         ("integration.json", json!({"schemaVersion":1,"id":id,"cliVersion":env!("CARGO_PKG_VERSION")}).to_string()),
     ];
+    assets.extend(
+        SKILL_REFERENCES
+            .iter()
+            .map(|(path, content)| (*path, content.to_string())),
+    );
     let validate = || -> Result<(), String> {
         let installed = fs::read(root.join("coflux")).map_err(|e| e.to_string())?;
         if Sha256::digest(&installed) != Sha256::digest(&bytes)
@@ -259,7 +289,7 @@ fn session_context(
     selection: &str,
 ) -> String {
     format!(
-        "<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {device}\nProject: {project}\nWorkspace: {workspace}\nTerminal: {terminal}\nSession: {session}{handles}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{selection}\nWhen you need a sensitive value from the user (API key, token, password, private key), use `coflux secret` (read {secret_skill}); never ask them to paste it into the chat.\nIntegration: {integration}\nRead {skill} for the complete Coflux skill.\n</coflux-session>",
+        "<coflux-session>\nYou are in a Coflux terminal. The user can watch and take over.\nDevice: {device}\nProject: {project}\nWorkspace: {workspace}\nTerminal: {terminal}\nSession: {session}{handles}\nUse `coflux` for local terminal/progress/notify/ports operations and account operations across devices. Query `coflux workspace` after changing directories; these coordinates are a snapshot.{selection}\nWhen you need a sensitive value from the user (API key, token, password, private key), use `coflux secret` (read {secret_skill}); never ask them to paste it into the chat.\nIntegration: {integration}\nRead {skill} for the Coflux skill; it links the reference files installed beside it.\n</coflux-session>",
         secret_skill = root.join("skills/coflux-secret/SKILL.md").display(),
         integration = root.file_name().unwrap_or_default().to_string_lossy(),
         skill = root.join("skills/coflux/SKILL.md").display(),
@@ -489,6 +519,38 @@ pub fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `references/<topic>.md` the skill links must be embedded and installed beside it, and
+    /// nothing is embedded that the skill no longer links: the two lists are one contract.
+    #[test]
+    fn every_reference_the_skill_links_is_embedded_and_installed() {
+        let mut linked: Vec<String> = SKILL
+            .match_indices("](references/")
+            .map(|(start, marker)| {
+                let rest = &SKILL[start + marker.len()..];
+                let end = rest.find(')').expect("unterminated link in SKILL.md");
+                format!("skills/coflux/references/{}", &rest[..end])
+            })
+            .collect();
+        linked.sort();
+        linked.dedup();
+        let mut embedded: Vec<String> = SKILL_REFERENCES
+            .iter()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        embedded.sort();
+        assert!(!linked.is_empty(), "SKILL.md links no reference files");
+        assert_eq!(linked, embedded);
+        for (path, content) in SKILL_REFERENCES {
+            assert!(!content.trim().is_empty(), "{path} is empty");
+            assert!(
+                !content.contains("](references/"),
+                "{path} links another reference; keep references one level deep from SKILL.md"
+            );
+        }
+        // The secret skill is linked from the coflux skill and installed on its own row.
+        assert!(SKILL.contains("](../coflux-secret/SKILL.md)"));
+    }
 
     /// The exact lines the plugin's shell hook must print too
     /// (`integrations/claude-plugin/scripts/session-context.sh`). Both emitters, one format.
