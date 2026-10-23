@@ -2,6 +2,7 @@
 
 New product releases use `X.Y.Z.md`, starting with `# Coflux X.Y.Z`. Write notes in English before tagging; see [the release process](../RELEASING.md).
 
+- [Coflux 2.20.3](2.20.3.md)
 - [Coflux 2.20.2](2.20.2.md)
 - [Coflux 2.20.1](2.20.1.md)
 - [Coflux 2.20.0](2.20.0.md)
