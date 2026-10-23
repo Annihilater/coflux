@@ -494,3 +494,12 @@ Out of scope:
 - Each session that ever gets a sessiond reply uses one of ptyd's 256 logical-identity slots for `__coflux-sessiond-reply`.
 - Release note: new terminals no longer pause ten seconds or print fish's "Primary Device Attribute" warning, including terminals no window is showing.
 - Manual acceptance needs the local stack (`pnpm dev:pg`, `pnpm dev:server`, this branch's `pnpm dev:daemon`, `pnpm -C apps/desktop dev`). `pnpm dev:desktop:prod` would talk to the installed runtime, which does not contain the fix.
+
+## Outcome
+
+- Status: APPROVE — 2026-10-23
+- Mode: subagent(opus), one work package (M3 is a single small file, not worth its own worktree); one REVISE round, for a test whose expected seqs were off by one (the implementation was right).
+- Commits: `0e7c5d1c..5b18ddf3` (`a5306ce7` sessiond core, `df71fa6a` writer and reader wiring, `b5294a90` desktop gate, `5b18ddf3` test fix).
+- Verified: `COFLUX_HOME= RUSTFLAGS='-D warnings' cargo test --no-fail-fast` on protocol/launcher/runtime/cli/ptyd green (runtime 335, 9 new); zero-warning `cargo build` of the four daemon crates; desktop typecheck + lint + 559/559 tests; black-box 95/95 against the dedicated local Postgres with inherited `COFLUX_*` and `FORCE_COLOR` cleared. The end-to-end runtime test drives a real PTY through the in-process ptyd: a raw-mode program with no holder attached reads `\x1b[?1;2c` from stdin, and ptyd lists `__coflux-sessiond-reply` at seq 1. No existing test expectation changed.
+- Deviations: none from the decisions. Accepted extras: the recovery path explicitly discards buffered replies after the ring replay (redundant with `feed` replacing them, kept for readability); a writer-level test with a recording sink (resume from a ptyd cursor, interleaving with client input, a rejected reply not advancing the sequence, cursorless rebuild dropping replies); extra scanner-vs-vt100 oracle inputs.
+- Follow-ups: the manual walkthrough with fish ≥ 4.1 on the local stack (new terminal, a terminal an agent starts with no window, a hidden attached pane) is pending the user. The `__coflux-` client-identity namespace is not enforced on every transport (see Maintenance notes).
