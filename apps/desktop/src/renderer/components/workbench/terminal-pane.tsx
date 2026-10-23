@@ -751,10 +751,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     props.onReady(props.taskId, controller);
 
-    // 输入/resize 的门控见 terminal-control-state.ts（输入含 attaching，尺寸只在 owned）。
+    // Input, including xterm.js's automatic replies to terminal queries, flows whenever this client
+    // may send input (terminal-control-state.ts: owned or attaching), even while the pane is hidden.
+    // A hidden pane has no keyboard focus, so what it emits are the program's own query replies.
+    // Resize stays gated on visibility and ownership.
     terminal.onData((data) => {
-      const { visible, controlState, sessionId, sendInput } = liveRef.current;
-      if (visible && canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
+      const { controlState, sessionId, sendInput } = liveRef.current;
+      if (canSendTerminalInput(controlState) && sessionId) sendInput(sessionId, data);
     });
     terminal.onResize(({ cols, rows }) => {
       const { visible, controlState, sessionId, sendResize } = liveRef.current;
@@ -993,7 +996,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // Losing focus while still on screen (the focused group's active tab became the optimistic tab,
   // or another group took focus by keyboard): let go of the caret, or keystrokes would keep going
-  // into a group that no longer looks focused — input is gated on `visible`, not `focused`.
+  // into a group that no longer looks focused — input is gated on control state, not on `focused`,
+  // so a pane that keeps the caret keeps receiving keystrokes.
   useEffect(() => {
     if (props.focused) return;
     const host = hostRef.current;
