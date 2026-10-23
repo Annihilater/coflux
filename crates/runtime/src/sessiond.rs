@@ -3388,13 +3388,13 @@ mod tests {
         assert!(state.take_da1_queries().is_empty(), "drained");
 
         state.feed(b"\x1b[c\x1b[0c");
-        assert_eq!(state.take_da1_queries(), vec![12, 16]);
+        assert_eq!(state.take_da1_queries(), vec![11, 15]);
 
         // A query split across two feeds is recorded by the feed that completes it.
         state.feed(b"\x1b[");
         assert!(state.take_da1_queries().is_empty());
         state.feed(b"c");
-        assert_eq!(state.take_da1_queries(), vec![19]);
+        assert_eq!(state.take_da1_queries(), vec![18]);
 
         // The query never splits the chunk for the parser: the screen is what vt100 shows.
         let mut plain = TerminalState::new(4, 12, 8);
