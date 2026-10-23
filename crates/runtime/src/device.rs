@@ -53,7 +53,8 @@ const DEVICE_CHANNEL_LIMIT_ERROR: &str = "Device channel 总数已达上限";
 const CHANNEL_GAP_FRAME_BYTES: usize = 4 * 1024;
 // agent 写 PTY（plan 088）用的合成 channel 前缀；仍走 sessiond 的
 // attach/holder/input_seq 正门，不新增任何输入语义。
-const AGENT_CHANNEL_PREFIX: &str = "__coflux-agent-";
+// Defined in sessiond, which also uses it to tell an agent holder from a human client.
+use crate::sessiond::AGENT_IDENTITY_PREFIX as AGENT_CHANNEL_PREFIX;
 // 中心触发 prepared 执行（plan 091）用的合成 channel 前缀：`__coflux-server-<operation_id>`。
 // 不注册进 channels 表，往它回的应答按既有逻辑丢弃；只有 OperationAck/Error 经 report 回中心。
 // Separate from `__coflux-worker` and `__coflux-agent-`; remote grants reject reserved prefixes.

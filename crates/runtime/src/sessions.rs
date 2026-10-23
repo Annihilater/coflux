@@ -613,8 +613,32 @@ struct QueuedInput {
     data: Vec<u8>,
 }
 
+/// ptyd input identity under which sessiond writes its own replies to terminal queries (DA1,
+/// see `SessionState::feed`). One identity per session for its whole life, across runtime swaps:
+/// the writer resumes its sequence from the cursor ptyd lists for it, because ptyd treats a seq at
+/// or below its cursor with an identical payload as a duplicate and silently skips the write.
+const SESSIOND_REPLY_IDENTITY: &str = "__coflux-sessiond-reply";
+
+/// One record on a session's input queue, written into the PTY in queue order.
+enum QueuedWrite {
+    /// Client input already admitted (and reserved) by sessiond's authority.
+    Client(QueuedInput),
+    /// sessiond's own reply to a terminal query. The writer sequences it under
+    /// [`SESSIOND_REPLY_IDENTITY`]; it has no reservation, no ack and no client to report to.
+    Reply(Vec<u8>),
+}
+
+impl QueuedWrite {
+    fn len(&self) -> usize {
+        match self {
+            Self::Client(input) => input.data.len(),
+            Self::Reply(data) => data.len(),
+        }
+    }
+}
+
 struct InputQueue {
-    sender: SyncSender<QueuedInput>,
+    sender: SyncSender<QueuedWrite>,
     pending_records: Arc<AtomicUsize>,
     pending_bytes: Arc<AtomicUsize>,
     record_limit: usize,
@@ -628,11 +652,11 @@ enum InputQueueError {
 }
 
 impl InputQueue {
-    fn new() -> (Self, Receiver<QueuedInput>) {
+    fn new() -> (Self, Receiver<QueuedWrite>) {
         Self::with_limits(PTY_INPUT_QUEUE_RECORDS, PTY_INPUT_QUEUE_BYTES)
     }
 
-    fn with_limits(record_limit: usize, byte_limit: usize) -> (Self, Receiver<QueuedInput>) {
+    fn with_limits(record_limit: usize, byte_limit: usize) -> (Self, Receiver<QueuedWrite>) {
         let (sender, receiver) = sync_channel(record_limit);
         (
             Self {
@@ -647,7 +671,17 @@ impl InputQueue {
     }
 
     fn try_send(&self, input: QueuedInput) -> Result<(), InputQueueError> {
-        let length = input.data.len();
+        self.try_send_write(QueuedWrite::Client(input))
+    }
+
+    /// Enqueue sessiond's reply to a terminal query behind everything already queued. Never
+    /// blocks: the caller holds the session lock, which the writer takes after each write.
+    fn try_send_reply(&self, data: Vec<u8>) -> Result<(), InputQueueError> {
+        self.try_send_write(QueuedWrite::Reply(data))
+    }
+
+    fn try_send_write(&self, write: QueuedWrite) -> Result<(), InputQueueError> {
+        let length = write.len();
         if !reserve_pending_bytes(&self.pending_records, 1, self.record_limit) {
             return Err(InputQueueError::Full);
         }
@@ -655,7 +689,7 @@ impl InputQueue {
             self.pending_records.fetch_sub(1, Ordering::AcqRel);
             return Err(InputQueueError::Full);
         }
-        match self.sender.try_send(input) {
+        match self.sender.try_send(write) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.pending_records.fetch_sub(1, Ordering::AcqRel);
@@ -1172,30 +1206,85 @@ impl Sessions {
             input_receiver,
             input_pending_records,
             input_pending_bytes,
+            Some(0),
         );
         self.spawn_reader(session_id, session, 0);
         Ok(pid)
     }
 
+    /// `reply_seq` is the last seq ptyd confirmed for [`SESSIOND_REPLY_IDENTITY`] (0 for a new
+    /// session); `None` disables sessiond's query replies for this session — a rebuild that could
+    /// not read ptyd's cursors cannot know where that sequence stands.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_input_writer(
         self: &Arc<Self>,
         session_id: String,
         session: Weak<Mutex<Session>>,
         mut sink: Box<dyn InputSink>,
-        receiver: Receiver<QueuedInput>,
+        receiver: Receiver<QueuedWrite>,
         pending_records: Arc<AtomicUsize>,
         pending_bytes: Arc<AtomicUsize>,
+        mut reply_seq: Option<u64>,
     ) {
         let sessions = Arc::downgrade(self);
         thread::spawn(move || {
-            for input in receiver {
-                let length = input.data.len();
+            for write in receiver {
+                let length = write.len();
                 // 直到写入结果已经提交/封死，command 才真正离开 bounded budget；否则
                 // writer 写完与 state commit 之间会短暂放进第 257 条 reservation。
                 let _budget = InputBudgetGuard {
                     pending_records: &pending_records,
                     pending_bytes: &pending_bytes,
                     length,
+                };
+                let input = match write {
+                    QueuedWrite::Client(input) => input,
+                    QueuedWrite::Reply(data) => {
+                        // sessiond's own reply: sequenced here, advanced only on a confirmed write.
+                        // No reservation exists for it, so nothing is completed, rejected or acked.
+                        let Some(applied) = reply_seq else {
+                            logln!(
+                                "[sessiond] terminal query reply dropped: replies are disabled for a session rebuilt without input cursors session={session_id}"
+                            );
+                            continue;
+                        };
+                        let seq = applied.saturating_add(1);
+                        match sink.write(&session_id, SESSIOND_REPLY_IDENTITY, seq, &data) {
+                            Ok(()) => reply_seq = Some(seq),
+                            Err(failure) if failure.rejected.is_some() => {
+                                logln!(
+                                    "[sessiond] ptyd rejected a terminal query reply ({}) session={session_id} seq={seq}: {}",
+                                    failure.rejected.as_deref().unwrap_or_default(),
+                                    failure.error
+                                );
+                            }
+                            // Same teardown window as for client input: the slave side is gone.
+                            Err(failure) if is_teardown_write_failure(&failure) => {
+                                logln!(
+                                    "[sessiond] terminal query reply fell into the session teardown window session={session_id} seq={seq}: {}",
+                                    failure.error
+                                );
+                                if let Some(sessions) = sessions.upgrade() {
+                                    let _ = sessions.ptyd.kill(&session_id);
+                                }
+                                break;
+                            }
+                            // The byte stream can no longer be proven intact. Kill the session as
+                            // for client input; there is no client request to fail or report to.
+                            Err(failure) => {
+                                logln!(
+                                    "[sessiond] terminal query reply write failed, killing the session session={session_id} seq={seq} written={}/{length}: {}",
+                                    failure.written,
+                                    failure.error
+                                );
+                                if let Some(sessions) = sessions.upgrade() {
+                                    let _ = sessions.ptyd.kill(&session_id);
+                                }
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                 };
                 let result = sink.write(
                     &session_id,
@@ -1391,6 +1480,7 @@ impl Sessions {
                 input_receiver,
                 pending_records,
                 pending_bytes,
+                Some(0),
             ),
             None => drop(input_receiver),
         }
@@ -1422,6 +1512,14 @@ impl Sessions {
             {
                 let mut locked = session.lock().unwrap();
                 let pending = locked.state.feed(&batch);
+                // Queries no client answers (see `SessionState::feed`): sessiond writes the reply
+                // through the ordered input writer, enqueued under this lock so it stays atomic
+                // with the feed and any attach. Only this live path answers; replayed history never.
+                for reply in locked.state.take_query_replies() {
+                    if let Err(error) = locked.input.try_send_reply(reply) {
+                        logln!("[sessiond] terminal query reply dropped ({error:?}) session={session_id}");
+                    }
+                }
 
                 // A coflux mark moved the command state: push it so the worker's `wait`
                 // and do-script wake immediately (snapshots carry the same state as a
@@ -1754,23 +1852,34 @@ impl Sessions {
         }
         if !replay_ok {
             // ring 读不了：以当前尺寸、当前偏移的空屏接上——client 会看到一次整屏重绘。
+            // The answered-query marker outlives the discarded state: a client resuming below a
+            // query sessiond already answered must still get a snapshot.
+            let answered_query_seq = state.answered_query_seq();
             state = SessionState::new(info.rows, info.cols, self.history_line_limit)
                 .with_mark_secret(label.mark_secret.clone());
             state.set_output_seq(target);
+            state.raise_answered_query_seq(answered_query_seq);
             cursor = target;
         } else if state.rows() != info.rows || state.cols() != info.cols {
             state.resize(info.rows, info.cols);
         }
         let _ = state.take_command_change();
+        // Re-fed history was answered when it was live; never write a reply for it.
+        let _ = state.take_query_replies();
 
         // 4) 输入游标：ptyd 那边才是"什么真正写进了 PTY"的记录。
         //    拿不到游标（旧 ptyd 没有 `cursors`、或读失败）就以 client 自报的 seq 为起点接纳，重复 / 跳号
         //    交给 ptyd 写入时裁决——否则回来的 client 一律被判 `input_seq_gap`，能力缺失就成了死 ack。
         let mut cursors_restored = false;
+        // Last seq ptyd confirmed for sessiond's own query replies; the writer continues from it.
+        let mut reply_cursor = 0;
         if self.ptyd.supports("cursors") {
             match self.ptyd.cursors(&session_id) {
                 Ok(cursors) => {
                     for cursor_info in cursors {
+                        if cursor_info.client_instance_id == SESSIOND_REPLY_IDENTITY {
+                            reply_cursor = cursor_info.seq;
+                        }
                         let data = hex::decode(&cursor_info.data_hex).unwrap_or_default();
                         state.restore_input_cursor(&cursor_info.client_instance_id, cursor_info.seq, data);
                     }
@@ -1782,6 +1891,9 @@ impl Sessions {
         if !cursors_restored {
             state.set_cursorless_rebuild();
         }
+        // Without ptyd's cursors the reply sequence cannot resume: starting below ptyd's cursor
+        // would make every reply a silently skipped duplicate. Such a session answers no queries.
+        let reply_seq = cursors_restored.then_some(reply_cursor);
 
         // 5) 挂上 writer 与订阅，登记为存活 session。
         let input_channel = self
@@ -1815,6 +1927,7 @@ impl Sessions {
             input_receiver,
             pending_records,
             pending_bytes,
+            reply_seq,
         );
         self.spawn_reader(session_id, session, cursor);
         Ok(RecoveredSession::Live { degraded })
@@ -3980,5 +4093,192 @@ mod tests {
             "字节上限应淘汰最旧 tombstone"
         );
         assert_eq!(byte_bounded.entries.back().unwrap().event_id, "exit-00255");
+    }
+
+    const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Records every write; accepts it unless `reject_next` is set, in which case that one write
+    /// is refused by cursor (nothing reaches the PTY) and the flag clears.
+    struct RecordingSink {
+        writes: Arc<Mutex<Vec<(String, u64, Vec<u8>)>>>,
+        reject_next: bool,
+    }
+
+    impl InputSink for RecordingSink {
+        fn write(
+            &mut self,
+            _: &str,
+            client_instance_id: &str,
+            input_seq: u64,
+            data: &[u8],
+        ) -> Result<(), PtyWriteFailure> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((client_instance_id.to_string(), input_seq, data.to_vec()));
+            if std::mem::take(&mut self.reject_next) {
+                return Err(PtyWriteFailure {
+                    written: 0,
+                    error: std::io::Error::other("injected cursor rejection"),
+                    rejected: Some("input_seq_gap".into()),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn input_writer_sequences_replies_from_its_start_and_only_on_confirmed_writes() {
+        let (sessions, _ptyd) = test_sessions(Outbound::new(), "/bin/cat");
+        let spawn = |reply_seq: Option<u64>, reject_next: bool| {
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let (input, receiver) = InputQueue::new();
+            let pending_records = input.pending_records.clone();
+            let pending_bytes = input.pending_bytes.clone();
+            let session = Arc::new(Mutex::new(Session {
+                input,
+                task_id: "task-replies".into(),
+                cwd: String::new(),
+                pid: 0,
+                started_at: 0.0,
+                state: SessionState::new(24, 80, 0),
+                last_checkpoint_seq: 0,
+            }));
+            sessions.spawn_input_writer(
+                "replies".into(),
+                Arc::downgrade(&session),
+                Box::new(RecordingSink {
+                    writes: Arc::clone(&writes),
+                    reject_next,
+                }),
+                receiver,
+                pending_records,
+                pending_bytes,
+                reply_seq,
+            );
+            (session, writes)
+        };
+        let reply = |seq: u64| (SESSIOND_REPLY_IDENTITY.to_string(), seq, DA1_REPLY.to_vec());
+
+        // A recovered session continues after ptyd's cursor (5), interleaved in queue order with
+        // client input, whose admission and commit are unchanged.
+        let (session, writes) = spawn(Some(5), false);
+        let epoch = {
+            let mut locked = session.lock().unwrap();
+            let epoch = locked
+                .state
+                .attach("channel-a", "client-a", 1, None)
+                .unwrap()
+                .holder_epoch;
+            locked.input.try_send_reply(DA1_REPLY.to_vec()).unwrap();
+            assert!(matches!(
+                locked
+                    .state
+                    .admit_input("channel-a", "input-1", epoch, 1, b"ls\r".to_vec())
+                    .unwrap(),
+                InputAdmission::Enqueue { .. }
+            ));
+            locked
+                .input
+                .try_send(QueuedInput {
+                    client_instance_id: "client-a".into(),
+                    input_seq: 1,
+                    data: b"ls\r".to_vec(),
+                })
+                .unwrap();
+            locked.input.try_send_reply(DA1_REPLY.to_vec()).unwrap();
+            epoch
+        };
+        wait_until("three writes", || writes.lock().unwrap().len() == 3);
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![reply(6), ("client-a".to_string(), 1, b"ls\r".to_vec()), reply(7)]
+        );
+        wait_until("the client input commit", || {
+            session
+                .lock()
+                .unwrap()
+                .state
+                .input_applied_through("channel-a", epoch)
+                .unwrap()
+                == 1
+        });
+
+        // A reply ptyd refuses by cursor does not advance the sequence: the next one reuses it.
+        let (session, writes) = spawn(Some(0), true);
+        for _ in 0..3 {
+            session.lock().unwrap().input.try_send_reply(DA1_REPLY.to_vec()).unwrap();
+        }
+        wait_until("three reply writes", || writes.lock().unwrap().len() == 3);
+        assert_eq!(*writes.lock().unwrap(), vec![reply(1), reply(1), reply(2)]);
+
+        // A session rebuilt without ptyd's cursors drops replies instead of guessing a sequence.
+        let (session, writes) = spawn(None, false);
+        session.lock().unwrap().input.try_send_reply(DA1_REPLY.to_vec()).unwrap();
+        wait_until("the dropped reply to leave the queue", || {
+            session.lock().unwrap().input.pending_records.load(Ordering::Acquire) == 0
+        });
+        assert!(writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_session_with_no_holder_answers_da1_through_the_pty() {
+        // The shell starts before any client attaches: nobody but sessiond can answer its query.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            % 1_000_000_000;
+        let script_dir =
+            std::env::temp_dir().join(format!("cfs-da1-{}-{nonce}", std::process::id() % 100_000));
+        std::fs::create_dir(&script_dir).expect("script dir should be creatable");
+        let script = script_dir.join("query.sh");
+        // `cat -v` renders ESC as `^[`, so the reply shows on screen as `^[[?1;2c`.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nstty raw -echo\nprintf '\\033[c'\ndd bs=1 count=7 2>/dev/null | cat -v\nsleep 5\n",
+        )
+        .expect("script should be writable");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("script should be executable");
+        }
+
+        let (sessions, _ptyd) = test_sessions(Outbound::new(), &script.to_string_lossy());
+        let input = sessions.ptyd.input_channel().expect("ptyd input channel");
+        // No holder is attached (`live_session_for_test` would attach `client-a`).
+        let handle = sessions.create_session_for_test("da1-reply", Some(Box::new(PtydInputSink(input))));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let screen = loop {
+            let snapshot = handle.lock().unwrap().state.snapshot();
+            let text = String::from_utf8_lossy(&snapshot).into_owned();
+            if text.contains("?1;2c") || Instant::now() >= deadline {
+                break text;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        let cursors = sessions.ptyd.cursors("da1-reply");
+        let _ = sessions.ptyd.kill("da1-reply");
+        let _ = std::fs::remove_dir_all(&script_dir);
+
+        assert!(
+            screen.contains("^[[?1;2c"),
+            "the program should have read sessiond's DA1 reply on stdin: {screen:?}"
+        );
+        let reply_cursor = cursors
+            .expect("ptyd should list input cursors")
+            .into_iter()
+            .find(|cursor| cursor.client_instance_id == SESSIOND_REPLY_IDENTITY)
+            .map(|cursor| cursor.seq);
+        assert_eq!(reply_cursor, Some(1), "the reply identity's first write is seq 1");
     }
 }
